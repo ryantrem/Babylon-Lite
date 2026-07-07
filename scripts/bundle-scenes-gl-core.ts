@@ -53,6 +53,14 @@ export const liteGlAlias: Record<string, string> = {
     "babylon-lite-gl": resolve(pkgSrc, "index.ts"),
 };
 
+// Third-party WASM/shaping runtimes excluded from the lite-gl bundle-size metric —
+// the WebGL analogue of the lite bundler's `isLiteBundleExternal` (scripts/bundle-scenes-core.ts).
+// `text-shaper` is a ~670 KB upstream vendor shaping blob pulled in only by the default
+// text-layout path; like the WebGPU side counts it as a self-contained vendor chunk excluded
+// from engine-size ceilings, we externalize it here so the measured size reflects only
+// first-party lite-gl engine code (a text consumer ships the shaper once, separately).
+export const liteGlBundleExternals: string[] = ["text-shaper", "text-shaper/*"];
+
 /** rawKB / gzipKB rounding identical to the lite bundler's bytesToRoundedKB. */
 export function bytesToRoundedKB(bytes: number): number {
     return Math.round((bytes / 1024) * 10) / 10;
@@ -62,7 +70,9 @@ export function bytesToRoundedKB(bytes: number): number {
  * esbuild a single entry into a standalone, tree-shaken, minified ESM bundle and
  * return its raw + gzip size. `alias` is supplied for lite-gl scenes (to resolve
  * the package to source); the Babylon reference passes none so `@babylonjs/core`
- * resolves normally from node_modules.
+ * resolves normally from node_modules. When aliased (a lite-gl bundle), the
+ * third-party vendor shaping runtime (`text-shaper`) is externalized so the metric
+ * reflects only first-party lite-gl engine code — mirroring the WebGPU bundler.
  */
 export async function measureBundle(entry: string, alias?: Record<string, string>): Promise<BundleSize> {
     const result = await build({
@@ -74,7 +84,7 @@ export async function measureBundle(entry: string, alias?: Record<string, string
         target: "esnext",
         platform: "browser",
         legalComments: "none",
-        ...(alias ? { alias } : {}),
+        ...(alias ? { alias, external: liteGlBundleExternals } : {}),
         write: false,
         logLevel: "warning",
     });

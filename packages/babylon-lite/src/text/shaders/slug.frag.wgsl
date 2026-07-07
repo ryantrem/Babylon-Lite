@@ -148,5 +148,9 @@ fn main(in: FIn) -> @location(0) vec4<f32> {
   // Coverage gamma: raise edge coverage to 1/coverageGamma so anti-aliased edges composite
   // heavier (mimics gamma-space stem darkening). textU.color.x is 1 by default (no-op).
   coverage = pow(coverage, textU.color.x);
-  return in.vColor * coverage;
+  // Premultiplied-alpha output: scale rgb by the effective alpha (per-glyph alpha ×
+  // layer opacity, carried in vColor.a) so the premult blend composites correctly. At
+  // full opacity vColor.a is 1, so this is a no-op; below 1 it fades rgb toward the
+  // destination instead of leaving it full-bright (which made the opacity slider inert).
+  return vec4<f32>(in.vColor.rgb * in.vColor.a, in.vColor.a) * coverage;
 }

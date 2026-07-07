@@ -86,7 +86,8 @@ fn main(in: VIn) -> VOut {
   out.vBanding = in.slugBand;
   out.vGlyph = in.slugAtlas;
   // Color comes entirely from the per-glyph instance attribute; the uniform contributes
-  // only a whole-draw opacity multiply (textU.color is always (1,1,1,opacity)).
+  // only a whole-draw opacity multiply (textU.color.a; .x carries the coverage-gamma
+  // reciprocal used by the fragment shader).
   out.vColor = vec4<f32>(in.slugColor.rgb, in.slugColor.a * textU.color.a);
   return out;
 }

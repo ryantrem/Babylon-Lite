@@ -163,5 +163,16 @@
         "maxRawKB": 21.5,
         "skipParity": false,
         "skipPerf": false
+    },
+    {
+        "id": 16,
+        "slug": "gl-text",
+        "name": "Scene 16 — TextRenderer (Slug)",
+        "description": "Interactive 2D Slug text demo — the WebGL2 analogue of the WebGPU scene180: no scene, no camera, just a live-editable textarea + rotation/opacity/RGB sliders + canvas drag/wheel driving a TextLayer (loadFont + createDefaultTextData + createTextLayer + createTextRenderer + registerTextRenderer, with updateDefaultTextData/updateTextData for live edits). Not parity-tested: Slug SDF text has no full-Babylon.js equivalent to diff against (skipParity), matching the WebGPU text scenes.",
+        "tags": ["text"],
+        "maxMad": 3.0,
+        "maxRawKB": 43,
+        "skipParity": true,
+        "skipPerf": true
     }
 ]
