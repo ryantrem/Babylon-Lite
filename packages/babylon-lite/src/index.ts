@@ -15,6 +15,8 @@ export {
     VERSION,
 } from "./engine/engine.js";
 export type { EngineContext, EngineOptions, RenderCanvas } from "./engine/engine.js";
+export { createNullEngine, stepScene, runHeadlessSteps } from "./engine/null-engine.js";
+export type { NullEngineOptions } from "./engine/null-engine.js";
 export { setRenderTaskGpuTimingEnabled, isRenderTaskGpuTimingSupported, getRenderTaskGpuTimings } from "./engine/gpu-task-timing.js";
 export type { RenderTaskGpuTiming, RenderTaskGpuTimings, RenderTaskGpuTimingStatus } from "./engine/gpu-task-timing.js";
 export { createSurface, disposeSurface, resizeSurface, setSurfaceSize } from "./engine/surface.js";
@@ -172,6 +174,8 @@ export {
     resizeMeshGeometry,
     invalidateRenderBundles,
 } from "./mesh/mesh-factories.js";
+export { createBoxData } from "./mesh/create-box.js";
+export type { BoxData } from "./mesh/create-box.js";
 export { createSphereData } from "./mesh/create-sphere.js";
 export type { SphereMeshData } from "./mesh/create-sphere.js";
 export { createCylinderData } from "./mesh/create-cylinder.js";
@@ -188,6 +192,8 @@ export type { Csg2Solid } from "./mesh/csg2.js";
 // ─── Textures ────────────────────────────────────────────────────────
 export { createSolidTexture2D } from "./texture/solid-texture.js";
 export { createTexture2DFromPixels, updateTexture2DFromPixels, createRenderTexture2D } from "./texture/pixels-texture.js";
+export { createTexture3DFromPixels } from "./texture/pixels-texture.js";
+export type { Texture3D, PixelsTexture3DOptions } from "./texture/pixels-texture.js";
 export type { PixelsTexture2DOptions, RenderTexture2DOptions } from "./texture/pixels-texture.js";
 export { loadKtxTexture2D } from "./texture/ktx-loader.js";
 export { loadBasisTexture2D } from "./texture/basis-loader.js";
@@ -344,7 +350,7 @@ export { quatFromRotationMatrix } from "./math/quat-from-rotation-matrix.js";
 export { quatFromLookDirectionRH } from "./math/quat-from-look-direction-rh.js";
 export { mat4Decompose } from "./math/mat4-decompose.js";
 export type { DecomposedTransform } from "./math/mat4-decompose.js";
-export type { Vec3, Vec3Tuple, Vec4, Color3, Color4, Mat4, Quat } from "./math/types.js";
+export type { Vec2, Vec3, Vec3Tuple, Vec4, Color3, Color4, Mat4, Quat } from "./math/types.js";
 export type { Aabb } from "./math/aabb.js";
 export { computeAabb } from "./math/aabb.js";
 export type { GltfMetadata, LiteMetadata } from "./metadata.js";
@@ -588,6 +594,17 @@ export {
     disposeSpriteRenderer,
 } from "./sprite/sprite-renderer.js";
 
+// ─── Node Particles (NPE) ────────────────────────────────────────────
+export type { Particle } from "./particle/particle.js";
+export type { ParticleSystem } from "./particle/particle-system.js";
+export { animateParticleSystem, startParticleSystem, stopParticleSystem } from "./particle/particle-system.js";
+export type { NodeParticleSet } from "./particle/node/npe-build.js";
+export type { ParseNodeParticleOptions } from "./particle/node/node-particle.js";
+export { parseNodeParticleSetFromSnippet } from "./particle/node/node-particle.js";
+export type { RegisterNodeParticleOptions } from "./particle/particle-scene.js";
+export { registerNodeParticleSet } from "./particle/particle-scene.js";
+export { createParticleBillboard, syncParticleBillboard } from "./particle/particle-billboard.js";
+
 // ─── Text ────────────────────────────────────────────────────────────
 export type { Font } from "./text/font.js";
 export { loadFont, createFontFromBuffer } from "./text/font.js";
@@ -625,6 +642,8 @@ export {
     getPhysicsGravity,
     setPhysicsTimestep,
     getPhysicsTimestep,
+    setPhysicsTimestepMs,
+    getPhysicsTimestepMs,
     onPhysicsAfterStep,
     setPhysicsVelocityLimits,
     getPhysicsVelocityLimits,
@@ -689,6 +708,7 @@ export {
     createNavMeshFromSources,
     createDebugNavMeshGeometry,
     getClosestPoint,
+    findClosestPointWithin,
     computePath,
     createNavCrowd,
     addAgent,
