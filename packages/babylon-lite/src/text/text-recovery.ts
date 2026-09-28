@@ -41,6 +41,7 @@ function rebuildTextRendererGpu(renderer: TextRenderer): void {
         lg._uploadedDataVersion = -1;
         lg._uploadedViewportW = 0;
         lg._uploadedViewportH = 0;
+        lg._colorUploaded = false;
         lg._lastMvpInputs.fill(0);
         lg._mvpUploaded = false;
         lg._renderBundle = null;

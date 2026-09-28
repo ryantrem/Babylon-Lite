@@ -150,6 +150,9 @@ interface LayerGpu {
     _uploadedDataVersion: number;
     _uploadedViewportW: number;
     _uploadedViewportH: number;
+    /** Last float32 values uploaded to the color UBO slice (gamma reciprocal, 1, 1, opacity). */
+    _uploadedColor: Float32Array;
+    _colorUploaded: boolean;
     /** Snapshot of (posX, posY, rot, scale, W, H) to skip mvp upload when unchanged. */
     _lastMvpInputs: Float32Array;
     _mvpUploaded: boolean;
@@ -216,6 +219,8 @@ function ensureLayerGpu(rr: TextRenderer, layer: TextLayer): LayerGpu {
         _uploadedDataVersion: -1,
         _uploadedViewportW: 0,
         _uploadedViewportH: 0,
+        _uploadedColor: new Float32Array([0, 1, 1, 0]),
+        _colorUploaded: false,
         _lastMvpInputs: new Float32Array(6),
         _mvpUploaded: false,
         _renderBundle: null,
@@ -330,8 +335,15 @@ function uploadLayer(rr: TextRenderer, lg: LayerGpu, bindGroupLayout: GPUBindGro
     // RGB does not tint per-glyph color) carries the coverage-gamma reciprocal applied to
     // anti-aliased edge coverage in the fragment shader. G/B stay 1.
     const gammaInv = layer.coverageGamma > 0 ? 1 / layer.coverageGamma : 1;
-    const col = new Float32Array([gammaInv, 1, 1, layer.opacity]);
-    device.queue.writeBuffer(lg._textU, 80, col.buffer as ArrayBuffer, col.byteOffset, 16);
+    const color = lg._uploadedColor;
+    const uploadedGammaInv = Math.fround(gammaInv);
+    const uploadedOpacity = Math.fround(layer.opacity);
+    if (!lg._colorUploaded || color[0] !== uploadedGammaInv || color[3] !== uploadedOpacity) {
+        color[0] = uploadedGammaInv;
+        color[3] = uploadedOpacity;
+        device.queue.writeBuffer(lg._textU, 80, color.buffer as ArrayBuffer, color.byteOffset, 16);
+        lg._colorUploaded = true;
+    }
 }
 
 function disposeLayerGpu(lg: LayerGpu): void {

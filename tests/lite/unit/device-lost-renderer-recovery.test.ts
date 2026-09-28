@@ -27,6 +27,7 @@ interface FakeTexture extends GPUTexture {
 
 interface BufferWrite {
     readonly label: string;
+    readonly offset: number;
     readonly firstFloat: number;
 }
 
@@ -45,8 +46,8 @@ function makeDevice(): FakeDeviceProbe {
         features: new Set<GPUFeatureName>(),
         lost: new Promise<GPUDeviceLostInfo>(() => undefined),
         queue: {
-            writeBuffer(buffer: FakeBuffer, _offset: number, data: ArrayBuffer, dataOffset = 0): void {
-                bufferWrites.push({ label: buffer._label, firstFloat: new Float32Array(data, dataOffset, 1)[0] ?? 0 });
+            writeBuffer(buffer: FakeBuffer, offset: number, data: ArrayBuffer, dataOffset = 0): void {
+                bufferWrites.push({ label: buffer._label, offset, firstFloat: new Float32Array(data, dataOffset, 1)[0] ?? 0 });
             },
             writeTexture(_destination: GPUTexelCopyTextureInfo, data: Uint8Array): void {
                 textureWrites.push(new Uint8Array(data));
@@ -238,6 +239,7 @@ describe("TextRenderer device-lost recovery", () => {
         expect(layer.coverageGamma).toBe(2);
         expect(renderer._clear).toBe(false);
         expect(other.touched).toBe(false);
+        expect(newProbe.bufferWrites).toContainEqual({ label: "text-layer-ubo", offset: 80, firstFloat: 0.5 });
     });
 
     it("leaves the per-draw-group bind-group cache consistent when the group list shrank before recovery", async () => {
