@@ -18,6 +18,18 @@ export default defineConfig({
             {
                 extends: true,
                 test: {
+                    name: "compute-text-gpu",
+                    include: ["tests/lite/compute/**/*.test.ts"],
+                    setupFiles: ["./tests/lite/compute/setup-native.ts"],
+                    fileParallelism: false,
+                    maxWorkers: 1,
+                    testTimeout: 120_000,
+                    hookTimeout: 120_000,
+                },
+            },
+            {
+                extends: true,
+                test: {
                     name: "unit",
                     include: ["tests/lite/unit/**/*.test.ts"],
                 },

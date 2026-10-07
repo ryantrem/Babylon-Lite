@@ -17,6 +17,8 @@
  */
 
 import type { CurveSetId, GlyphStorage, GlyphStorageCurveSet } from "./glyph-storage.js";
+import { createEmptyTextData } from "./text-data-state.js";
+import { TEXT_INSTANCE_FLOATS, TEXT_STYLE_FLOATS } from "./text-buffer-layout.js";
 
 declare const textDataBrand: unique symbol;
 
@@ -184,16 +186,14 @@ export type RunRecord = {
  *  glyph-invariant — the atlas's `GlyphMetadata` table, indexed by the glyph half — or shared
  *  by every glyph drawn at the same color and scale — this TextData's style palette, indexed
  *  by the style half. Neither is copied per instance. */
-export const TEXT_INSTANCE_FLOATS = 3;
-export const TEXT_INSTANCE_BYTES = TEXT_INSTANCE_FLOATS * 4;
+export { TEXT_INSTANCE_FLOATS, TEXT_INSTANCE_BYTES } from "./text-buffer-layout.js";
 
 /** Floats per style-palette entry, matching the WGSL `TextStyle` struct: a `vec4<f32>` color
  *  followed by a `vec4<f32>` of params whose `.x` carries the run's `invScale` and whose `.y`
  *  carries the optional per-run style parameter (see {@link TextStyleSeam}; 0 when no styling
  *  feature is installed). The rest is reserved padding that keeps the struct naturally
  *  16-byte aligned. */
-export const TEXT_STYLE_FLOATS = 8;
-export const TEXT_STYLE_BYTES = TEXT_STYLE_FLOATS * 4;
+export { TEXT_STYLE_FLOATS, TEXT_STYLE_BYTES } from "./text-buffer-layout.js";
 
 /** Value of the packed word marking a slot as dead (skipped by the vertex shader). Both halves
  *  are all-ones, which `MAX_PACKED_INDEX` keeps unreachable for a real (glyph, style) pair. */
@@ -883,26 +883,7 @@ function applyReplaceRun(data: TextData, prevRef: GlyphRun | number, newRun: Gly
 /** Create a TextData bound to `storage`. If `runs` is omitted the TextData starts empty;
  *  runs can be appended later via `updateTextData({ update: "addRun", … })`. */
 export function createTextData(storage: GlyphStorage, runs?: readonly GlyphRun[]): TextData {
-    const runsArray: GlyphRun[] = [];
-    const instances = new Float32Array(TEXT_INSTANCE_FLOATS);
-    const data = {
-        runs: runsArray,
-        _runs: runsArray,
-        _groups: [],
-        _runRecords: new Map(),
-        _instances: instances,
-        _instancesU32: new Uint32Array(instances.buffer),
-        _instanceCount: 0,
-        _styles: new Float32Array(TEXT_STYLE_FLOATS),
-        _styleCount: 0,
-        _freeStyleSlots: [],
-        _styleVersion: 1,
-        _storage: storage,
-        _version: 1,
-        _layoutVersion: 0,
-        _dirtyStart: 0,
-        _dirtyEnd: 0,
-    } as unknown as TextData;
+    const data = createEmptyTextData(storage);
     if (runs && runs.length > 0) {
         applyReset(data, runs, storage);
     }

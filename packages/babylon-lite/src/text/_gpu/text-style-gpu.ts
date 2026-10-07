@@ -3,8 +3,9 @@
  *  instance buffer in each renderer's per-block GPU record because, like that buffer, it mirrors
  *  CPU state owned by the TextData rather than by the shared atlas. */
 
-import { TEXT_STYLE_BYTES } from "../text-data.js";
+import { TEXT_STYLE_BYTES } from "../text-buffer-layout.js";
 import type { TextData } from "../text-data.js";
+import { createStyleBuffer } from "./text-style-buffer.js";
 
 /** @internal Style-palette GPU state, embedded in each renderer's per-block GPU record. */
 export interface TextStyleGpu {
@@ -12,14 +13,6 @@ export interface TextStyleGpu {
     _styleBuf: GPUBuffer;
     /** @internal */
     _uploadedStyleVersion: number;
-}
-
-export function createStyleBuffer(device: GPUDevice, entries: number): GPUBuffer {
-    return device.createBuffer({
-        label: "text-styles",
-        size: entries * TEXT_STYLE_BYTES,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
 }
 
 /** Grow the style buffer to fit `data`'s palette and upload it when stale. Returns true when the
@@ -31,7 +24,7 @@ export function ensureStyleGpu(device: GPUDevice, data: TextData, gpu: TextStyle
     let recreated = false;
     if (needed * TEXT_STYLE_BYTES > gpu._styleBuf.size) {
         gpu._styleBuf.destroy();
-        gpu._styleBuf = createStyleBuffer(device, data._styles.byteLength / TEXT_STYLE_BYTES);
+        gpu._styleBuf = createStyleBuffer(device, data._styles.byteLength);
         gpu._uploadedStyleVersion = -1;
         recreated = true;
     }

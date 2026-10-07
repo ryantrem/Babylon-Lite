@@ -35,6 +35,92 @@ beforeAll(() => {
 }, 300_000);
 
 describe("build/index.d.ts", () => {
+    it("exposes distinct pure-state text layers with a common rendering and placement API", () => {
+        const probePath = resolve(BUILD_DIR, "text-layer-api.probe.ts");
+        try {
+            writeFileSync(
+                probePath,
+                `import {
+    createTextLayer, createComputeTextLayer, createTextRenderer, addTextRendererLayer,
+    removeTextRendererLayer, setTextLayerPosition,
+    type TextData, type ComputeTextData, type TextLayer, type ComputeTextLayer,
+    type TextRendererLayer, type TextLayerPlacement, type SurfaceContext,
+} from "./index.js";
+declare const cpu: TextData;
+declare const resident: ComputeTextData;
+declare const surface: SurfaceContext;
+const a: TextLayer = createTextLayer(cpu);
+const b: ComputeTextLayer = createComputeTextLayer(resident);
+const cpuData: TextData = a.data;
+const residentData: ComputeTextData = b.data;
+const layers: readonly TextRendererLayer[] = [a, b];
+const renderer = createTextRenderer(surface, { layers });
+addTextRendererLayer(renderer, a);
+addTextRendererLayer(renderer, b);
+removeTextRendererLayer(renderer, a);
+removeTextRendererLayer(renderer, b);
+for (const layer of layers) {
+    const placement: TextLayerPlacement = layer;
+    setTextLayerPosition(placement, 10, 20);
+    layer.positionPx.x = 30;
+    layer.rotationRad = 1; layer.scale = 2; layer.order = 3;
+    layer.opacity = 0.5; layer.coverageGamma = 2; layer.visible = false;
+    // @ts-expect-error Draw protocols must not leak into trimmed declarations.
+    layer._createDraw;
+    // @ts-expect-error Uniform handles must not leak into trimmed declarations.
+    layer._recorderUniform;
+    // @ts-expect-error CPU external overrides have been removed.
+    layer._externalDraw;
+}
+// @ts-expect-error Resident data is not a CPU TextData.
+const wrongCpu: TextData = b.data;
+// @ts-expect-error CPU data is not a resident ComputeTextData.
+const wrongResident: ComputeTextData = a.data;
+// @ts-expect-error The CPU factory never accepts resident data.
+createTextLayer(resident);
+// @ts-expect-error The resident factory never accepts CPU data.
+createComputeTextLayer(cpu);
+// @ts-expect-error Data ownership is immutable.
+b.data = resident;
+// @ts-expect-error Data GPU handles are internal.
+resident._instances;
+// @ts-expect-error Data loss callbacks are internal.
+resident._onDeviceLost;
+void [cpuData, residentData, wrongCpu, wrongResident];
+`
+            );
+            const result = spawnSync(
+                NODE,
+                [
+                    TSC_JS,
+                    "--ignoreConfig",
+                    "--noEmit",
+                    "--strict",
+                    "--target",
+                    "es2022",
+                    "--module",
+                    "esnext",
+                    "--moduleResolution",
+                    "bundler",
+                    "--lib",
+                    "es2022,dom,dom.iterable",
+                    "--types",
+                    "webxr",
+                    probePath,
+                ],
+                { cwd: PACKAGE_DIR, encoding: "utf-8" }
+            );
+            expect(result.status, `${result.stdout ?? ""}${result.stderr ?? ""}`).toBe(0);
+            const dts = readFileSync(DTS_PATH, "utf8");
+            for (const name of ["TextLayer", "ComputeTextLayer", "TextLayerPlacement"]) {
+                const declaration = dts.match(new RegExp(`(?:export )?(?:declare )?interface ${name}(?: extends [^{]+)? [{][^}]*[}]`, "s"))?.[0];
+                expect(declaration).toBeDefined();
+                expect(declaration).not.toMatch(/GPUBuffer|GPUTexture|GPUBindGroup|_createDraw|_record/);
+            }
+        } finally {
+            rmSync(probePath, { force: true });
+        }
+    });
     it("exposes conditional material rebuild completion", () => {
         const probePath = resolve(BUILD_DIR, "material-rebuild-api.probe.ts");
         try {

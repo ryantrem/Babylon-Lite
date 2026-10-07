@@ -16,9 +16,11 @@ import type { Mat4, Mat4Storage, Vec3 } from "../math/types.js";
 import { multiplyMat4IntoBuffer } from "../math/multiply-mat4-into-buffer.js";
 import { getViewProjectionMatrix, getEffectiveAspectRatio, _cameraChangeKey } from "../camera/camera.js";
 import type { TextData } from "./text-data.js";
-import { TEXT_INSTANCE_BYTES } from "./text-data.js";
+import { TEXT_INSTANCE_BYTES, TEXT_STYLE_BYTES } from "./text-buffer-layout.js";
 import { ensureSharedAtlasGpu } from "./_gpu/text-textures.js";
-import { createStyleBuffer, ensureStyleGpu } from "./_gpu/text-style-gpu.js";
+import { ensureStyleGpu } from "./_gpu/text-style-gpu.js";
+import { createStyleBuffer } from "./_gpu/text-style-buffer.js";
+import { createTextBindGroup } from "./_gpu/text-bind-group.js";
 import { getOrCreateTextPipeline, getTextPipelineCache, _textVariantResolver } from "./_gpu/text-pipeline.js";
 
 /** Initial transform and draw options for a scene-attached text renderable. */
@@ -151,7 +153,7 @@ function ensureGpu(
                     usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
                 }),
                 _instanceCap: cap,
-                _styleBuf: createStyleBuffer(device, 1),
+                _styleBuf: createStyleBuffer(device, TEXT_STYLE_BYTES),
                 _uploadedStyleVersion: -1,
                 _pipeline: pipeline,
                 _variantPipeline: variantPipeline,
@@ -246,17 +248,7 @@ function updateTextRenderable(r: TextRenderable, engine: EngineContext, gpu: Tex
     for (const g of data._groups) {
         const { _rebuilt: rebuilt, _gpu: atlasGpu } = ensureSharedAtlasGpu(device, g._curveSet._atlas);
         if (rebuilt || styleRecreated || !g._bindGroup || g._bindGroupVersion !== atlasGpu._uploadedVersion) {
-            g._bindGroup = device.createBindGroup({
-                label: "text-bg0-" + g._curveSetId,
-                layout: bindGroupLayout,
-                entries: [
-                    { binding: 0, resource: { buffer: gpu._textU } },
-                    { binding: 1, resource: atlasGpu._curveTex.createView() },
-                    { binding: 2, resource: atlasGpu._bandTex.createView() },
-                    { binding: 3, resource: { buffer: atlasGpu._metaBuf } },
-                    { binding: 4, resource: { buffer: gpu._styleBuf } },
-                ],
-            });
+            g._bindGroup = createTextBindGroup(device, bindGroupLayout, gpu._textU, atlasGpu, gpu._styleBuf, "text-bg0-" + g._curveSetId);
             g._bindGroupVersion = atlasGpu._uploadedVersion;
         }
     }

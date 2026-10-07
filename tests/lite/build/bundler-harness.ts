@@ -12,11 +12,12 @@
  * "import every module" enumeration.
  */
 import { spawnSync } from "child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "path";
 import { rollup, type Plugin as RollupPlugin } from "rollup";
 import { minify as terserMinify } from "terser";
+import { build as viteBuild } from "vite";
 
 const ROOT = resolve(__dirname, "../../..");
 export const PACKAGE_DIR = resolve(ROOT, "packages/babylon-lite");
@@ -139,7 +140,8 @@ const _tempDirs: string[] = [];
 
 /** Create a temp dir with an entry file containing `source`; returns the entry path. */
 export function makeTempEntry(source: string): string {
-    const dir = mkdtempSync(join(tmpdir(), "lite-bundler-"));
+    const dir = join(ROOT, "node_modules/.cache", `lite-bundler-${randomUUID()}`);
+    mkdirSync(dir, { recursive: true });
     _tempDirs.push(dir);
     const entry = join(dir, "entry.mjs");
     writeFileSync(entry, source);
@@ -175,6 +177,10 @@ export interface BundleResult {
     code: string;
     /** Rollup/Vite chunks, when the selected harness exposes them. */
     chunks?: { code: string; isEntry: boolean }[];
+    /** Modules with emitted runtime code, not merely parsed inputs. */
+    modules?: { id: string; renderedLength: number; renderedExports: string[] }[];
+    /** External imports that actually survive emission. */
+    imports?: string[];
 }
 
 function classify(warnings: string[]): string[] {
@@ -266,6 +272,8 @@ export async function runRollup(opts: RollupOpts): Promise<BundleResult> {
     const errors: string[] = [];
     let code = "";
     const chunks: { code: string; isEntry: boolean }[] = [];
+    const modules: NonNullable<BundleResult["modules"]> = [];
+    const imports: string[] = [];
     let bundle: Awaited<ReturnType<typeof rollup>> | null = null;
     try {
         const plugins: RollupPlugin[] = opts.minify
@@ -282,7 +290,11 @@ export async function runRollup(opts: RollupOpts): Promise<BundleResult> {
         bundle = await rollup({
             input: entry,
             external: (id: string) => isExternalRequest(id),
-            treeshake: opts.forceModuleSideEffects ? { moduleSideEffects: (_id: string, external: boolean) => !external, propertyReadSideEffects: false } : true,
+            treeshake: {
+                // Vendors are externalized for first-party measurements, not imported for side effects.
+                moduleSideEffects: (_id: string, external: boolean) => !external,
+                ...(opts.forceModuleSideEffects ? { propertyReadSideEffects: false } : {}),
+            },
             onwarn: (warning) => warnings.push(`[${warning.code}] ${warning.message}`),
             plugins,
         });
@@ -296,6 +308,12 @@ export async function runRollup(opts: RollupOpts): Promise<BundleResult> {
                 const normalizedCode = normalizeGeneratedRegions(chunk.code);
                 code += normalizedCode + "\n";
                 chunks.push({ code: normalizedCode, isEntry: chunk.isEntry === true });
+                modules.push(
+                    ...Object.entries(chunk.modules)
+                        .filter(([, module]) => module.renderedLength > 0)
+                        .map(([id, module]) => ({ id, renderedLength: module.renderedLength, renderedExports: module.renderedExports }))
+                );
+                imports.push(...chunk.imports);
             }
         }
     } catch (e) {
@@ -303,7 +321,49 @@ export async function runRollup(opts: RollupOpts): Promise<BundleResult> {
     } finally {
         await bundle?.close();
     }
-    return { errors, warnings, significantWarnings: classify(warnings), code, chunks };
+    return { errors, warnings, significantWarnings: classify(warnings), code, chunks, modules, imports };
+}
+
+/** Bundle the shipped root with Vite's actual package resolver and vendor code included.
+ *  Complements first-party Rollup measurements: no external-vendor side-effect assumptions. */
+export async function runVite(entrySource: string): Promise<BundleResult> {
+    const entry = makeTempEntry(entrySource);
+    const result: BundleResult = { errors: [], warnings: [], significantWarnings: [], code: "", chunks: [], modules: [], imports: [] };
+    try {
+        const built = await viteBuild({
+            configFile: false,
+            publicDir: false,
+            logLevel: "silent",
+            build: {
+                write: false,
+                minify: false,
+                sourcemap: false,
+                modulePreload: false,
+                rollupOptions: { input: entry },
+            },
+        });
+        for (const output of Array.isArray(built) ? built : [built]) {
+            if (!("output" in output)) {
+                throw new Error("Vite consumer build unexpectedly returned a watcher");
+            }
+            for (const chunk of output.output) {
+                if (chunk.type !== "chunk") {
+                    continue;
+                }
+                result.code += chunk.code + "\n";
+                result.chunks!.push({ code: chunk.code, isEntry: chunk.isEntry });
+                result.imports!.push(...chunk.imports);
+                result.modules!.push(
+                    ...Object.entries(chunk.modules)
+                        .filter(([, module]) => module.renderedLength > 0)
+                        .map(([id, module]) => ({ id, renderedLength: module.renderedLength, renderedExports: module.renderedExports }))
+                );
+            }
+        }
+    } catch (error) {
+        result.errors.push(error instanceof Error ? error.message : String(error));
+    }
+    return result;
 }
 
 /** The recognisable sentinel content, for asserting "nothing but the sentinel survived" regardless

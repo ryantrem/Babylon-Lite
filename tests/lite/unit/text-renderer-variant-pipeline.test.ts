@@ -16,8 +16,10 @@ import type { GlyphCurves } from "../../../packages/babylon-lite/src/text/glyph-
 import { createGlyphStorage } from "../../../packages/babylon-lite/src/text/glyph-storage";
 import type { GlyphRun } from "../../../packages/babylon-lite/src/text/text-data";
 import { createTextData } from "../../../packages/babylon-lite/src/text/text-data";
-import type { TextLayer, TextRenderer } from "../../../packages/babylon-lite/src/text/text-renderer";
-import { createTextLayer, createTextRenderer } from "../../../packages/babylon-lite/src/text/text-renderer";
+import type { TextRenderer } from "../../../packages/babylon-lite/src/text/text-renderer";
+import type { TextLayer } from "../../../packages/babylon-lite/src/text/text-layer-cpu";
+import { createTextLayer } from "../../../packages/babylon-lite/src/text/text-layer-cpu";
+import { createTextRenderer } from "../../../packages/babylon-lite/src/text/text-renderer";
 import { setFontWeightOffset } from "../../../packages/babylon-lite/src/text/set-font-weight-offset";
 import type { SurfaceContext } from "../../../packages/babylon-lite/src/engine/surface";
 import type { EngineContext } from "../../../packages/babylon-lite/src/engine/engine";

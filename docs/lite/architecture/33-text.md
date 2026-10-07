@@ -151,7 +151,7 @@ replacement color (no blend), and per-sample depth writes. Standalone
 `TextRenderer` layers draw to a 1x swapchain and retain ordinary straight-alpha
 blending.
 
-### Tier 3b — `TextRenderer` + `TextLayer` (standalone 2D)
+### Tier 3b — `TextRenderer` + CPU/resident layers (standalone 2D)
 
 ```typescript
 export interface TextLayerOptions {
@@ -160,28 +160,37 @@ export interface TextLayerOptions {
     readonly scale?: number; // uniform
     readonly order?: number; // within renderer
     readonly opacity?: number;
+    readonly coverageGamma?: number;
     readonly visible?: boolean;
 }
-export interface TextLayer {
-    readonly data: TextData;
+export interface TextLayerPlacement {
     positionPx: { x: number; y: number };
     rotationRad: number;
     scale: number;
     order: number;
     opacity: number;
+    coverageGamma: number;
     visible: boolean;
 }
+export interface TextLayer extends TextLayerPlacement {
+    readonly data: TextData;
+}
+export interface ComputeTextLayer extends TextLayerPlacement {
+    readonly data: ComputeTextData;
+}
+export type TextRendererLayer = TextLayer | ComputeTextLayer;
 export function createTextLayer(data: TextData, options?: TextLayerOptions): TextLayer;
-export function setTextLayerPosition(layer: TextLayer, x: number, y: number): void;
+export function createComputeTextLayer(data: ComputeTextData, options?: TextLayerOptions): ComputeTextLayer;
+export function setTextLayerPosition(layer: TextLayerPlacement, x: number, y: number): void;
 
 export interface TextRendererOptions {
-    layers: readonly TextLayer[];
+    layers: readonly TextRendererLayer[];
     clear?: boolean; // default true
     clearValue?: GPUColorDict;
 }
-export function createTextRenderer(engine: EngineContext, opts: TextRendererOptions): TextRenderer;
-export function addTextRendererLayer(tr: TextRenderer, layer: TextLayer): void;
-export function removeTextRendererLayer(tr: TextRenderer, layer: TextLayer): boolean;
+export function createTextRenderer(surface: SurfaceContext, opts: TextRendererOptions): TextRenderer;
+export function addTextRendererLayer(tr: TextRenderer, layer: TextRendererLayer): void;
+export function removeTextRendererLayer(tr: TextRenderer, layer: TextRendererLayer): boolean;
 export function registerTextRenderer(tr: TextRenderer): void;
 export function unregisterTextRenderer(tr: TextRenderer): void;
 export function disposeTextRenderer(tr: TextRenderer): void;
@@ -189,7 +198,7 @@ export function disposeTextRenderer(tr: TextRenderer): void;
 
 `TextRenderer` is a standalone `RenderingContext` (sibling of `SpriteRenderer`):
 no scene, no camera. It opens its own swapchain render pass and draws each
-visible `TextLayer` in `order` order. The MVP is a pure CPU-built 2D affine
+visible CPU or resident layer in `order` order. The MVP is a pure CPU-built 2D affine
 (layer position/rotation/scale + ortho projection) — there is no view matrix.
 Layers can be added/removed at any time; their pixel position/rotation/scale/
 opacity may be mutated directly between frames.
@@ -479,14 +488,14 @@ only the packed atlas + instance buffer.
 called by the scene's frame graph; `update` does:
 
 0. **Late-installed variant refresh.** `bind` resolves both pipelines, but scene
-   bindings are built once — not per frame — so a styling feature enabled *after*
+   bindings are built once — not per frame — so a styling feature enabled _after_
    a binding exists would otherwise leave its weighted groups drawing with the base
    pipeline until an unrelated scene mutation rebuilt the binding. The binding's
    `update` therefore re-resolves the variant pipeline exactly once, when
    `gpu._variantPipeline === gpu._pipeline && _textVariantResolver` — an identity
    comparison that a base consumer fails on its first term and that stops matching
    after the single refresh, so no cache key is ever built per frame. The
-   re-resolution reuses the *bind-time* target arguments captured in the binding
+   re-resolution reuses the _bind-time_ target arguments captured in the binding
    closure (`colorFormat`, `sampleCount`, `depthStencilFormat`, `depthWrite`, and the
    renderable itself as the alpha-to-coverage owner), so the refreshed variant is the
    exact sibling of the base pipeline the binding already declares.
@@ -530,6 +539,13 @@ The MVP for a 2D layer is built directly:
 
 A 6-float `lastMvpInputs` cache (px, py, rot, scale, W, H) gates the MVP
 writeBuffer so a static layer pays zero per frame after the first.
+The color vec4 at UBO offset 80 is uploaded once per GPU buffer, then only when
+its effective coverage-gamma reciprocal or opacity changes. Compare the
+computed values with `Object.is` (including signed zero and NaN); the other
+two channels remain 1. Mutations while hidden are picked up on the next
+visible update. A removed/re-added layer gets a new buffer and an initial
+upload; device-lost recovery replaces the buffer and invalidates this cache.
+Cache values advance only after `queue.writeBuffer` succeeds.
 
 The renderer's pipeline is cached at `(swapchain format, sampleCount=1, no
 depth, depthWrite=false, flipY=false)`; depth-less means depth-hosted text-on-3D
@@ -619,23 +635,26 @@ Unit tests live in `tests/lite/unit/`:
 
 ## File inventory
 
-| File                              | Responsibility                                                                                                                                                                                                                                                                                                         |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/text/font.ts`                | `Font` (branded type) + `loadFont` + `createFontFromBuffer`; text-shaper boundary.                                                                                                                                                                                                                                     |
-| `src/text/glyph-extraction.ts`    | `extractGlyphCurves` + `cubicToQuadratics`; default text-shaper-backed glyph path extraction. Outline value types live in `glyph-storage.ts`.                                                                                                                                                                          |
-| `src/text/glyph-storage.ts`       | `GlyphStorage` (branded) + `CurveSetId` + outline value types (`QuadCurve`, `GlyphBounds`, `GlyphCurves`) + the supporting `SharedAtlas` / `AtlasSlot` / `GlyphBands` types and their packers (`packAppendGlyph`, `buildGlyphBands`). Public API: `createGlyphStorage` / `updateGlyphStorage` / `disposeGlyphStorage`. |
-| `src/text/layout.ts`              | `TextLayoutOptions` + `layoutText` — default LTR + word-wrap + align layout via `text-shaper.shape`.                                                                                                                                                                                                                   |
-| `src/text/text-data.ts`           | `TextData` (branded) + `GlyphRun` + `PlacedGlyph` + `TextDataUpdate` + slot-allocator types. Public API: `createTextData` / `updateTextData` / `disposeTextData` and the per-instance allocator (addRun / removeRun / replaceRun / reset+compaction).                                                                  |
-| `src/text/default-text-data.ts`   | `DefaultTextData` (branded) + `createDefaultTextData` / `updateDefaultTextData` / `disposeDefaultTextData`; convenience layer composing layout + curve extraction + a private `GlyphStorage`.                                                                                                                          |
-| `src/text/text-renderable.ts`     | `TextRenderable` + `createTextRenderable` / `addTextRenderable` / `disposeTextRenderable`; 3D `Renderable` implementation.                                                                                                                                                                                             |
-| `src/text/text-renderer.ts`       | `TextLayer` (2D pixel-space placement record) + `TextRenderer` (standalone `RenderingContext`) + their factories and the swapchain draw pass.                                                                                                                                                                          |
-| `src/text/_gpu/text-textures.ts`  | `ensureSharedAtlasGpu`; lazy `rgba32float` texture create + version-gated upload + capacity grow. (Atlas teardown is inlined in `disposeGlyphStorage` to avoid a circular import.)                                                                                                                                     |
-| `src/text/_gpu/text-pipeline.ts`  | `getOrCreateTextPipeline` / `getTextPipelineCache` / `clearTextPipelineCache` + the `TextPipelineVariant` seam; per-device bind group layout + base WGSL modules + per-target-key pipeline cache. Knows nothing about shader fragments and composes no WGSL.                                                            |
-| `src/text/shaders/slug-shader.ts` | **The single authoritative copy of the Slug WGSL.** Inline TypeScript template + `composeSlugShader(fragment)` — a deterministic builder that interpolates an optional `TextShaderFragment` into the base vertex/fragment source at named slots. Called with `null` for the base variant. |
-| `src/text/shaders/text-shader-fragment.ts` | Type-only module: `TextShaderFragment`, `TextVertexSlot`, `TextFragmentSlot`. Feature-agnostic — no font-weight (or any other feature's) semantics. Erased at build time. |
-| `src/text/set-font-weight-offset.ts` | Opt-in feature entry point: `setFontWeightOffset(data, run, offset)`. Owns the per-run offset map, the interned draw-group keys, and the per-`GPUDevice` composed+compiled variant module pair; validates and resolves the run against its `TextData`, installs the `text-data` styling seam and the `text-pipeline` variant resolver on first effective call, then repacks the data through `updateTextData({ update: "reset" })`. |
-| `src/text/load-font-weight-offset.ts` | Root-exported lazy loader for the exact `set-font-weight-offset.ts` implementation module. Application code can keep the feature behind a dynamic boundary without importing the package barrel as a namespace. |
-| `src/text/shaders/weight-shader-fragment.ts` | The weight-only `TextShaderFragment`: distance-to-quadratic helper, bounded nearest-contour band scan, weight varying, quad inflation, and unsigned-distance coverage expansion. Contains **no** copy of any base Slug logic. Reachable only from `set-font-weight-offset.ts`. |
+| File                                         | Responsibility                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/text/font.ts`                           | `Font` (branded type) + `loadFont` + `createFontFromBuffer`; text-shaper boundary.                                                                                                                                                                                                                                                                                                                                                  |
+| `src/text/glyph-extraction.ts`               | `extractGlyphCurves` + `cubicToQuadratics`; default text-shaper-backed glyph path extraction. Outline value types live in `glyph-storage.ts`.                                                                                                                                                                                                                                                                                       |
+| `src/text/glyph-storage.ts`                  | `GlyphStorage` (branded) + `CurveSetId` + outline value types (`QuadCurve`, `GlyphBounds`, `GlyphCurves`) + the supporting `SharedAtlas` / `AtlasSlot` / `GlyphBands` types and their packers (`packAppendGlyph`, `buildGlyphBands`). Public API: `createGlyphStorage` / `updateGlyphStorage` / `disposeGlyphStorage`.                                                                                                              |
+| `src/text/layout.ts`                         | `TextLayoutOptions` + `layoutText` — default LTR + word-wrap + align layout via `text-shaper.shape`.                                                                                                                                                                                                                                                                                                                                |
+| `src/text/text-data.ts`                      | `TextData` (branded) + `GlyphRun` + `PlacedGlyph` + `TextDataUpdate` + slot-allocator types. Public API: `createTextData` / `updateTextData` / `disposeTextData` and the per-instance allocator (addRun / removeRun / replaceRun / reset+compaction).                                                                                                                                                                               |
+| `src/text/default-text-data.ts`              | `DefaultTextData` (branded) + `createDefaultTextData` / `updateDefaultTextData` / `disposeDefaultTextData`; convenience layer composing layout + curve extraction + a private `GlyphStorage`.                                                                                                                                                                                                                                       |
+| `src/text/text-renderable.ts`                | `TextRenderable` + `createTextRenderable` / `addTextRenderable` / `disposeTextRenderable`; 3D `Renderable` implementation.                                                                                                                                                                                                                                                                                                          |
+| `src/text/text-renderer.ts`                  | Shared `TextRenderer` core: sorted CPU/resident layers, placement uniforms, pipelines, bundle preparation/replay and attachment lifecycle. No runtime adapter imports.                                                                                                                                                                                                                                                              |
+| `src/text/text-layer.ts`                     | Common placement/options, internal prepared-draw protocol and placement helper.                                                                                                                                                                                                                                                                                                                                                     |
+| `src/text/text-layer-cpu.ts`                 | `TextLayer` and its factory; per-attachment CPU uploads, palette synchronization and ordinary draw adapter.                                                                                                                                                                                                                                                                                                                         |
+| `src/text/compute-text-layer.ts`             | `ComputeTextLayer` and its factory; per-attachment resident bindings and indirect draw adapter.                                                                                                                                                                                                                                                                                                                                     |
+| `src/text/_gpu/text-textures.ts`             | `ensureSharedAtlasGpu`; lazy `rgba32float` texture create + version-gated upload + capacity grow. (Atlas teardown is inlined in `disposeGlyphStorage` to avoid a circular import.)                                                                                                                                                                                                                                                  |
+| `src/text/_gpu/text-pipeline.ts`             | `getOrCreateTextPipeline` / `getTextPipelineCache` / `clearTextPipelineCache` + the `TextPipelineVariant` seam; per-device bind group layout + base WGSL modules + per-target-key pipeline cache. Knows nothing about shader fragments and composes no WGSL.                                                                                                                                                                        |
+| `src/text/shaders/slug-shader.ts`            | **The single authoritative copy of the Slug WGSL.** Inline TypeScript template + `composeSlugShader(fragment)` — a deterministic builder that interpolates an optional `TextShaderFragment` into the base vertex/fragment source at named slots. Called with `null` for the base variant.                                                                                                                                           |
+| `src/text/shaders/text-shader-fragment.ts`   | Type-only module: `TextShaderFragment`, `TextVertexSlot`, `TextFragmentSlot`. Feature-agnostic — no font-weight (or any other feature's) semantics. Erased at build time.                                                                                                                                                                                                                                                           |
+| `src/text/set-font-weight-offset.ts`         | Opt-in feature entry point: `setFontWeightOffset(data, run, offset)`. Owns the per-run offset map, the interned draw-group keys, and the per-`GPUDevice` composed+compiled variant module pair; validates and resolves the run against its `TextData`, installs the `text-data` styling seam and the `text-pipeline` variant resolver on first effective call, then repacks the data through `updateTextData({ update: "reset" })`. |
+| `src/text/load-font-weight-offset.ts`        | Root-exported lazy loader for the exact `set-font-weight-offset.ts` implementation module. Application code can keep the feature behind a dynamic boundary without importing the package barrel as a namespace.                                                                                                                                                                                                                     |
+| `src/text/shaders/weight-shader-fragment.ts` | The weight-only `TextShaderFragment`: distance-to-quadratic helper, bounded nearest-contour band scan, weight varying, quad inflation, and unsigned-distance coverage expansion. Contains **no** copy of any base Slug logic. Reachable only from `set-font-weight-offset.ts`.                                                                                                                                                      |
 
 ---
 
@@ -646,7 +665,7 @@ Unit tests live in `tests/lite/unit/`:
 There is exactly **one** copy of the base Slug vertex and fragment logic, and it lives
 in `src/text/shaders/slug-shader.ts` as an inline TypeScript template. There are no
 `slug.vert.wgsl` / `slug.frag.wgsl` `?raw` files, and there is no second "weighted"
-copy of the shader: optional features contribute *incremental* WGSL through a typed
+copy of the shader: optional features contribute _incremental_ WGSL through a typed
 fragment that the template interpolates at named slots.
 
 ```typescript
@@ -691,20 +710,20 @@ export interface TextShaderFragment {
 }
 ```
 
-| Slot | Stage    | Location                                                                     | Contract                                                                                                                                                     |
-| ---- | -------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `VO` | vertex   | End of the `VOut` struct body                                                | Comma-terminated member declarations. Locations `0..3` are taken by the base varyings, so fragments start at `@location(4)`.                                  |
-| `VD` | vertex   | Dead-slot early-return block                                                 | Statements assigning a defined value to every member the fragment added, on the local `d: VOut`.                                                              |
-| `VB` | vertex   | After `md` (glyph metadata) and `sy` (style) are in scope, before quad setup | Statements that **must** declare `let sb: vec4<f32>` — the shaped em-space glyph bounds. When the slot is present the template uses `sb` in place of `md.b`; when absent the template names `md.b` directly, so the base variant pays nothing. Values declared here stay in scope for `VA`. |
-| `VA` | vertex   | Just before `return out;`                                                    | Statements assigning the fragment's added varyings on `out`.                                                                                                 |
-| `FI` | fragment | End of the `FIn` struct body (before `@builtin(front_facing)`)               | Comma-terminated member declarations mirroring `VO`.                                                                                                          |
-| `FH` | fragment | Module scope, after the base helpers, before `@fragment fn main`             | Helper function / constant declarations. The base helpers (`rcode`, `solveH`, `solveV`, `ccov`, `cwgt`, `bloc`) and the `ct` / `bt` textures are already in scope, so a fragment that needs its own scan of the glyph's band lists writes it here as a self-contained function. |
+| Slot | Stage    | Location                                                                     | Contract                                                                                                                                                                                                                                                                                     |
+| ---- | -------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VO` | vertex   | End of the `VOut` struct body                                                | Comma-terminated member declarations. Locations `0..3` are taken by the base varyings, so fragments start at `@location(4)`.                                                                                                                                                                 |
+| `VD` | vertex   | Dead-slot early-return block                                                 | Statements assigning a defined value to every member the fragment added, on the local `d: VOut`.                                                                                                                                                                                             |
+| `VB` | vertex   | After `md` (glyph metadata) and `sy` (style) are in scope, before quad setup | Statements that **must** declare `let sb: vec4<f32>` — the shaped em-space glyph bounds. When the slot is present the template uses `sb` in place of `md.b`; when absent the template names `md.b` directly, so the base variant pays nothing. Values declared here stay in scope for `VA`.  |
+| `VA` | vertex   | Just before `return out;`                                                    | Statements assigning the fragment's added varyings on `out`.                                                                                                                                                                                                                                 |
+| `FI` | fragment | End of the `FIn` struct body (before `@builtin(front_facing)`)               | Comma-terminated member declarations mirroring `VO`.                                                                                                                                                                                                                                         |
+| `FH` | fragment | Module scope, after the base helpers, before `@fragment fn main`             | Helper function / constant declarations. The base helpers (`rcode`, `solveH`, `solveV`, `ccov`, `cwgt`, `bloc`) and the `ct` / `bt` textures are already in scope, so a fragment that needs its own scan of the glyph's band lists writes it here as a self-contained function.              |
 | `CO` | fragment | After base `cov` is computed and clamped, before the coverage-gamma `pow`    | Statements that may read and reassign `var cov: f32` (coverage in `[0,1]`). In scope: `rc` (em-space render coord), `pe` (pixels-per-em), `gp` (glyph texel origin), `bm` (max band indices), `in`. The gamma, the `a2c` premultiply select, and the final color write stay in the template. |
 
 There are deliberately **no** per-curve slots inside the base band loops. Those loops
 `break` as soon as a curve is behind the pixel along the band's sort axis, and they only
 ever visit the single band that contains the pixel — both correct for coverage, both
-wrong for anything that needs *nearest-contour* information (see "Why the weight fragment
+wrong for anything that needs _nearest-contour_ information (see "Why the weight fragment
 owns its own scan"). A feature that needs a different traversal writes its own bounded
 scan in `FH` rather than piggy-backing on a loop whose exit condition it does not control.
 
@@ -774,7 +793,7 @@ Resolution happens once per bind (`TextRenderable`) / once per frame update
 (`TextRenderer`) and is stored on the per-renderable / per-layer GPU record — never inside
 the draw loop, which does no map lookups and builds no key strings. A `TextRenderable`
 binding additionally re-resolves its variant pipeline once if a styling feature was
-installed *after* the binding was built (see "`TextRenderable` (3D) per-frame" step 0);
+installed _after_ the binding was built (see "`TextRenderable` (3D) per-frame" step 0);
 the `TextRenderer` path needs no equivalent because its `_update` already resolves both
 pipelines every frame. Draw paths that only need the shared quad buffer or bind-group
 layout call `getTextPipelineCache(engine)` instead, which is a single `WeakMap` get.
@@ -827,11 +846,11 @@ export function loadFontWeightOffset(): Promise<typeof setFontWeightOffset>;
 dynamically imports only `text/set-font-weight-offset`, never the package root namespace,
 so bundlers do not conservatively retain unrelated root exports in the lazy chunk.
 
-| Parameter | Type                | Description                                                                                                                                                                                                       |
-| --------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `data`    | `TextData`          | The `TextData` that owns the run. The setter mutates live data: it repacks and regroups `data` immediately, exactly like a setter on a live material.                                                              |
-| `run`     | `GlyphRun \| number` | The run to weight, as either its `GlyphRun` reference or its current index in `data.runs`. Must be a live run of `data`; anything else throws with the same message shape `updateTextData` uses.                    |
-| `offset`  | `number`            | Contour offset in **font design units** (the space of `GlyphCurves.bounds`). Positive = bolder. Must be finite; clamped to `[0, 100]` with a `console.warn`. Zero clears a previously set offset.                          |
+| Parameter | Type                 | Description                                                                                                                                                                                       |
+| --------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data`    | `TextData`           | The `TextData` that owns the run. The setter mutates live data: it repacks and regroups `data` immediately, exactly like a setter on a live material.                                             |
+| `run`     | `GlyphRun \| number` | The run to weight, as either its `GlyphRun` reference or its current index in `data.runs`. Must be a live run of `data`; anything else throws with the same message shape `updateTextData` uses.  |
+| `offset`  | `number`             | Contour offset in **font design units** (the space of `GlyphCurves.bounds`). Positive = bolder. Must be finite; clamped to `[0, 100]` with a `console.warn`. Zero clears a previously set offset. |
 
 ```typescript
 import { setFontWeightOffset, createDefaultTextData, loadFont } from "@babylonjs/lite";
@@ -860,13 +879,13 @@ including after it is already bound and rendering.
    (`text-data.ts`) accepts a `GlyphRun` reference that is live in `data` or an in-range
    index into `data.runs`, and throws otherwise — same wording as the `updateTextData`
    errors (`… : run index N out of range (0..M).` / `… : GlyphRun reference is not in this
-   TextData.`). `updateTextData`'s own index path shares this helper, so the two can never
+TextData.`). `updateTextData`'s own index path shares this helper, so the two can never
    drift.
 3. **Clamp** to `[0, 100]` with a `console.warn` when out of range.
 4. **No-op detection.** If the resolved run's current effective offset already equals the
    clamped value, return before touching anything: no seam install, no shader composition,
    no `_version` / `_layoutVersion` churn. A zero call on a run that never had an offset is
-   therefore a *true* no-op — it does not install the feature or compile its shader — while
+   therefore a _true_ no-op — it does not install the feature or compile its shader — while
    the first nonzero call always installs.
 5. **Capture** the `WeakMap`'s exact prior entry for this run — whether it had one at all,
    and its value — then **store** the clamped offset (zero deletes the entry), then
@@ -883,7 +902,7 @@ including after it is already bound and rendering.
    `data`'s storage), the `WeakMap` entry written in step 5 is restored to its exact prior
    state — deleted if the run had no entry before this call, set back to the previous value
    if it did — before the error is rethrown unchanged. Without this, a failed repack would
-   leave the map at the *new* offset while the data itself was never actually repacked; a
+   leave the map at the _new_ offset while the data itself was never actually repacked; a
    caller that fixes the failure and retries with the same offset would then hit the no-op
    guard in step 4 and get silent non-repair instead of a retry. The seams installed in step
    5 are **not** rolled back — they are idempotent, side-effect-free until a run actually
@@ -985,19 +1004,19 @@ atlas lookup, bind-group labelling and error messages.
 `src/text/shaders/weight-shader-fragment.ts` exports one `TextShaderFragment`
 (`_id: "w"`), containing **only** incremental code:
 
-| Slot | Contribution                                                                                                                                                   |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VO` | `@location(4) @interpolate(flat) wo:f32,` — the per-instance weight offset varying.                                                                            |
-| `VD` | `d.wo=0.0;` — dead-slot default.                                                                                                                                |
+| Slot | Contribution                                                                                                                                                            |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VO` | `@location(4) @interpolate(flat) wo:f32,` — the per-instance weight offset varying.                                                                                     |
+| `VD` | `d.wo=0.0;` — dead-slot default.                                                                                                                                        |
 | `VB` | `let wo=sy.p.y; let sb=vec4<f32>(md.b.xy-vec2<f32>(wo),md.b.zw+vec2<f32>(wo));` — inflates the font-space bounds symmetrically so the quad covers the expanded contour. |
-| `VA` | `out.wo=wo;`                                                                                                                                                    |
-| `FI` | `@location(4) @interpolate(flat) wo:f32,`                                                                                                                      |
-| `FH` | `dot2` + `dq` (exact distance to a quadratic Bézier) + `wdst` (the bounded nearest-contour band scan).                                                           |
-| `CO` | Zero-offset guard, unsigned distance, weighted coverage, and monotone `max` finalization.                                                                         |
+| `VA` | `out.wo=wo;`                                                                                                                                                            |
+| `FI` | `@location(4) @interpolate(flat) wo:f32,`                                                                                                                               |
+| `FH` | `dot2` + `dq` (exact distance to a quadratic Bézier) + `wdst` (the bounded nearest-contour band scan).                                                                  |
+| `CO` | Zero-offset guard, unsigned distance, weighted coverage, and monotone `max` finalization.                                                                               |
 
 ### Why the weight fragment owns its own scan
 
-The base band walk is a *winding* query, not a *nearest-contour* query, and its two
+The base band walk is a _winding_ query, not a _nearest-contour_ query, and its two
 optimizations are only sound for winding:
 
 1. It reads exactly **one** h-band (the band containing the pixel's `y`) and one v-band.
@@ -1006,7 +1025,7 @@ optimizations are only sound for winding:
    band boundary is frequently in the adjacent band.
 2. Inside a band it `break`s as soon as a curve's `max x` is more than half a pixel behind
    the pixel (curves are sorted by descending `max x`). Every remaining curve is behind the
-   ray, so it cannot cross it — but curves to the *left* of the pixel are exactly the ones
+   ray, so it cannot cross it — but curves to the _left_ of the pixel are exactly the ones
    that can be nearest to it.
 
 Accumulating a running minimum distance inside those loops therefore silently skips curves
@@ -1030,7 +1049,7 @@ fn wdst(rc:vec2<f32>,gp:vec2<i32>,bm:vec2<i32>,bn:vec4<f32>,rad:f32)->f32
   `y1 = clamp(i32((rc.y + rad) * bn.y + bn.w), 0, bm.y)`.
   Any curve with a point within `rad` of the pixel has that point inside the glyph's
   `y`-bounds, so its band index is inside `[y0, y1]` and the curve is in that band's list.
-  *Validated band-transform invariant:* `bandScaleY = hBandCount / heightFu` when
+  _Validated band-transform invariant:_ `bandScaleY = hBandCount / heightFu` when
   `heightFu > 0` and `0` otherwise, and `bandOffsetY = -yMin * bandScaleY`, so the transform
   is monotone non-decreasing and never negative. A zero scale collapses the range to band 0,
   which is the only band a zero-height glyph has. No sign guard is required; a unit test
@@ -1092,7 +1111,7 @@ radius spans).
 - **Run resolution** — the index form (`setFontWeightOffset(data, 0, …)`) is equivalent to
   the reference form; an out-of-range index and a `GlyphRun` that belongs to another
   `TextData` both throw with the `updateTextData`-shaped message.
-- **Post-create mutation** — a setter call made *after* `createTextData` (i.e. after the
+- **Post-create mutation** — a setter call made _after_ `createTextData` (i.e. after the
   runs are already packed) changes the run's draw-group key and its `params.y` immediately;
   a following zero restores both to the base key and `0`.
 - **Style packing** — a weighted run's `params.y` holds `Math.fround(offset)`; a base run's
@@ -1110,7 +1129,7 @@ radius spans).
 - **Band-scan completeness (algorithmic)** — a JS replica of `wdst`'s candidate selection,
   driven by the real `buildGlyphBands` output for a synthetic square glyph, must consider the
   true nearest curve for sample points on all four exterior sides and all four corners. The
-  pre-fix "accumulate inside the base loop" candidate set is asserted to *fail* the same
+  pre-fix "accumulate inside the base loop" candidate set is asserted to _fail_ the same
   check, so the regression cannot silently return.
 - **Band-transform invariant** — `buildGlyphBands` + the packed metadata always produce a
   non-negative, monotone band transform (what `wdst`'s range clamp relies on).
@@ -1140,3 +1159,842 @@ signature — after which the recorded draw sequence is base → variant → bas
 `build/lib`): a consumer importing text rendering but not `setFontWeightOffset` retains the
 base Slug source and **not** the weight fragment's WGSL; a text consumer that also imports
 `setFontWeightOffset` retains both, with the base Slug logic still declared exactly once.
+
+## Opt-in compute shaper support and lifetime
+
+The public compute path is `loadComputeFont` / `createComputeFontFromBuffer`, `extractComputeGlyphCurves`, and `shapeComputeText(engine, font, text)`. `shapeComputeText` takes characters and returns glyph ids plus font-unit positions. Script selection, lookup plans, and the GPU shaper stay internal. This does not replace `DefaultTextData`, `layoutText`, or the text-shaper-backed renderer. A consumer that never calls these functions retains neither the new parser nor the compute shader. The compute path does not import text-shaper.
+
+Shaping matches text-shaper 0.1.28 for the admitted one-direction runs the compiler can execute, including Inter Greek `Αθήνα`, Inter Cyrillic `Москва`, Hebrew `שלום` (visual clusters, vav advance 291, zero xOffset), and Arabic `كتب` (five records, including mark offsets). A lookup that matches but is not executable fails the run. It is not skipped. Device loss rejects the pending job and does not publish stale records. The caller does not own a shaper object. Engine teardown releases the internal one, and an already returned glyph list or `TextData` stays valid. One batch is active per engine. Shaping never mutates `TextData`.
+
+## GPU-resident compute text
+
+### Production ordered-index and immutable-preparation contract (2026-10-06)
+
+The compiler's eight-word lookup descriptor retains every selected root and
+dependency, flags, action order and fail-if-matched rejection. Word 6 now points
+to a directory containing two words per font glyph: an absolute candidate-list
+origin followed by its count. Entries are original sixteen-word rule indexes,
+strictly in original subtable/rule order. Enumerate the complete first predicate:
+glyph lists include all listed font glyphs; class predicates enumerate the full
+font domain, including the class-zero complement, intersecting any coverage.
+Neither output repertoire nor a particular input text restricts this directory.
+Empty lookups still have an empty directory. Rejections remain candidates in
+their original position. Nested Single execution uses its own descriptor and
+the current target glyph, without adopting the parent's lookup flags.
+
+Root traversal reads only the current glyph's candidates, so predicate zero is
+already proved. Matching still checks all other input predicates, filtered live
+successors, backtrack and lookahead. Nested execution remains the compiler's
+admitted direct Single semantics. GSUB output mutation, deletion/compaction,
+multiple expansion and cursor advancement, GPOS application, original-lookup
+failure attribution and direction reversal remain unchanged.
+
+The separate metrics/GDEF/class buffer has its existing six-word header and
+class-origin directory. Each class origin addresses exactly `font.glyphCount`
+class IDs, with class zero for absent definitions/ranges. `classOf` is one
+indexed read, not a format/range loop. Advance and GDEF tables retain their ABI.
+
+Font construction copies its bytes; the snapshot and default plans are immutable
+internal inputs. Lazy weak caches own decoded lookup actions per font/table/index,
+default plans per font/script/direction, and prepared immutable words per plan
+identity. Validation occurs before plan-cache lookup. A different font, script,
+direction or explicit internal plan identity cannot reuse another program.
+The immutable preparation includes the compiled semantic program, table buffer
+and appended table-tagged root order. Every update independently packs the
+current glyph IDs, scalar clusters, run count, capacity and shared output origin.
+No cache contains shaped output or memoizes strings.
+
+Each private public-readback schedule retains successful shader preparation
+in its cache's `taskPrepared` flag. Prepare a new shader variant once; warm submissions
+reuse it without another async preparation turn. Shader/scratch variant
+replacement resets preparation. Buffer growth retaining a prepared shader
+does not need another pipeline preparation; the new binding set is validated
+and built synchronously during recording. The latch belongs
+to the device/plan/owner-bound cache, not to general compute tasks. Submission
+still validates the active task, pipeline and binding resources, and generation/
+device checks remain before submission and after completion. A failed or
+cancelled initial preparation never marks the schedule prepared.
+
+Readback and resident execution share immutable preparation, never a CPU shaper.
+GPU caches remain device/owner-bound and are released on disposal or terminal
+loss. Resident program/table upload is skipped only when the currently uploaded
+plan identity and storage-buffer identities are unchanged; multi-selection
+updates upload each changed group in submission order. Buffer growth invalidates
+upload identity. Closure borrows cached decoded actions but computes the complete
+current conservative repertoire and outline components independently.
+
+Regression tests must prove directory exhaustiveness/order and class-zero
+semantics, dense class equality, one compile on stable warm revisions,
+font/selection isolation and current mutable words. Native tests execute actual
+production WGSL through the root APIs, preserving exact six-field oracle output,
+resident f32/slot/style/indirect ABI and four-byte-only status reads. The observed
+Roboto natural-Latin50 N512 incomplete-output regression must pass for every run;
+N1024/N2048 admission and resident growth/shrink are additional bounded checks.
+Performance acceptance uses matched public and resident endpoints separately,
+not this structural contract as a surrogate for measured PoC parity.
+
+The bounded 32-lane kernel can finish compiler-proven nominal/first-only pair
+runs before initializing mutable glyph scratch. It remains one pipeline,
+dispatch and submission; there is no pending status or extra preflight kernel.
+The global-scratch variant executes the complete program. Each bounded invocation
+initially sets private `nominalSource = true`, so shared `readGlyph` and `live`
+read immutable nominal inputs. The leader checks overflow and computes the
+first/witness root intersection. More than 32 roots always uses the complete
+executor.
+
+For each potentially active GSUB root, prove that no original input/context
+predicate matches using the original ordered directory, membership, GDEF
+filtering and traversal. An actual match, including an identity substitution
+or matched rejection, requires the complete executor. Root bits are visited in
+ascending order using `countTrailingZeros`. Exclude only roots proven not to
+match; a failed proof returns the original candidate mask. Potentially active
+GPOS roots must all have compiler capability 3 and an available compact pair
+directory. Otherwise every invocation switches `nominalSource` off, initializes
+the original mutable scratch, and executes the complete kernel unchanged.
+
+Admitted runs retain nominal IDs, count, scalar-index clusters and zero offsets.
+Lane `l` positions source indices `l, l+32, ...`; each advance is the nominal
+advance plus supported first-only pair deltas in ascending original root order.
+Compact operations preserve candidate/subtable ordering, class-zero coverage,
+absent cells and matched rejection cells. Traverse successors using only
+implemented GDEF filtering bits `0xff0e`: bit 16 alone does not filter under
+text-shaper 0.1.28. Original flags and `pairAppliesSecond` compiler policy remain
+unchanged. `skipped` returns before GDEF loads when no implemented filtering
+bits are present. RTL reverses output positions, not clusters.
+
+An atomic minimum of `(root << 8) | sourceIndex` preserves root-first rejection
+priority across lanes. This encoding is exact only for bounded capacity <=256.
+After a storage/workgroup barrier the leader publishes the original table,
+lookup and glyph error, or status 0 and the complete count. Overflow retains
+status 2. Partial records from a failed run are never published as success.
+
+The original version-2 semantic program, table-tagged roots, first masks and
+witness masks remain intact. Append optional GPU-only pair metadata at
+`program.words.length + rootCount*2 + glyphCount*2`: `rootCount` absolute directory
+origins, zero for non-first-only GPOS roots, followed by compact directories.
+Each directory has two words/glyph `[vectorOrigin, operationCount]`. Each
+five-word operation is either `[0, secondPredicateOrigin, 0, deltaBits, status]`
+or `[1, secondClassTableIndex, rowLength, rowOrigin, 0]`. Class row cells are
+`[deltaBits, status]`, with status 0 absent, 1 supported match, 2 rejection.
+Immutable vectors and rows share original identities. The builder rejects any
+unexpected non-pair/non-rejection action in a compiler-proven root.
+
+Kernel assembly remains in `src/text/_gpu/compute-text-shape.ts`.
+`compute-text-predicates.ts` supplies shared advances, GDEF filtering,
+membership, pair selection and input/context traversal WGSL.
+`compute-text-simple-wgsl.ts` supplies exact nominal proof and lane-striped
+pair output. `compute-text-pair-program.ts` constructs the optional immutable
+compact tables from the existing semantic program. CPU shaping imports none
+of these GPU-only modules.
+
+Preparation retains both the full words and a base view excluding this optional
+footer. Readback and resident pass the real device buffer/binding limits; when
+only the footer would exceed either limit, upload the base view and use complete
+semantics rather than narrowing admission. Oversized semantic resources still
+reject through existing bounds checks. Shader proof checks footer bounds and
+nonzero directory availability before reading compact data. Owner/device/plan
+caches, preparation, disposal and terminal-loss behavior remain unchanged.
+No CPU-shaped result, input memoization, font/string exception or relaxed
+validation is permitted.
+
+The bounded leader retains each glyph's first-root mask in workgroup
+`nominalMasks` during the initial nominal presence scan, then skips GSUB proof
+candidates whose cached mask lacks that root. These masks are necessary
+conditions, not independent shaping decisions; all potentially matching
+predicates still receive exact traversal.
+
+Packed program version 2 shares class coverage: a class predicate is three
+words `[0x80000000 | classId, classTableIndex, coverageOrigin]`. A zero origin
+means unrestricted coverage; otherwise the origin addresses `[count, ...glyphIds]`
+packed once per parsed coverage object. Glyph predicates keep `[count, ...ids]`.
+All logical rule descriptors and exhaustive ordered candidate entries remain
+intact, so the independent semantic executor and original rejection witnesses
+do not need a second compiler or a rewritten shaping contract.
+
+A contiguous class-pair row also has an acceleration matrix in descriptor
+words 10–13: `[rowOrigin, secondClassTableIndex, rowLength, rowCandidateCount]`.
+The row is indexed by the second glyph's dense class; entries are original
+rule index plus one, or zero for an absent/zero-adjustment cell. Every supported
+or rejected cell retains its original mode/action and descriptor. The kernel
+can visit the row once, resolve the exact original cell, and advance past that
+row's candidate segment. Other subtables and explicit pairs keep original
+precedence. A missing second glyph, absent class or zero cell does not consume
+the lookup; matching continues with later subtables. Rejection cells still fail
+with the original lookup/table/run attribution.
+
+Resident warm outline admission reuses the caller curve-set's already installed
+curves. A lazy font-keyed glyph-reader cache retains immutable TrueType contours,
+bounds and component IDs (including valid empty glyphs), shared by extraction
+and conservative closure. New glyph IDs still validate/decode transactionally
+before target mutation, and atlas growth/slot upload retain their existing
+ownership and resource-identity handshake. This caches font data, not run output.
+
+Cooperative execution uses **32 lanes on one independent run**, not 32
+independent runs per workgroup. Descriptor word 2 is a compiler capability:
+1 for GSUB rules containing only input-one Single/rejection actions with no
+backtrack/lookahead; 2 for GPOS input-two Pair/class-pair/rejection actions with
+no contextual predicates; 3 for those same pair roots when every executable
+action has an unapplied or exactly zero second advance; otherwise 0. Empty
+lookups may inherit their table's pure capability. All other roots, nested
+actions, marks, ligatures and multiple
+substitutions retain the same ordered leader executor.
+
+Initialization with nominal advances and final six-field output writes
+are lane-striped. Glyph replacement also updates its nominal advance; newly
+inserted glyphs receive their own nominal advance. GSUB never observes or
+positions these fields, so every live glyph enters GPOS with the same current-id
+advance and zero offsets as the former whole-run transition. Ligature and
+multiple outputs maintain this invariant, including nested substitutions.
+There is no redundant first-GPOS initialization pass or its extra fence.
+For a pure Single root, lanes apply disjoint substitutions and
+retain any matched rejection descriptor. For a pure Pair root, lanes select each
+live first glyph's earliest original candidate and filtered second glyph from
+unchanged glyph IDs. The leader then commits actions or the first rejection in
+source order, preserving second-advance accumulation exactly. Capability 3
+instead commits only each lane's own first advance during selection; no lane
+writes the second glyph, even an addition of zero. The leader still publishes
+the earliest rejection in source order. Already committed Single/first-only
+Pair successes clear their selection slot, so the leader does not re-fetch
+their global rule descriptors. This is a compiler proof over every original
+rule, not an inference from a particular string or a format flag.
+Any possible nonzero applied second advance retains capability 2 and its
+ordered commit. Two bounded workgroup arrays hold selected rules and successor
+indexes; runs with admitted
+capacity above 256 use the complete serial root executor, not a rejection or
+reduced font policy. Barriers and workgroup-uniform length/failure loads separate
+all mutation, selection and commit phases; compaction/reversal remain ordered.
+The same production kernel serves readback and resident endpoints.
+
+Immutable GPU preparation appends one `u32` per font glyph after the two-word
+root records. Bit `r` proves a nonempty original candidate directory for root
+`r`, for the first 32 roots only. Enumeration includes rejection rules and
+class-zero complements. The leader ORs these words over current live glyph ids.
+A zero bit permits bypassing that root's candidate traversal and fences;
+roots beyond 31 always retain the complete executor. Nominal advances already
+hold before any GPOS bypass. Actual GSUB glyph-id changes,
+insertions and ligature tombstones atomically mark presence dirty, including
+nested actions. After ordered compaction, the leader recomputes dirty presence
+before the next root and clears the marker; substitutions therefore activate
+their subsequent roots. Unmatched or identity-preserving roots retain presence.
+No input-specific program, feature omission or root reordering is introduced.
+
+The compiled program retains `rootWitnesses: Uint32Array`. A second
+font-glyph-indexed mask follows the first-glyph masks in GPU preparation. For each GSUB
+rule, choose the smallest exhaustive glyph domain among its non-leading input,
+backtrack and lookahead predicates. Its presence somewhere in the live run is
+necessary (not sufficient) for that rule to match. Union the chosen domains
+over all original rules, including rejection rules. If any rule has no such
+predicate, the root's witness bit is unconditional; GPOS witness bits are also
+unconditional. Class predicates use the same exhaustive class/coverage
+enumeration as the candidate compiler, including class-zero complements.
+The root mask is `OR(firstMasks[currentIds]) & OR(witnessMasks[currentIds])`.
+Test its bit before fetching any root record or lookup descriptor.
+This avoids traversing composition/ligature candidates when their required
+combining or contextual glyphs are absent, without dropping any rule. Roots
+above 31 remain unconditionally executable. The existing GSUB identity/live
+membership dirty marker refreshes both masks after nested substitution,
+insertion and compaction, so introduced witnesses activate later roots.
+Readback and resident use identical immutable words and unchanged scheduling.
+
+The reference program ABI stays version 2; this is immutable GPU preparation
+metadata at `params.programWords + params.rootCount * 2`.
+
+Unicode admission caches the complete immutable scalar classification, not only
+its Unicode Script tag. A lazily allocated sparse directory indexes 256-entry
+`Uint8Array` pages by `scalar >>> 8`: zero is uncached, 1 is Common, 2 is Inherited,
+3–9 are the admitted scripts in Latin/Greek/Cyrillic/Hebrew/Arabic/Han/Gothic
+order, 10 is unknown, 11 is unsupported, and 12–16 are control/paragraph/bidi/
+joining/variation rejections. Cold classification tests the existing rejection
+ranges before reading Unicode 16.0.0 Script. Warm decoding compares numeric
+classes and converts the resolved strong script once per run. Rejection wording,
+scalar attribution and deferred UTF-16 priority are unchanged; unsupported tags
+are recovered only for their error message. This bounded Unicode property cache
+contains neither input strings nor decoded runs or shaped outputs.
+
+The selector has a package-internal font/seed overload, removed from the public
+declaration by `@internal`. In the default offset-preserving mode it reserves a
+third disjoint slab view for nominal glyph ids. During decoding it copies only positive checked entries below that
+font's glyph count and collects distinct adjacent nominal seeds into the current
+update's set. Missing entries remain zero and are counted. UTF-16 and script
+validation still finishes first; the existing mapping stage then resolves those
+misses with original caller error attribution, after the same plan-validation
+boundary as before. A vector carries its immutable font identity, so a different
+font cannot reuse it. All-warm vectors require neither a second scalar-mapping
+loop nor a separate resident seed traversal. Nothing caches a run or its output.
+After the first cold miss, decoding defers all remaining seed insertion.
+The miss-resolution loop resumes insertion from that position, preserving
+first-seen seed order, closure witnesses and cold atlas slot installation order.
+Within a single decode, an adjacent equal scalar reuses its preceding immutable
+Unicode admission and checked nominal page entry before script dispatch and
+font-bound checks, rather than repeating already-proven admission for that
+scalar. Missing nominal entries still increment the miss count on every
+occurrence; all misses are resolved with the original error/seed-order policy.
+Every UTF-16 unit is still
+decoded/validated and every current scalar, requested offset, glyph and cluster is written
+to fresh input/scratch storage. This scalar-property reuse applies uniformly to the
+entire Unicode domain; there is no character-specific path or string/output
+memoization. The preceding property values never survive the call.
+
+Within a decode, retain the current 256-scalar page index and the immutable
+nominal/admission page references. Refresh directory references only when
+the decoded scalar enters a different page. Each different scalar still reads
+its own cell; uncached admission still uses the full Unicode classifier and
+refreshes the page reference after lazy allocation. Missing nominal cells,
+adjacent repetition, cold seed order, mixed-script/control diagnostics and
+deferred lone-surrogate priority retain their existing behavior. No decoded
+input, glyph vector or string is retained across calls.
+
+The public executor's mutable input buffer reserves `runCapacity *
+(glyphCapacity + 2) * 4` bytes: one run-directory word, one count word and at
+most `glyphCapacity` nominal glyph words per run. No redundant initial-cluster
+word is reserved. Shorter warm runs reuse this full retained capacity, while
+input revisions and counts are always repacked.
+
+Root readback batches, direct-plan batches and resident updates allocate one
+fresh backing slab sized to the validated snapshot's summed UTF-16 lengths
+times eight bytes. These shaping-only callers explicitly omit offset metadata:
+they consume scalar-index clusters and never read UTF-16 offset vectors.
+The internal selector overload reserves disjoint scalar/nominal regions in
+source order and uses a shared zero-length `_utf16Offsets` sentinel for this
+mode. It still decodes every UTF-16 unit and computes exact error positions;
+lone-surrogate and deferred script/control error priorities are unchanged.
+Run views never overlap and a subsequent
+update never reuses the backing buffer. Standalone public selection still owns
+its separate scalar/offset slab with complete offsets. Internal selection and
+batch slabs default to including offsets unless the caller opts out; that
+default font-aware layout retains twelve bytes per source UTF-16 unit.
+This removes unconsumed metadata, not input validation or mutable scalar/
+nominal writes; the cursor is owned only by that batch.
+Resident grouping compares the checked script/direction fields directly and
+collects the fresh prepared records themselves. Their scalar/nominal views are
+already the GPU input contract, so grouping does not allocate replacement
+two-field descriptors or per-run compound key strings. Groups remain
+contiguous and retain source-order output offsets, including empty DFLT runs.
+
+Resident visible-count validation and ordered prefixing share one 256-lane
+workgroup, the WebGPU minimum guaranteed invocation/X-size capacity:
+for at most 256 runs, lane `l` validates/counts run `l` into the retained
+offset buffer, then all lanes execute a storage barrier. Lane zero runs the
+unchanged source-ordered failure/capacity checks and prefix, publishing status
+and indirect count. A following parallel packing dispatch consumes the offsets.
+Above 256 runs, the shared count helper executes over 64-lane workgroups,
+followed by the source-ordered prefix dispatch and parallel packing. This
+preserves count-stage concurrency rather than serializing a large batch on
+one workgroup. The retained packing schedule rebuilds only on buffer identity
+or a crossing of this count tier; dispatch dimensions still refresh each update.
+Counts remain complete for arbitrary admitted run counts. Every fused lane
+reaches its fence, including lanes with no runs. Failed batches keep zero
+indirect instances and the original first-run failure. Shape, packing stages
+and four-byte completion remain one submission for a single plan group.
+
+The public batch wrapper selects each input once, retaining that checked
+selection through grouping and glyph mapping. The private execution helper
+accepts these selections only from that validated wrapper; direct internal-plan
+calls still validate their own strings. Every executor batch must contain
+exactly one result for each dispatched nonempty run, or the wrapper rejects
+instead of substituting an empty output. Production decode allocates fresh owned
+records in an array reserved to the checked published count, filling by index
+without repeated backing-array growth. The public wrapper may publish them without a redundant object/array
+clone. The test-executor seam and direct plan API still snapshot foreign arrays,
+preserving isolation. All glyph IDs, clusters and signed safe-integer fields are
+validated before publication; no check is skipped to reduce CPU work.
+The four signed position fields use direct safe-integer checks, not a newly
+allocated four-number array for each published glyph.
+The dynamically imported executor function is cached only after successful
+module loading. Warm calls use that function directly rather than resolving
+the already-loaded module and yielding again before input submission. The
+test-executor seam always takes precedence. This lazy cache owns no device,
+font, plan or buffers: all resource/loss checks remain in the executing owner.
+An import failure leaves it empty so a later call may retry.
+
+For capacity at most 256, the same source factory rounds required capacity up
+to the next power of two and sizes glyph scratch to eight words per slot and
+selected-rule/successor arrays to one word per slot. The run-local base is zero.
+Thus a 50-glyph dispatch reserves 2,560 bytes plus state, not the maximum
+10,240 bytes. Together with state, this fits the
+WebGPU minimum workgroup-storage limit. Larger capacities use the original
+per-run global scratch binding and storage fences. The factory emits the
+correct declaration/base/fences directly from a typed capacity decision; it
+does not parse or rewrite emitted WGSL. All remaining shader logic is shared.
+Shape pipeline identity changes only when growing beyond its current bounded
+variant or crossing the bounded/global boundary. Shrinking reuses a sufficient
+variant. Readback retains immutable program/table/parameter buffers and a
+compatible shader while replacing mutable buffers on batch/capacity growth.
+Readback and resident use one common shape-shader constructor.
+Existing buffer growth, output stride, device replacement and terminal-loss
+ownership remain unchanged.
+
+All packed glyph-set predicates and shared coverage lists are sorted by glyph
+ID (predicate order is set membership, not action precedence). Remaining input,
+backtrack and lookahead membership uses bounded lower-bound binary search;
+singleton glyph tests and shared class coverage use the same search helper.
+This eliminates linear scans of wide contextual coverage without removing any
+predicate or weakening first-match/rejection order. Full native accepted/rejected
+corpora remain the semantic oracle for this membership change.
+
+Warm GPU ownership includes the binding set, direct dispatch and recorded
+compute task, not just uploaded font words and a pipeline. Readback keeps one
+schedule per existing owner/device/plan/buffer cache and updates its direct run
+count. Resident keeps separate shape and pack schedules while their input and
+borrowed draw-buffer identities remain stable. Shader variant changes or any
+referenced buffer replacement rebuild only the affected schedule. Preparation
+still validates current resources through the compute framework on every
+submission. Disposal/loss disposes cached tasks as well as owned shader/buffer
+resources; no new methods are attached to public state.
+
+Private shaping readback records prepared compute tasks and their completion
+copy in one encoder/submission. Its opt-in internal compute helper reuses the
+owned storage allocation's staging buffer and synchronously materializes the
+result while mapped, unmapping in `finally`; no mapped view escapes. General
+`readStorageBuffer` retains its independent-copy/coalescing contract unchanged.
+Readback copies only the active record stride/count. Resident submits the last
+shape group, pack and four-byte status copy together. Earlier groups still
+submit before overwriting shared input words, preserving multi-script order.
+All resource validation, active-frame exclusion, disposal/loss checks and
+original rejection attribution remain effective.
+
+Root synchronization follows data dependencies rather than repeating fences:
+the prior root's uniform terminal load publishes leader commits and run length.
+Only the GSUB→GPOS transition adds a fence after parallel advance assignment;
+parallel selection has its own fence before ordered leader commitment. Global
+scratch additionally uses storage fences. Only non-independent GSUB execution
+can introduce tombstones/expansion and therefore compacts. Independent Single
+roots, the GPOS transition and final publication do not rescan an already
+compact run. All 32 lanes still participate in every required fence, including
+rejection paths.
+Ordered GSUB roots additionally compact only when a successful ligature has
+created tombstones. The leader resets a private `removed` flag on entering an
+ordered root; ligature commitment sets it. Multiple substitution inserts live
+records directly and does not require a redundant full-run copy. Empty
+candidate lists are checked before live/flag traversal, matching the complete
+directory's proved admission without changing any eligible candidate/rejection.
+
+Resident packing shares `countRun`, which validates shape status/count and atlas
+slots and writes visible count plus first failure to a private `vec2u` metadata
+buffer, and `prefixOffsets`, which traverses runs in source order, computes
+compact offsets, checks instance capacity, and publishes the first failure or
+`[6,totalVisible,0,0]`. For at most 256 runs, `countRuns` fuses these helpers in
+one 256-lane workgroup. Larger batches dispatch `countParallel` over 64-lane
+workgroups, then `prefixRuns` with one invocation. `main` (64 invocations/workgroup, one
+invocation per run) places its records at the assigned offset with the existing
+integer pen accumulation and exact f32 scaling/line/style ABI. Empty outlines
+advance the pen but create no instance. A nonzero status disables every packing
+invocation and leaves indirect instance count zero. Metadata is owned by the
+resident shader cache and grows/invalidate bindings like other owned buffers.
+There is still one normal four-byte map after the packing stages, no shaped
+record map or CPU glyph positioning.
+Shared resident capacity is computed from immutable plan expansion and current
+scalar lengths without building mutable input words. Those words are packed
+exactly once per actual plan group, after the shared stride is known.
+The mutable input ABI begins with one word offset per run. Each offset points
+to `[scalarCount, ...nominalGlyphIds]`; the current contiguous `Uint32Array`
+glyph vector is bulk-copied into fresh packed storage. Initial clusters are
+always source scalar indices, so the shader writes cluster `i` while reading
+glyph `runs[inputOrigin + 1 + i]`, rather than uploading redundant cluster words.
+Supplementary scalars therefore retain scalar-index, not UTF-16-index clusters.
+Empty runs contain only the zero count. Both readback and resident paths share
+this packing/initialization; glyph scratch, subsequent GSUB cluster operations,
+output ABI, immutable program ABI version 2, and all bounds checks are unchanged.
+
+Warm ingestion also reuses immutable per-scalar data, never a shaped result.
+Each font lazily owns 256-scalar `Uint32Array` nominal-mapping pages, with
+`0xffffffff` meaning not computed and zero retaining the normal unmapped
+failure. The Unicode range-table result is lazily memoized in 256-scalar pages
+by selection. Both are bounded by the Unicode scalar domain (4,352 pages);
+page directories are lazy sparse arrays indexed by `scalar >>> 8`, not
+per-scalar hash-map lookups. Unallocated pages remain absent.
+invalid scalar arguments never address nominal pages. Run decoding, UTF-16
+offsets, control checks, mixed-script checks and unmapped/font-bound diagnostics
+are recomputed in their original order. Font ownership isolates nominal pages;
+Unicode properties are immutable and device-independent. No import-time
+allocation or font/GPU back-reference is introduced.
+Run mapping copies already checked nominal page entries directly into fresh
+glyph-id arrays. Typed entries prove integer representation; positive glyph
+ids still must be below the current immutable font's glyph count. Missing,
+zero, sentinel or out-of-font entries use the full scalar mapper and original
+caller-specific error attribution. No input or shaped output is memoized.
+Decoding owns one fresh buffer of `text.length * 8` bytes. Scalars occupy its
+first UTF-16-upper-bound-sized half and UTF-16 offsets its second half; the
+disjoint `Uint32Array` views cannot mutate each other's elements. Supplementary
+input returns length-bounded views, and subsequent inputs own different buffers.
+Script/control classification is performed as scalars are decoded, without a
+second traversal. The first classification error is deferred until all UTF-16
+units have been checked, so any lone-surrogate error still outranks an earlier
+control/script error exactly as before. After the first classification failure,
+decoding continues but later classification cannot replace that failure.
+Resident repertoire collection inserts mapped glyph ids directly into a
+current-update set; closure receives each seed once, with no intermediate
+per-run numeric-array copies. Closure and all mutable run records still reflect
+the current input.
+
+### Native M1–3 correctness acceptance matrix
+
+`pnpm test:compute-text-gpu` opts into Node/Dawn (`webgpu` 0.6.1), independently
+of mocked `unit` tests. It installs native globals only in that Vitest project;
+an unavailable binary, adapter, compilation failure, validation error or unexpected
+device loss is a failure, never a skip or interpreter fallback. The default native
+backend is platform-selected (Metal on macOS); `LITE_GPU_BACKEND=vulkan` selects a
+real Vulkan backend for software-driver CI. `null` is forbidden. Test devices and
+all block/storage allocations are released at teardown. Tests run serially with
+bounded timeouts and reuse a device within each suite.
+
+Version 0.6.1 is pinned because 0.6.2 was younger than the repository's seven-day
+dependency release-age gate when this project was added; the gate is unchanged.
+
+The oracle is installed `text-shaper` **0.1.28**, using the exact SHA-256-checked
+Inter, Roboto, Noto Sans SC subset, Gothic, Hebrew and Arabic font bytes. Each
+accepted string compares count and every `[glyphId, scalarCluster, xAdvance,
+yAdvance, xOffset, yOffset]` record exactly. Positive/negative expectations are
+declared before dispatch; compiler rejection cannot turn a positive into a skip.
+Seeded sequences supplement explicit repertoire and contextual witnesses rather
+than substituting case counts for behavior coverage.
+Oracle script/direction configuration comes from independent Unicode Script
+property witnesses and explicit admitted-script directions, not from the Lite
+selector's output; every accepted run also checks that selector against those
+independent expectations. Common-only input is explicitly `DFLT`/LTR.
+
+| Milestone               | Native test family                                                                                                                                                                                                                                                                                                                                                                                        | Current API / assertion                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M1                      | `milestones.test.ts`: `Latin repertoire and ordered witnesses`, `batch ordering and lengths`; `resident.test.ts`: `resident records, packing and indirect`                                                                                                                                                                                                                                                | Root `shapeComputeText`, single and batch; font metrics, ordered substitutions/ligatures/compositions and pairs; empty strings/batches; 100 independent strings and 100 independent resident blocks; 2/4/8/16/32/50 and 49↔50 counts; 512/1024-scalar public runs (512 resident)                                                                                |
+| M2                      | `milestones.test.ts`: `Latin-1/Extended scalar repertoire and seeded sequences`, `fail-closed corpus`; `kernel.test.ts`: `storage/buffer/workgroup exact boundaries use real device limits without near-OOM allocation`                                                                                                                                                                                   | Latin-1/Extended, digits/punctuation, combining/base/stack/filter witnesses on original Inter/Roboto; changing counts; selected default plans and guarded unsupported operations; deterministic seeded sequence corpus                                                                                                                                          |
+| M3                      | `milestones.test.ts`: `Greek and Cyrillic`, `CJK and supplementary Gothic`, `Hebrew and Arabic`, `mapped RTL repertoire and seeded joining/marks`                                                                                                                                                                                                                                                         | 53 unique Greek and 72 unique Cyrillic scalars (individual characters plus complete strings); all 237 mapped CJK / 27 Gothic scalars; scalar clusters independent of UTF-16; visual RTL/joining/mark witnesses; homogeneous strings in mixed-script batches                                                                                                     |
+| M1–3 resident           | `resident.test.ts`: `resident records, packing and indirect`, `shared atlas and independent blocks`, `transitive selected GSUB closure installs empty-outline outputs, never phantom instances`, `nonvisual actual indirect draws reuse shared native atlas resources and invalidate sibling bindings on growth`                                                                                          | Root creation/update/disposal, test-only six-field shaped-buffer readbacks, exact f32 instance ABI, atlas slot/style words, all four indirect words, empty outlines, cold closure/growth and stable slots, cross-font curve sets/concurrent updates, surviving siblings; production text pipeline/bundles draw into an offscreen texture without pixel readback |
+| M1–3 failure/lifetime   | `lifecycle.test.ts` (four named busy/disposal/loss/recreation cases); `resident.test.ts`: `rejection clears every indirect word and recovery keeps the caller atlas`, `kernel failure statuses`, `kernel overflow clears draw count`; `kernel.test.ts`: `shape overflow status 2 executes production WGSL`, `GPOS point-anchor rejection identifies its table and original run after empty-run filtering` | Actual pipeline-entry signals, queue fences and device destruction/lost promises; independent engines; rejection clears stale draws; targeted internal capacity/missing-slot injections are labeled separately from public admission tests                                                                                                                      |
+| Parser/outline boundary | Focused existing compute font/extraction/selection/plan/program unit tests                                                                                                                                                                                                                                                                                                                                | Malformed containers, fetch failure, glyf composites/cycles/truncation, CFF recursion/truncation and table classification; these are CPU-reader evidence, not WGSL execution evidence                                                                                                                                                                           |
+
+No test installs the reference executor. Native production compute scheduling,
+storage helpers, pipeline preparation and queue submission execute the shipped
+WGSL. Resident updates are observed through pass-through native `mapAsync` calls:
+successful updates may read exactly one four-byte status, never glyph/instance
+records. Additional readbacks are explicitly test-only and outside that window.
+Packing expectations use the shader's single-precision operations, not a loose
+epsilon. Status failures must keep `[6, 0, 0, 0]`.
+
+This matrix does **not** transfer the lab's 12,048-case HarfBuzz policy corpus or
+historical wrapping/paragraph-layout claims to Lite. Current resident input is
+independent single-line runs with baseline spacing, not a wrapping API. Inter
+`A`+U+20DE, `A`+U+20DD and `<-` stay explicit unsupported nested-GSUB witnesses.
+Full Unicode bidi, mixed strong-script strings, Indic/Hangul preprocessing,
+feature/language/variation selection (M4/5), pixels/MAD, performance and exhaustive
+arbitrary-font conformance remain outside this local correctness project.
+
+Internal native failure fixtures also exercise pack allocation overflow and
+missing atlas slots without modifying font bytes. An undersized instance binding
+must report status 2 and leave all indirect words `[6, 0, 0, 0]`; WebGPU's robust
+out-of-bounds write suppression is not a successful pack. Admission checks use
+the actual device's storage binding, buffer and workgroup limits before allocation,
+with arithmetic-only threshold fixtures rather than near-OOM GPU buffers.
+
+Native Arabic regression `سلام` exposed a compatibility boundary: text-shaper
+0.1.28 gives an all-format-3 **GSUB Context (type 5)** lookup an empty originating
+digest, so that root never executes. The compiler retains its selected descriptor
+but emits no executable candidate rules for that precise oracle-inert structure.
+Fail-closed rejection predicates are retained, including Inter's nested-ligature
+boundaries (`A` + U+20DE/U+20DD and `<-`). This does
+not apply to Chaining Context type 6, mixed-format lookups, or generic unsupported
+mode 5, which must still fail if matched. Arabic lookup 35 must therefore leave
+the lam/alef glyphs at 72/9, not promote them to 73/10.
+
+Native point-anchor rejection also exposed ambiguous diagnostics when GSUB and
+GPOS shared a lookup index. Failure-header word 2 now packs the table bit in bit
+16 and the lookup index in bits 0–15; word 3 remains the matched glyph index.
+Readback diagnostics preserve the original batch run index through script grouping
+and empty-run filtering. Successful six-field records and the public API are
+unchanged. The readback cache is lazily allocated, not an import-time allocation.
+
+### Native coverage execution evidence
+
+The full opt-in project contains **37 test families**, not a count inflated by
+unrelated engine unit tests. `milestones.test.ts` checks the following **2,941
+accepted font/string cases** (repeated alphabet characters are counted as cases,
+not additional unique scalars). Empty public calls correctly return without a
+dispatch; every nonempty accepted call follows the production Dawn compute path.
+
+| Pinned font                   | Latin/common accepted | Greek accepted | Cyrillic accepted | Other accepted |                                                    Predeclared rejected calls |
+| ----------------------------- | --------------------: | -------------: | ----------------: | -------------: | ----------------------------------------------------------------------------: |
+| Inter.ttf                     |                   917 |             58 |                79 |              0 | 23 (guarded selections and three unsupported witnesses, single/batch/grouped) |
+| Roboto-Regular.ttf            |                  1259 |             59 |                80 |              0 |                                                                             0 |
+| NotoSansHebrew-Regular.ttf    |                     0 |              0 |                 0 |     101 Hebrew |                                                                             0 |
+| NotoSansArabic-Regular.ttf    |                     0 |              0 |                 0 |     122 Arabic |                                                                             0 |
+| NotoSansSC-Regular-subset.ttf |                     0 |              0 |                 0 |        238 CJK |                                                        1 (unmapped Latin `A`) |
+| NotoSansGothic-Regular.ttf    |                     0 |              0 |                 0 |      28 Gothic |                                                                             0 |
+
+Font hashes are pinned in `tests/lite/compute/fixtures.ts`, not inferred from
+compute output. Two original-font Latin corpus lengths are asserted before
+dispatch (897 Inter / 1133 Roboto, beyond their 20 explicit witnesses), including
+mapped Latin Extended-Additional and Extended-C/D/E scalars; RTL
+corpora similarly assert 96 Hebrew / 115 Arabic cases beyond 5/7 explicit words.
+The Hebrew/Arabic coverage is a bounded mapped-letter repertoire with declared
+joining and mark witnesses, not exhaustive Unicode or arbitrary-font support.
+
+`kernel.test.ts` adds source-generated sfnt fixtures, read independently by the
+same oracle, to execute multiple substitution (mode 11), mark-to-ligature
+component selection (12), single adjustment (10), and chained-context nested
+single actions (2), including explicit literal
+output records. Original-font witnesses execute single/context/pair/class-pair,
+mark-to-mark/base and ligature paths (1/2/3/4/7/8/9). Understood alternates and
+unsupported point anchors reject, and mode 5 is never a generic no-op. These
+branch witnesses are correctness evidence, **not** an asserted WGSL line/branch
+coverage percentage.
+
+Resident checks verify 17 length/run-list transitions per original font, all
+six fonts, 100 independently owned blocks, shared and cold-growing atlases,
+outline components and a literal A→B→C transitive closure. Each instance is
+checked with exact `Math.fround` ABI arithmetic, each glyph record with the
+independent six-field oracle, and every indirect word with `[6, visible, 0, 0]`.
+Successful original-font updates observe exactly `mapAsync(READ, 0, 4)`. Their
+shaped/instance CPU mirrors remain null. Status-only production reads and extra
+test readbacks are separate. The read-only slot upload mirror is inspected only
+for the synthetic empty-outline closure; it is not a GPU glyph/instance map.
+
+Execution used Node **22.19.0**, **webgpu 0.6.1**, native **Metal / Apple M2 Max**
+on macOS 27.0.1. No executor seam, mock command method, self-skip, null backend
+or CPU/reference fallback was installed. Native validation/device errors are
+assertion failures. Lifecycle spies signal actual pipeline requests and forward
+unchanged to Dawn; they do not replace dispatch or hold a fake device-loss promise.
+
+Regression fixes discovered by this coverage:
+
+1. `سلام` originally returned lam/alef 73/10 instead of the pinned oracle's
+   72/9. The precise oracle-inert Context-3 compatibility correction above fixes
+   it while preserving Inter's unsupported nested-ligature predicates.
+2. A real undersized instance allocation originally returned success and an
+   overlarge draw count because robust GPU writes were discarded. Packing now
+   checks the runtime instance-array length and returns overflow status 2.
+3. A matched GPOS point anchor originally reported `unsupported GSUB 0` and
+   omitted its input run. Table-tagged failure headers and original-run metadata
+   fix the fixed native regression after empty/script-group filtering.
+4. Shape/storage/dispatch arithmetic is checked against actual supported device
+   limits; the mutable readback cache is lazy. No near-OOM fixture is allocated.
+5. The eight existing compute source/test type diagnostics are corrected with
+   erased typing/import changes. No public signature, package subpath, font
+   bytes, ceiling or golden is changed.
+
+Focused validation is separate from native corpus counts: **61** related
+compute/shared-GPU mocked unit tests and **31** root emission/public-type tests.
+Library and test TypeScript checks, scoped ESLint/Prettier and `pnpm build:lib`
+pass. Root emission tests exclude `webgpu`, `dawn.node` and native setup modules
+from both compute-only and mixed production import graphs.
+
+Final native rerun: **37/37 passed across four files in 99.53 seconds**. Scoped
+commands executed successfully:
+
+```bash
+pnpm test:compute-text-gpu
+pnpm exec vitest run --project unit tests/lite/unit/compute-{font,glyph-extraction,text-selection,text-plan,text-program,text-shaper,text-placement}.test.ts tests/lite/unit/text-shared-gpu.test.ts
+pnpm exec tsc -p packages/babylon-lite/tsconfig.json --noEmit
+pnpm exec tsc -p tests/lite/tsconfig.json --noEmit
+pnpm build:lib
+pnpm exec vitest run --project build tests/lite/build/compute-text-shaper-treeshake.test.ts tests/lite/build/public-api-types.test.ts
+pnpm exec tsx scripts/build-bundle-scenes.ts --scenes scene180,scene181,scene275
+BUNDLE_ANALYSIS_DIR=node_modules/.cache/compute-m123-analysis pnpm analyze-bundle scene180
+```
+
+ESLint and Prettier were scoped to native tests, changed compute source/units
+and emission tests. The existing ESLint configuration ignores `vitest.config.ts`;
+it was separately checked by TypeScript and Prettier. An initial test-typecheck
+invocation used a nonexistent root `tsconfig.test.json`; the corrected command
+above passes, with no remaining source/test type diagnostics.
+
+Filtered live bundle-size builds cover only scene180 / scene181 / scene275:
+**30,138 / 30,720 B**, **45,478 / 47,104 B**, **39,463 / 40,448 B** respectively.
+These match the immediately preceding layer-separation evidence above/below;
+all three ceilings remain unchanged. Scene180 bundle attribution was also
+inspected with `analyze-bundle`; generated but unfetched dynamic chunks are
+not confused with measured runtime bytes. Pixels/MAD/goldens, performance,
+wrapping, the historical HarfBuzz policy corpus and M4/5 remain excluded.
+
+### Neutral implementation boundaries
+
+CPU and resident text share outline primitives (`outline-curves.ts` plus
+`cubic-to-quadratics.ts`), the
+12-byte instance / 32-byte style ABI (`text-buffer-layout.ts`) and narrow GPU resource constructors
+(`_gpu/text-bind-group.ts`, `_gpu/text-style-buffer.ts`). These modules have no
+runtime dependency on either font/shaping pipeline, layout, CPU slot packing,
+or compute selection/plans/execution; imports of state types are erased.
+`text-data-state.ts` initializes legitimate CPU blocks only. Resident blocks have
+no placeholder `TextData` or private placeholder atlas.
+
+### Distinct layers and the prepared-draw protocol
+
+```typescript
+export interface TextLayer extends TextLayerPlacement {
+    readonly data: TextData;
+}
+export interface ComputeTextLayer extends TextLayerPlacement {
+    readonly data: ComputeTextData;
+}
+export type TextRendererLayer = TextLayer | ComputeTextLayer;
+export function createTextLayer(data: TextData, options?: TextLayerOptions): TextLayer;
+export function createComputeTextLayer(data: ComputeTextData, options?: TextLayerOptions): ComputeTextLayer;
+export function setTextLayerPosition(layer: TextLayerPlacement, x: number, y: number): void;
+export interface TextRendererOptions {
+    layers: readonly TextRendererLayer[];
+    clear?: boolean;
+    clearValue?: GPUColorDict;
+}
+export function addTextRendererLayer(renderer: TextRenderer, layer: TextRendererLayer): void;
+export function removeTextRendererLayer(renderer: TextRenderer, layer: TextRendererLayer): boolean;
+```
+
+`TextLayerPlacement` contains mutable `positionPx`, `rotationRad`, `scale`, `order`,
+`opacity`, `coverageGamma`, and `visible`. Both types are pure public state and
+are exported from the sole package root; GPU resources and callbacks are
+`@internal` and trimmed from published declarations. No public/internal companion
+interfaces or widened CPU `data` type are introduced.
+
+Each factory installs an internal `_createDraw(engine, uniform)` function.
+The renderer calls it separately for each layer/renderer attachment. It returns
+an internal prepared-draw adapter with `_prepare(layout)`, `_record(encoder,
+quad, basePipeline, variantPipeline): number`, `_dispose()`, `_active`, and
+`_version`. Preparation synchronizes resources and advances the version only
+when a baked resource identity, binding layout, or draw structure changes.
+Recording consumes prepared resources and returns the actual recorded draw count.
+The shared core imports neither adapter at runtime: `text-layer.ts` owns common
+placement/protocol types, `text-layer-cpu.ts` owns CPU allocation/uploads and
+ordinary draws, and `compute-text-layer.ts` owns borrowed resident buffers and
+indirect draws. The root re-exports each factory from its own module.
+
+The renderer owns the 96-byte per-attachment uniform, pipelines, cached bundles,
+ordering and compositing. The CPU adapter owns its instance/style buffers and
+per-group bindings. The compute adapter owns only its per-attachment bindings;
+the block owns shaped/instance/indirect/status/style buffers, and the caller owns
+the shared atlas. Two layers referencing one resident block never share their
+placement uniform or bindings. Removal, re-addition and renderer disposal destroy
+only attachment-owned resources. Data disposal/loss is terminal, releases only
+block resources, rejects pending work, and prevents cached bundles from replaying.
+Recovery destroys/recreates attachments through the same factory seam: CPU data
+is re-uploaded, resident data stays terminal and is not silently recreated.
+
+Preparation runs before bundle replay as well as during update, including cached
+draws. Both adapters compare actual curve texture, band texture, metadata buffer,
+style buffer and layout identities (not a transient atlas `_rebuilt` result).
+Sibling atlas growth therefore replaces every affected binding before replay,
+even when a sibling already performed the upload or growth occurs between update
+and record. Content-only writes preserve bundles; CPU slot-range changes and
+resident instance/indirect replacement re-record. Invisible layers do no work.
+Busy/failed resident updates keep indirect instance count zero; missing live
+buffers or an invalid owning engine produce diagnostics, not success-shaped draws.
+
+Example mixed use: `createTextRenderer(surface, { layers: [createTextLayer(cpu),
+createComputeTextLayer(resident, { positionPx: { x: 40, y: 80 } })] })`.
+
+### Layer-separation emission and validation evidence
+
+Before and after fixtures use the same shipped `build/lib/index.js` root, named
+imports and `console.log` references. Fixture strings were checked for exact
+equality. `bundler-harness.ts` runs Rollup ESM unminified, the identical Rollup
+entry with Terser `{ module: true }`, and actual Vite production emission with
+minification disabled and vendors included. Counts below are emitted UTF-8 bytes,
+not source sizes or externalized-vendor estimates.
+
+The shared import list is `createGlyphStorage, createTextRenderer`. The resident
+list adds `loadComputeFont, createComputeTextData, updateComputeTextData,
+createComputeTextLayer, disposeComputeTextData`. CPU adds `loadFont,
+createDefaultTextData, updateDefaultTextData, createTextLayer`; BYO adds
+`createTextData, updateTextData, createTextLayer`. Combined includes the shared,
+CPU and resident lists once. The measured core-only list is `createTextRenderer`;
+the emission regression test additionally references `setTextLayerPosition`.
+
+| Consumer | Emission | Before (B) | After (B) | Delta (B) |
+| -------- | -------- | ---------: | --------: | --------: |
+| Core     | Rollup   |     27,925 |    17,509 |   −10,416 |
+| Core     | Terser   |     15,007 |     9,929 |    −5,078 |
+| Core     | Vite     |    268,784 |   258,172 |   −10,612 |
+| Resident | Rollup   |    270,098 |   263,067 |    −7,031 |
+| Resident | Terser   |    139,127 |   135,386 |    −3,741 |
+| Resident | Vite     |    509,817 |   502,786 |    −7,031 |
+| CPU      | Rollup   |     74,376 |    73,390 |      −986 |
+| CPU      | Terser   |     30,012 |    29,492 |      −520 |
+| CPU      | Vite     |  1,478,216 | 1,477,310 |      −906 |
+| BYO      | Rollup   |     57,692 |    56,706 |      −986 |
+| BYO      | Terser   |     25,650 |    25,136 |      −514 |
+| BYO      | Vite     |    296,552 |   295,646 |      −906 |
+| Combined | Rollup   |    303,830 |   302,536 |    −1,294 |
+| Combined | Terser   |    149,987 |   149,064 |      −923 |
+| Combined | Vite     |  1,708,593 | 1,707,419 |    −1,174 |
+
+Root-consumer tests inspect emitted code and per-module rendered bytes across
+these bundlers. Resident-only rendering retains no CPU packing/state/palette
+synchronization, default shaping/font/layout/extraction, readback executor or
+reference interpreter. CPU/BYO retains no compute font/plan/compiler/shaper or
+resident shaders. Core-only retains neither adapter; mixed retains the shared
+binding/style constructors once.
+
+Final focused verification:
+
+- `pnpm build:lib` passes, including API Extractor's trimmed declarations.
+- `vitest run --project unit` with the 20 affected renderer/recovery, shared GPU,
+  CPU data/layout/outline/storage/color/weight and compute font/extraction/
+  selection/program/plan/placement/shaper test files: **739 tests pass**.
+  Shared GPU mocks verify actual draws, instance/style writes and uniform bindings,
+  two layers sharing a block, one layer attached to two renderers, removal/re-addition,
+  content-only caching, instance/indirect/style/layout replacement, sibling atlas
+  growth between update and record, terminal loss with and without device replacement,
+  admission failure, missing live curve sets and foreign-engine attachment cleanup.
+- `vitest run --project build` scoped to `public-api-types.test.ts`,
+  `compute-text-shaper-treeshake.test.ts` and `bundling-rollup.test.ts`:
+  **36 tests pass**, including exact CPU/resident data types, mixed rendering and
+  positioning APIs, mutation and trimmed private protocol/resource fields.
+- `node --test scripts/text-compute-live-input.test.mjs
+scripts/text-compute-ordered-program.test.mjs`: **45 tests pass**.
+  The three experimental private-renderer scripts pass `node --check`; their
+  attachment accesses now use `_draw`. Cold-frame checks validate actual cached
+  atlas handles and require rebuilding on replacement, not on mere content writes;
+  `coldBundlesRebuilt` counts actual re-recordings and `coldBindingsValidated`
+  proves every cold attachment was checked. No profiling run was performed.
+- Scoped TypeScript ESLint and source/test/script Prettier checks pass.
+- Headless nonvisual `compute-text-resident.spec.ts` and
+  `compute-text-shaper.spec.ts`: **2 tests pass**. No visual, MAD, screenshot,
+  golden or performance tests were run.
+- `pnpm build:bundle-scenes -- --scenes scene180,scene181,scene275` passes:
+  **30,138 / 30,720 B**, **45,478 / 47,104 B**, **39,463 / 40,448 B**.
+  All original ceilings remain unchanged; no affected scene regression.
+- Library `tsc --noEmit` diagnostics exactly match the recorded pre-change
+  baseline: the existing `GlyphRun` import in `compute-text-placement.ts`,
+  brand conversion in `compute-text-plan.ts`, and narrowing/brand conversion in
+  `compute-text-shaper.ts`. Test-project checking has only those four plus the
+  existing language argument in `compute-text-plan.test.ts` and three typed-array
+  arguments in `compute-text-shaper.test.ts`. This layer change introduces no
+  additional diagnostics; these pre-existing failures are not fixed here.
+
+The shared binding helper receives the selected uniform, style buffer, layout,
+and an already-selected atlas resource subset (`_curveTex`, `_bandTex`, `_metaBuf`).
+The resource list follows the contiguous group-0 ABI: uniform, curves, bands,
+metadata, styles; list indices supply bindings 0–4. It does not select an atlas, cache
+bindings, upload, invalidate, or own resources. Each renderer/recorder retains
+its existing cache and lifetime rules. The style-buffer constructor owns only
+allocation in **bytes**, so palette growth and device recovery pass their existing
+byte lengths without converting through an entry count. Initial buffers use
+`TEXT_STYLE_BYTES`; caller labels remain unchanged. CPU palette growth/version synchronization stays in
+`_gpu/text-style-gpu.ts`, while resident base-style initialization stays with
+its block.
+
+Line segments are emitted for either-axis deltas **≥ 0.1**; explicit closing
+segments require **> 0.1**. Cubics retain the two-quadratic 3/4 subdivision.
+Parser contours auto-close on another move and at finish via `outline-path.ts`;
+the text-shaper command adapter deliberately does neither, preserving open paths
+and next-M behavior. Each adapter owns its contour state; CPU-only consumers do
+not retain the parser recorder/TrueType contour walker. Bounds remain supplied
+by each outline source, and empty/bounds-less outlines remain absent. TrueType
+implied points/composites stay parser-owned.
+
+Root-export emitted-bundle tests enforce these boundaries: resident-only
+consumers exclude the vendor CPU font, layout/extraction/packing, glyph-record
+readback executor, and CPU reference interpreter. CPU and BYO render consumers
+exclude compute fonts, plans/compiler/shaping and resident pack shaders.
+The shared renderer has no CPU upload arm or compute import. Resident-only
+render consumers exclude CPU state initialization and palette synchronization;
+core-only consumers exclude both adapters.
+Combined consumers retain one copy of each neutral helper.
+
+Focused regression coverage is in `text-outline-path.test.ts` (epsilon,
+closing policy, bounds, cubics and implied points), `text-shared-gpu.test.ts`
+(state aliases, resource descriptors, CPU palette synchronization, cached
+CPU/resident draws and caller-owned atlas lifetime), and
+`compute-text-shaper-treeshake.test.ts` (shipped root-export Rollup and Vite
+consumers, including vendor-inclusive Vite output). Renderer-only consumers
+retain no text initialization/packing; resident factories retain no CPU palette
+synchronization.
+
+`createComputeTextData` / `updateComputeTextData` / `disposeComputeTextData` / `createComputeTextLayer` are a sibling of `shapeComputeText`. They do not return positions and do not build `PlacedGlyph[]`. The caller owns the `GlyphStorage` and passes it in, so several blocks share one atlas. Each block keeps its own instance and indirect buffers. Disposing a block does not dispose that storage. Different fonts in one storage use different curve-set ids. One block has one base style. The shape kernel writes the shaped-record buffer; a following pack kernel writes the 12-byte instance buffer and the 16-byte indirect args (`6`, instance count, `0`, `0`). Positions are pixels (`fontSizePx / unitsPerEm`) on a Y-up baseline at `(0, 0)`. RTL is reversed once, in the shape kernel. A missing atlas slot, overflow, or unsupported lookup zeros the indirect instance count and writes a nonzero status. JavaScript reads that 4-byte status and nothing else. Outlines come from a cmap-seeded closure plus transitive selected GSUB outputs and outline components, installed before dispatch. Atlas slots are append-only; adapters detect replacement resources before replay. Device loss and dispose drop pending work and prevent replay. There is no external draw override on CPU layers.

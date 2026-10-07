@@ -13,7 +13,9 @@ import type { GlyphCurves } from "../../../packages/babylon-lite/src/text/glyph-
 import { createGlyphStorage } from "../../../packages/babylon-lite/src/text/glyph-storage";
 import { createTextData } from "../../../packages/babylon-lite/src/text/text-data";
 import { updateTextData } from "../../../packages/babylon-lite/src/text/text-data";
-import { createTextLayer, createTextRenderer, registerTextRenderer } from "../../../packages/babylon-lite/src/text/text-renderer";
+import type { CpuTextLayerDraw } from "../../../packages/babylon-lite/src/text/text-layer-cpu";
+import { createTextLayer } from "../../../packages/babylon-lite/src/text/text-layer-cpu";
+import { createTextRenderer, registerTextRenderer } from "../../../packages/babylon-lite/src/text/text-renderer";
 import { rebuildRegisteredTextRenderers } from "../../../packages/babylon-lite/src/text/text-recovery";
 
 interface FakeBuffer extends GPUBuffer {
@@ -28,6 +30,8 @@ interface FakeTexture extends GPUTexture {
 interface BufferWrite {
     readonly label: string;
     readonly firstFloat: number;
+    readonly offset: number;
+    readonly color?: number[];
 }
 
 interface FakeDeviceProbe {
@@ -45,8 +49,13 @@ function makeDevice(): FakeDeviceProbe {
         features: new Set<GPUFeatureName>(),
         lost: new Promise<GPUDeviceLostInfo>(() => undefined),
         queue: {
-            writeBuffer(buffer: FakeBuffer, _offset: number, data: ArrayBuffer, dataOffset = 0): void {
-                bufferWrites.push({ label: buffer._label, firstFloat: new Float32Array(data, dataOffset, 1)[0] ?? 0 });
+            writeBuffer(buffer: FakeBuffer, offset: number, data: ArrayBuffer, dataOffset = 0): void {
+                bufferWrites.push({
+                    label: buffer._label,
+                    firstFloat: new Float32Array(data, dataOffset, 1)[0] ?? 0,
+                    offset,
+                    ...(buffer._label === "text-layer-ubo" && offset === 80 ? { color: [...new Float32Array(data, dataOffset, 4)] } : {}),
+                });
             },
             writeTexture(_destination: GPUTexelCopyTextureInfo, data: Uint8Array): void {
                 textureWrites.push(new Uint8Array(data));
@@ -215,8 +224,11 @@ describe("TextRenderer device-lost recovery", () => {
         const oldAtlasGpu = atlas._gpu!;
         const oldLayerGpu = renderer._layerGpu.get(layer)!;
         const oldUniform = oldLayerGpu._textU;
-        const oldInstance = oldLayerGpu._instanceBuf;
-        const oldStyle = oldLayerGpu._styleBuf;
+        const oldInstance = (oldLayerGpu._draw as CpuTextLayerDraw)._instanceBuf;
+        const oldStyle = (oldLayerGpu._draw as CpuTextLayerDraw)._styleBuf;
+        expect(oldProbe.bufferWrites.filter((write) => write.label === "text-layer-ubo" && write.offset === 80)).toEqual([
+            { label: "text-layer-ubo", firstFloat: 0.5, offset: 80, color: [0.5, 1, 1, 0.75] },
+        ]);
 
         const newProbe = makeDevice();
         engine._device = newProbe.device;
@@ -224,10 +236,16 @@ describe("TextRenderer device-lost recovery", () => {
 
         const rebuiltLayerGpu = renderer._layerGpu.get(layer)!;
         expect(rebuiltLayerGpu._textU).not.toBe(oldUniform);
-        expect(rebuiltLayerGpu._instanceBuf).not.toBe(oldInstance);
-        expect(rebuiltLayerGpu._styleBuf).not.toBe(oldStyle);
-        expect(rebuiltLayerGpu._uploadedStyleVersion).toBe(data._styleVersion);
-        expect(rebuiltLayerGpu._uploadedDataVersion).toBe(data._version);
+        const rebuiltDraw = rebuiltLayerGpu._draw as CpuTextLayerDraw;
+        expect(rebuiltDraw._instanceBuf).not.toBe(oldInstance);
+        expect(rebuiltDraw._styleBuf).not.toBe(oldStyle);
+        expect(rebuiltDraw._uploadedStyleVersion).toBe(data._styleVersion);
+        expect(rebuiltDraw._uploadedDataVersion).toBe(data._version);
+        expect(newProbe.bufferWrites.filter((write) => write.label === "text-layer-ubo" && write.offset === 80)).toEqual([
+            { label: "text-layer-ubo", firstFloat: 0.5, offset: 80, color: [0.5, 1, 1, 0.75] },
+        ]);
+        renderer._update();
+        expect(newProbe.bufferWrites.filter((write) => write.label === "text-layer-ubo" && write.offset === 80)).toHaveLength(1);
         expect(rebuiltLayerGpu._pipeline).not.toBeNull();
         expect(atlas._gpu).not.toBe(oldAtlasGpu);
         expect(atlas._gpu?._device).toBe(newProbe.device);
@@ -256,7 +274,7 @@ describe("TextRenderer device-lost recovery", () => {
         registerTextRenderer(renderer);
         renderer._update();
 
-        expect(renderer._layerGpu.get(layer)!._bindGroupCache.map((e) => e._curveSetId)).toEqual(["a", "b"]);
+        expect((renderer._layerGpu.get(layer)!._draw as CpuTextLayerDraw)._bindGroupCache.map((e) => e._curveSetId)).toEqual(["a", "b"]);
 
         // Drop a curve set *before* recovery runs, so the rebuild — not a later `_update()` —
         // is what has to reconcile the cache with the shorter group list. Truncation in
@@ -266,6 +284,6 @@ describe("TextRenderer device-lost recovery", () => {
         engine._device = makeDevice().device;
         await rebuildRegisteredTextRenderers(engine);
 
-        expect(renderer._layerGpu.get(layer)!._bindGroupCache.map((e) => e._curveSetId)).toEqual(["b"]);
+        expect((renderer._layerGpu.get(layer)!._draw as CpuTextLayerDraw)._bindGroupCache.map((e) => e._curveSetId)).toEqual(["b"]);
     });
 });

@@ -21,8 +21,10 @@ import type { GlyphCurves } from "../../../packages/babylon-lite/src/text/glyph-
 import { createGlyphStorage } from "../../../packages/babylon-lite/src/text/glyph-storage";
 import type { GlyphRun } from "../../../packages/babylon-lite/src/text/text-data";
 import { createTextData, updateTextData } from "../../../packages/babylon-lite/src/text/text-data";
-import type { TextLayer, TextRenderer } from "../../../packages/babylon-lite/src/text/text-renderer";
-import { createTextLayer, createTextRenderer } from "../../../packages/babylon-lite/src/text/text-renderer";
+import type { TextRenderer } from "../../../packages/babylon-lite/src/text/text-renderer";
+import type { TextLayer, CpuTextLayerDraw } from "../../../packages/babylon-lite/src/text/text-layer-cpu";
+import { createTextLayer } from "../../../packages/babylon-lite/src/text/text-layer-cpu";
+import { addTextRendererLayer, createTextRenderer, removeTextRendererLayer } from "../../../packages/babylon-lite/src/text/text-renderer";
 import type { SurfaceContext } from "../../../packages/babylon-lite/src/engine/surface";
 import { getRenderingContextKind } from "../../../packages/babylon-lite/src/engine/engine";
 
@@ -63,7 +65,10 @@ function createMockDevice() {
         createPipelineLayout: vi.fn(() => ({})),
         createShaderModule: vi.fn(() => ({})),
         createRenderPipeline: vi.fn(() => ({})),
-        queue: { writeBuffer: vi.fn(), writeTexture: vi.fn() },
+        queue: {
+            writeBuffer: vi.fn((_buffer: GPUBuffer, _offset: number, _data: ArrayBuffer, _dataOffset: number, _size: number) => undefined),
+            writeTexture: vi.fn(),
+        },
     };
 
     return { device, counters };
@@ -79,7 +84,7 @@ function createMockSurface() {
         canvas: { width: 800, height: 600 },
         format: "bgra8unorm",
     } as unknown as SurfaceContext;
-    return { surface, counters };
+    return { surface, counters, device };
 }
 
 // ── Text fixtures ─────────────────────────────────────────────────
@@ -124,7 +129,7 @@ function layerGpu(rr: TextRenderer, layer: TextLayer) {
 
 /** Every cached bind group must sample the atlas of the group that now sits at its index. */
 function expectBindGroupsMatchGroups(rr: TextRenderer, layer: TextLayer): void {
-    const lg = layerGpu(rr, layer);
+    const lg = layerGpu(rr, layer)._draw as CpuTextLayerDraw;
     const groups = layer.data._groups;
 
     // One entry per draw group — the cache is truncated with the group list.
@@ -146,7 +151,7 @@ function expectBindGroupsMatchGroups(rr: TextRenderer, layer: TextLayer): void {
     }
 }
 
-describe("text renderer bind-group cache", () => {
+describe("text renderer GPU caches", () => {
     it("rebinds the correct atlas after a reset reorders draw groups", () => {
         const { surface } = createMockSurface();
         const storage = makeStorage();
@@ -177,6 +182,88 @@ describe("text renderer bind-group cache", () => {
         expectBindGroupsMatchGroups(rr, layer);
     });
 
+    describe("text renderer color uniform uploads", () => {
+        it("uploads on first use and value changes, not on stable or hidden frames, and starts fresh after re-addition", () => {
+            const { surface, device } = createMockSurface();
+            const layer = createTextLayer(createTextData(makeStorage(), [run("f", 0)]), { opacity: 0.75, coverageGamma: 2 });
+            const rr = createTextRenderer(surface, { layers: [layer] });
+            const colorWrites = () =>
+                device.queue.writeBuffer.mock.calls
+                    .filter(([, offset]) => offset === 80)
+                    .map(([buffer, offset, source, dataOffset, size]) => ({
+                        buffer,
+                        offset,
+                        size,
+                        color: [...new Float32Array(source, dataOffset, 4)],
+                    }));
+
+            rr._update();
+            const originalBuffer = rr._layerGpu.get(layer)!._textU;
+            expect(colorWrites()).toEqual([{ buffer: originalBuffer, offset: 80, size: 16, color: [0.5, 1, 1, 0.75] }]);
+            rr._update();
+            expect(colorWrites()).toHaveLength(1);
+
+            layer.opacity = 0.5;
+            rr._update();
+            layer.coverageGamma = 4;
+            rr._update();
+            expect(colorWrites().map((write) => write.color)).toEqual([
+                [0.5, 1, 1, 0.75],
+                [0.5, 1, 1, 0.5],
+                [0.25, 1, 1, 0.5],
+            ]);
+
+            layer.visible = false;
+            layer.opacity = 0.25;
+            layer.coverageGamma = 0;
+            rr._update();
+            expect(colorWrites()).toHaveLength(3);
+            layer.visible = true;
+            rr._update();
+            expect(colorWrites()[3]?.color).toEqual([1, 1, 1, 0.25]);
+            rr._update();
+            expect(colorWrites()).toHaveLength(4);
+
+            expect(removeTextRendererLayer(rr, layer)).toBe(true);
+            addTextRendererLayer(rr, layer);
+            rr._update();
+            expect(colorWrites()).toHaveLength(5);
+            expect(colorWrites()[4]).toEqual({ buffer: rr._layerGpu.get(layer)!._textU, offset: 80, size: 16, color: [1, 1, 1, 0.25] });
+            expect(colorWrites()[4]?.buffer).not.toBe(originalBuffer);
+        });
+
+        it("preserves signed zero, tolerates stable NaN, and retries a failed color write", () => {
+            const { surface, device } = createMockSurface();
+            const layer = createTextLayer(createTextData(makeStorage(), [run("f", 0)]));
+            const rr = createTextRenderer(surface, { layers: [layer] });
+            rr._update();
+            device.queue.writeBuffer.mockClear();
+
+            layer.opacity = -0;
+            device.queue.writeBuffer.mockImplementation((_buffer, offset) => {
+                if (offset === 80) {
+                    throw new Error("write failed");
+                }
+            });
+            expect(() => rr._update()).toThrow("write failed");
+            expect(rr._layerGpu.get(layer)!._colorUploaded).toBe(true);
+            expect(Object.is(rr._layerGpu.get(layer)!._uploadedOpacity, 1)).toBe(true);
+
+            device.queue.writeBuffer.mockImplementation(() => undefined);
+            rr._update();
+            const colorCalls = () => device.queue.writeBuffer.mock.calls.filter(([, offset]) => offset === 80);
+            expect(colorCalls()).toHaveLength(2);
+            expect(Object.is(new Float32Array(colorCalls()[1]![2], colorCalls()[1]![3], 4)[3], -0)).toBe(true);
+            rr._update();
+            expect(colorCalls()).toHaveLength(2);
+
+            layer.opacity = NaN;
+            rr._update();
+            rr._update();
+            expect(colorCalls()).toHaveLength(3);
+        });
+    });
+
     it("does not recreate bind groups when nothing changed", () => {
         const { surface, counters } = createMockSurface();
         const storage = makeStorage();
@@ -203,7 +290,7 @@ describe("text renderer bind-group cache", () => {
         const rr = createTextRenderer(surface, { layers: [layer] });
 
         rr._update();
-        expect(layerGpu(rr, layer)._bindGroupCache.length).toBe(2);
+        expect((layerGpu(rr, layer)._draw as CpuTextLayerDraw)._bindGroupCache.length).toBe(2);
 
         updateTextData(data, { update: "reset", runs: [run("g", 10)] });
         rr._update();

@@ -43,6 +43,7 @@ minimumReleaseAgeExclude:
 allowBuilds:
   esbuild: true
   sharp: true
+  webgpu: true
 
 overrides:
   protobufjs: '>=8.6.6'

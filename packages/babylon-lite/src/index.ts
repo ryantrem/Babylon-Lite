@@ -1173,7 +1173,16 @@ export {
 // ─── Text ────────────────────────────────────────────────────────────
 export type { Font } from "./text/font.js";
 export { loadFont, createFontFromBuffer } from "./text/font.js";
+export type { ComputeFont } from "./text/compute-font.js";
+export { createComputeFontFromBuffer, loadComputeFont } from "./text/compute-font.js";
+export type { ComputeTextGlyph } from "./text/compute-text-shaper.js";
+export { shapeComputeText } from "./text/compute-text-shaper.js";
+export type { ComputeTextData } from "./text/compute-text-data.js";
+export { createComputeTextData, updateComputeTextData, disposeComputeTextData } from "./text/compute-text-data.js";
+export type { ComputeTextLayer } from "./text/compute-text-layer.js";
+export { createComputeTextLayer } from "./text/compute-text-layer.js";
 export { extractGlyphCurves, cubicToQuadratics } from "./text/glyph-extraction.js";
+export { extractComputeGlyphCurves } from "./text/compute-glyph-extraction.js";
 export type { TextLayoutOptions } from "./text/layout.js";
 export type { GlyphStorage, CurveSetId, QuadCurve, GlyphBounds, GlyphCurves } from "./text/glyph-storage.js";
 export { createGlyphStorage, updateGlyphStorage, disposeGlyphStorage } from "./text/glyph-storage.js";
@@ -1183,17 +1192,12 @@ export type { DefaultTextData } from "./text/default-text-data.js";
 export { createDefaultTextData, updateDefaultTextData, disposeDefaultTextData } from "./text/default-text-data.js";
 export type { TextRenderableOptions, TextRenderable } from "./text/text-renderable.js";
 export { createTextRenderable, disposeTextRenderable, addTextRenderable } from "./text/text-renderable.js";
-export type { TextLayer, TextLayerOptions, TextRenderer, TextRendererOptions } from "./text/text-renderer.js";
-export {
-    createTextLayer,
-    setTextLayerPosition,
-    createTextRenderer,
-    addTextRendererLayer,
-    removeTextRendererLayer,
-    registerTextRenderer,
-    unregisterTextRenderer,
-    disposeTextRenderer,
-} from "./text/text-renderer.js";
+export type { TextLayer } from "./text/text-layer-cpu.js";
+export { createTextLayer } from "./text/text-layer-cpu.js";
+export type { TextLayerOptions, TextLayerPlacement } from "./text/text-layer.js";
+export { setTextLayerPosition } from "./text/text-layer.js";
+export type { TextRendererLayer, TextRenderer, TextRendererOptions } from "./text/text-renderer.js";
+export { createTextRenderer, addTextRendererLayer, removeTextRendererLayer, registerTextRenderer, unregisterTextRenderer, disposeTextRenderer } from "./text/text-renderer.js";
 export { setFontWeightOffset } from "./text/set-font-weight-offset.js";
 export { loadFontWeightOffset } from "./text/load-font-weight-offset.js";
 

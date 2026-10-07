@@ -7,7 +7,7 @@
 
 import type { EngineContext } from "../../engine/engine.js";
 import { composeSlugShader } from "../shaders/slug-shader.js";
-import { TEXT_INSTANCE_BYTES } from "../text-data.js";
+import { TEXT_INSTANCE_BYTES } from "../text-buffer-layout.js";
 import { _getAlphaToCoverageResolver } from "../../render/alpha-to-coverage-hook.js";
 
 /** @internal Opaque, already-compiled shader-module pair for one composed text shader

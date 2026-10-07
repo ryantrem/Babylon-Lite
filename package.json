@@ -34,6 +34,7 @@
         "test": "pnpm build:bundle-scenes && pnpm test:parity",
         "test:watch": "vitest --project unit",
         "test:unit": "vitest run --project unit",
+        "test:compute-text-gpu": "vitest run --project compute-text-gpu",
         "test:unit:gl": "vitest run --project gl-unit",
         "test:build:gl": "vitest run --project gl-build",
         "test:build": "vitest run --project build",
@@ -98,6 +99,7 @@
         "typescript-eslint": "^8.69.0",
         "vite": "^8.2.2",
         "vitest": "^4.1.11",
+        "webgpu": "0.6.1",
         "webpack": "^5.110.3"
     },
     "dependencies": {

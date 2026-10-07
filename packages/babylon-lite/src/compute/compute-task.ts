@@ -183,8 +183,27 @@ export function removeComputeDispatch(task: ComputeTask, dispatch: ComputeDispat
 
 /** Submit recorded compute tasks immediately, without rendering a frame or acquiring a swapchain texture. */
 export function submitComputeTasks(tasks: readonly ComputeTask[]): void {
-    if (tasks.length === 0) {
+    const engine = validateComputeTasks(tasks);
+    if (!engine) {
         return;
+    }
+    const encoder = engine._device.createCommandEncoder({ label: "direct-compute-tasks" });
+    recordComputeTasks(tasks, engine, encoder);
+    engine._device.queue.submit([encoder.finish()]);
+    engine._gpuTaskTimerResolve?.(encoder);
+}
+
+/** @internal Record direct tasks before additional commands in the same submission. */
+export function _recordComputeTasks(tasks: readonly ComputeTask[], encoder: GPUCommandEncoder): void {
+    const engine = validateComputeTasks(tasks);
+    if (engine) {
+        recordComputeTasks(tasks, engine, encoder);
+    }
+}
+
+function validateComputeTasks(tasks: readonly ComputeTask[]): EngineContext | null {
+    if (tasks.length === 0) {
+        return null;
     }
     const engine = tasks[0]!.engine;
     let hasEnabledTask = false;
@@ -201,9 +220,12 @@ export function submitComputeTasks(tasks: readonly ComputeTask[]): void {
         throw new Error("submitComputeTasks cannot run while a frame is being recorded.");
     }
     if (!hasEnabledTask) {
-        return;
+        return null;
     }
-    const encoder = engine._device.createCommandEncoder({ label: "direct-compute-tasks" });
+    return engine;
+}
+
+function recordComputeTasks(tasks: readonly ComputeTask[], engine: EngineContext, encoder: GPUCommandEncoder): void {
     engine._currentEncoder = encoder;
     try {
         for (const task of tasks) {
@@ -214,8 +236,6 @@ export function submitComputeTasks(tasks: readonly ComputeTask[]): void {
     } finally {
         engine._currentEncoder = undefined!;
     }
-    engine._device.queue.submit([encoder.finish()]);
-    engine._gpuTaskTimerResolve?.(encoder);
 }
 
 /** Prepare every pipeline variant and binding set used by a task. */

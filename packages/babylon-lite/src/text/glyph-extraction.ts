@@ -9,24 +9,14 @@
  *  may want is `cubicToQuadratics`, which has no dependency on text-shaper. */
 
 import { getGlyphPath } from "text-shaper";
+import { cubicToQuadratics } from "./cubic-to-quadratics.js";
+import { appendOutlineLine, appendOutlineQuadratic } from "./outline-curves.js";
 import type { Font } from "./font.js";
 import type { GlyphBounds, GlyphCurves, QuadCurve } from "./glyph-storage.js";
 
 /** Approximate a cubic Bézier with two quadratics using the "3/4 rule" (matches Slug reference).
- *  Exposed as a public helper so callers that ingest cubic outlines from their own font sources
- *  (e.g. DirectWrite, FreeType) can convert into the quadratic-only format `GlyphCurves` expects. */
-export function cubicToQuadratics(p0x: number, p0y: number, c1x: number, c1y: number, c2x: number, c2y: number, p1x: number, p1y: number): [QuadCurve, QuadCurve] {
-    const q0cx = p0x + (c1x - p0x) * 0.75;
-    const q0cy = p0y + (c1y - p0y) * 0.75;
-    const q1cx = p1x + (c2x - p1x) * 0.75;
-    const q1cy = p1y + (c2y - p1y) * 0.75;
-    const midx = (q0cx + q1cx) * 0.5;
-    const midy = (q0cy + q1cy) * 0.5;
-    return [
-        { p0x, p0y, p1x: q0cx, p1y: q0cy, p2x: midx, p2y: midy },
-        { p0x: midx, p0y: midy, p1x: q1cx, p1y: q1cy, p2x: p1x, p2y: p1y },
-    ];
-}
+ *  Re-exported from the dependency-free helper so existing public imports keep working. */
+export { cubicToQuadratics } from "./cubic-to-quadratics.js";
 
 function extractOne(font: Font, glyphId: number): GlyphCurves | null {
     const path = getGlyphPath(font._font, glyphId);
@@ -41,51 +31,27 @@ function extractOne(font: Font, glyphId: number): GlyphCurves | null {
     for (const cmd of path.commands) {
         switch (cmd.type) {
             case "M":
-                curX = cmd.x;
-                curY = cmd.y;
+                // text-shaper commands close only on Z, not implicitly on the next M.
                 startX = cmd.x;
                 startY = cmd.y;
                 break;
-            case "L": {
-                const dx = cmd.x - curX;
-                const dy = cmd.y - curY;
-                if (Math.abs(dx) >= 0.1 || Math.abs(dy) >= 0.1) {
-                    const mx = (curX + cmd.x) * 0.5;
-                    const my = (curY + cmd.y) * 0.5;
-                    curves.push({ p0x: curX, p0y: curY, p1x: mx, p1y: my, p2x: cmd.x, p2y: cmd.y });
-                }
-                curX = cmd.x;
-                curY = cmd.y;
+            case "L":
+                appendOutlineLine(curves, curX, curY, cmd.x, cmd.y);
                 break;
-            }
             case "Q":
-                curves.push({ p0x: curX, p0y: curY, p1x: cmd.x1, p1y: cmd.y1, p2x: cmd.x, p2y: cmd.y });
-                curX = cmd.x;
-                curY = cmd.y;
+                appendOutlineQuadratic(curves, curX, curY, cmd.x1, cmd.y1, cmd.x, cmd.y);
                 break;
-            case "C": {
-                const [q1, q2] = cubicToQuadratics(curX, curY, cmd.x1, cmd.y1, cmd.x2, cmd.y2, cmd.x, cmd.y);
-                curves.push(q1, q2);
-                curX = cmd.x;
-                curY = cmd.y;
+            case "C":
+                curves.push(...cubicToQuadratics(curX, curY, cmd.x1, cmd.y1, cmd.x2, cmd.y2, cmd.x, cmd.y));
                 break;
-            }
-            case "Z": {
-                const cdx = startX - curX;
-                const cdy = startY - curY;
-                if (Math.abs(cdx) > 0.1 || Math.abs(cdy) > 0.1) {
-                    const mx = (curX + startX) * 0.5;
-                    const my = (curY + startY) * 0.5;
-                    curves.push({ p0x: curX, p0y: curY, p1x: mx, p1y: my, p2x: startX, p2y: startY });
-                }
+            case "Z":
+                appendOutlineLine(curves, curX, curY, startX, startY, true);
                 curX = startX;
                 curY = startY;
-                break;
-            }
+                continue;
         }
-    }
-    if (curves.length === 0) {
-        return null;
+        curX = cmd.x;
+        curY = cmd.y;
     }
     const bounds: GlyphBounds = {
         xMin: path.bounds.xMin,
@@ -93,7 +59,7 @@ function extractOne(font: Font, glyphId: number): GlyphCurves | null {
         xMax: path.bounds.xMax,
         yMax: path.bounds.yMax,
     };
-    return { glyphId, curves, bounds };
+    return curves.length === 0 ? null : { glyphId, curves, bounds };
 }
 
 /** Extract outlines for the requested glyph ids and add them to `target`.
