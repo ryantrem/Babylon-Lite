@@ -484,14 +484,18 @@ fn applyMark(base:u32, count:u32, index:u32, action:u32, mode:u32)->bool {
   }
   let baseId = u32(scratch[glyphAt(base, u32(baseIndex))]);
   let baseCount = program[action + 3u];
-  var found = false;
-  var ax = 0;
-  var ay = 0;
-  for (var i = 0u; i < baseCount; i++) {
-    let at = action + 4u + i * 3u;
-    if (program[at] == baseId) { found = true; ax = bitcast<i32>(program[at + 1u]); ay = bitcast<i32>(program[at + 2u]); }
+  var low = 0u;
+  var high = baseCount;
+  while (low < high) {
+    let middle = (low + high) / 2u;
+    if (program[action + 4u + middle * 3u] <= baseId) { low = middle + 1u; }
+    else { high = middle; }
   }
-  if (!found) { return false; }
+  if (low == 0u) { return false; }
+  let anchor = action + 4u + (low - 1u) * 3u;
+  if (program[anchor] != baseId) { return false; }
+  let ax = bitcast<i32>(program[anchor + 1u]);
+  let ay = bitcast<i32>(program[anchor + 2u]);
   let at = glyphAt(base, index);
   let baseAt = glyphAt(base, u32(baseIndex));
   scratch[at + 4] = ax - bitcast<i32>(program[action + 1u]) + scratch[baseAt + 4];

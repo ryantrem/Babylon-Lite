@@ -28,6 +28,13 @@ describe("native production action modes and bounded admission", () => {
     afterEach(async () => assertNativeClean(native));
     afterAll(async () => native?.close());
 
+    it.each(["Inter.ttf", "Roboto-Regular.ttf"] as const)("keeps exact marked records across anchor search boundaries and global scratch: %s", async (file) => {
+        const font = fixture(file);
+        const texts = ["A\u0326", "H\u0326\u0301", "A \u0326", "office fi To A\u0326 HH ".repeat(3), "A\u0326 ".repeat(100)];
+        const result = await shapeComputeText(native.engine, font.font, texts);
+        result.forEach((glyphs, run) => compare(font, texts[run]!, glyphs));
+    });
+
     it.each([
         ["pair-first", 3],
         ["pair-second", 2],

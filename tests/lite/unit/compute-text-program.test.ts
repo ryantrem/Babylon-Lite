@@ -34,6 +34,29 @@ function fontBytes(file: string): ArrayBuffer {
 }
 
 describe("compileComputeTextProgram", () => {
+    it.each(["Inter.ttf", "Roboto-Regular.ttf", "NotoSansArabic-Regular.ttf"])("packs stable sorted mark anchors with exact signed positions: %s", (file) => {
+        const font = createComputeFontFromBuffer(fontBytes(file));
+        const program = compileComputeTextProgram(createComputeTextPlan(font, selectComputeTextRun(file.startsWith("Noto") ? "ج" : "A")));
+        let tested = 0;
+        for (const lookup of program.lookups) {
+            const descriptor = (lookup.table === "GSUB" ? program.gsubDescriptorOffset : program.gposDescriptorOffset) + lookup.lookupIndex * COMPUTE_PROGRAM_LOOKUP_WORDS;
+            const rules = program.words[descriptor + COMPUTE_LOOKUP_RULE_ORIGIN]!;
+            lookup.rules.forEach((rule, index) => {
+                if (rule.action.kind !== "mark-base" && rule.action.kind !== "mark-mark") {
+                    return;
+                }
+                const action = program.words[rules + index * COMPUTE_PROGRAM_RULE_WORDS + 6]!;
+                const expected = rule.action.bases.slice().sort((left, right) => left.glyphId - right.glyphId);
+                expect(program.words[action + 3]).toBe(expected.length);
+                expect(Array.from({ length: expected.length }, (_, at) => [...program.words.slice(action + 4 + at * 3, action + 7 + at * 3)])).toEqual(
+                    expected.map((base) => [base.glyphId, base.x >>> 0, base.y >>> 0])
+                );
+                tested++;
+            });
+        }
+        expect(tested).toBeGreaterThan(0);
+    });
+
     it.each(["Inter.ttf", "Roboto-Regular.ttf"])("indexes every first predicate in original order, including rejection and class zero: %s", (file) => {
         const font = createComputeFontFromBuffer(fontBytes(file));
         const program = compileComputeTextProgram(createComputeTextPlan(font, selectComputeTextRun("A")));

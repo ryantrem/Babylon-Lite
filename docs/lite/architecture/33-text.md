@@ -1524,6 +1524,66 @@ Readback and resident use one common shape-shader constructor.
 Existing buffer growth, output stride, device replacement and terminal-loss
 ownership remain unchanged.
 
+**Mark-anchor lookup contract (specified before implementation, 2026-10-08):**
+The ordered fallback's mark-base/mark-mark action keeps its existing
+`[markClass, markX, markY, baseCount, ...[glyphId, x, y]]` ABI. Pack base
+triples in stable ascending glyph-ID order. This is immutable program
+preparation, not CPU shaping or run-dependent work. The shader uses an
+upper-bound binary search and checks the preceding triple for equality.
+For repeated glyph IDs the last original triple wins, exactly as in the
+previous exhaustive scan; missing bases still leave the action unapplied.
+Nearest-base selection, mark-to-mark ordering, signed anchor arithmetic,
+inherited offsets, advance clearing, lookup/candidate precedence, rejection
+and complete bounded/global execution are unchanged. Both resident and
+returned-record endpoints use this same compiler/kernel contract.
+Acceptance requires six-field/native and actual resident draw-fence comparisons
+against committed `519e4aa6`, including marked 50-scalar and short controls.
+Controlled shader omissions are attribution proxies, not additive timings or
+correctness-preserving candidates.
+
+**Bounded scheduling experiments (2026-10-08; not production contracts):**
+Compare 4 independent eight-lane teams and 2 independent sixteen-lane teams
+inside a 32-invocation workgroup. Only nominal runs proven by the existing
+exact GSUB/first-only-pair proof finish there. Each team owns its masks,
+count/proof and atomic root/index failure; all 32 invocations traverse the
+same barriers, including inactive partial-final teams. A subsequent unchanged
+ordered interpreter dispatch consumes only GPU-marked pending runs. No CPU
+readback or run-content shaping selects the path. Count/prefix/pack execute
+once after completion. The extra preflight/fallback dispatch overhead is part
+of the comparison and disqualifies a nominal GPU-only improvement if the
+ordinary update-through-draw endpoint regresses.
+
+Separately assess contiguous capacity buckets within each selected-plan group:
+split only caller-defined runs at the <=256/>256 expansion-capacity boundary,
+never split text. Retain shared output stride and original outputRun coordinates,
+but choose sufficient bounded scratch for a short chunk rather than forcing it
+through its long neighbor's global variant. Each chunk uploads/prepares/dispatches
+its own inputs before those shared buffers are overwritten; packing still runs
+once in original source order. Compare preparation/submission overhead, a moving
+long run among short runs, and all-short controls. These isolated experiment
+executors must not be described as the normal production import. Promote only
+after exact-field/lifecycle tests and repeatable actual-draw gains; otherwise
+preserve source and evidence outside the shipped library.
+
+**Scheduling decision and validation (2026-10-08):** Retain only stable-sorted
+mark-anchor binary lookup. Two ordinary source-pinned AB/BA screens show
+marked 50-scalar update-through-draw medians of Inter 100 runs
+1.8→1.2/1.1 ms and 4096 runs 15.4/15.7→9.8/10.1 ms; Roboto 100 runs
+1.5→1.1 ms and 4096 runs 13.9/14.1→10.3/10.4 ms. This is not a universal
+latency improvement: short and mixed controls are mostly flat, and a late
+short-only bracket regresses by 0.1/0.2 ms at 4096 runs. Preserve those tails
+and counterexamples rather than claiming all workloads improve.
+Neither independent-team variant establishes repeatable end-to-end gains;
+the contiguous-bucket candidate regresses mixed cases by roughly 0.1–0.3 ms,
+while the unavoidable global long run still dominates. Both remain outside
+production. `tests/lite/compute/mark-anchor.test.ts` executes the production
+action at empty, absent, first, last and duplicate anchor boundaries, with
+negative inherited offsets and both mark modes. Compiler/native and emitted
+root consumer tests retain all six record fields, complete fallback and
+resident ownership/packing. Exact evidence is in session
+`files/shaping-efficiency-20261008/`; no public API or prefix-executor change
+belongs to this round.
+
 All packed glyph-set predicates and shared coverage lists are sorted by glyph
 ID (predicate order is set membership, not action precedence). Remaining input,
 backtrack and lookahead membership uses bounded lower-bound binary search;

@@ -707,7 +707,10 @@ function packProgram(
                     action.markX >>> 0,
                     action.markY >>> 0,
                     action.bases.length,
-                    ...action.bases.flatMap((base) => [base.glyphId, base.x >>> 0, base.y >>> 0])
+                    ...action.bases
+                        .slice()
+                        .sort((left, right) => left.glyphId - right.glyphId)
+                        .flatMap((base) => [base.glyphId, base.x >>> 0, base.y >>> 0])
                 ),
                 length: 4 + action.bases.length * 3,
             };
