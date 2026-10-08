@@ -201,6 +201,19 @@ describe("native M1–3 resident production shaping and packing", () => {
         await verifyResident(data, font, ["H"]);
     });
 
+    it("retains source order across prefix tiers, multiple plan groups and empty-run transitions", async () => {
+        const font = fixture("Roboto-Regular.ttf");
+        const data = block(font, "prefix-tier-transitions");
+        for (const count of [255, 256, 257, 1025, 256, 0, 257]) {
+            const texts: string[] = Array.from({ length: count }, (_, run) => (run < count / 3 ? "office " : run < (count * 2) / 3 ? GREEK : CYRILLIC));
+            if (count) {
+                texts[Math.floor(count / 3)] = "";
+            }
+            await updateComputeTextData(data, texts);
+            await verifyResident(data, font, texts);
+        }
+    });
+
     it("reuses admitted immutable outlines and component lists across warm closure revisions, including empty glyphs", async () => {
         const font = fixture("Roboto-Regular.ttf");
         const data = block(font, "warm-outlines");

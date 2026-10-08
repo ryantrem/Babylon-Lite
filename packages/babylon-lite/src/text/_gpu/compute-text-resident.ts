@@ -88,8 +88,71 @@ fn countRuns(@builtin(global_invocation_id) invocation:vec3u) {
 fn countParallel(@builtin(global_invocation_id) invocation:vec3u) {
   countRun(invocation.x);
 }
-@compute @workgroup_size(1)
-fn prefixRuns() { prefixOffsets(); }
+var<workgroup> summaries: array<vec2u, ${COUNT_LANES}>;
+var<workgroup> prefixStatus: u32;
+@compute @workgroup_size(${COUNT_LANES})
+fn prefixRuns(@builtin(local_invocation_index) lane:u32) {
+  let limit = arrayLength(&instances);
+  let span = (params.runCount + ${COUNT_LANES - 1}u) / ${COUNT_LANES}u;
+  let begin = lane * span;
+  let end = min(begin + span, params.runCount);
+  var summary = vec2u(0u, MISSING);
+  for (var run = begin; run < end; run++) {
+    let result = offsets[run];
+    summary.x = min(limit + 1u, summary.x + result.x);
+    if (result.y != 0u) { summary.y = min(summary.y, run); }
+  }
+  summaries[lane] = summary;
+  workgroupBarrier();
+  for (var distance = 1u; distance < ${COUNT_LANES}u; distance *= 2u) {
+    var pending = summaries[lane];
+    if (lane >= distance) {
+      let previous = summaries[lane - distance];
+      pending = vec2u(min(limit + 1u, pending.x + previous.x), min(pending.y, previous.y));
+    }
+    workgroupBarrier();
+    summaries[lane] = pending;
+    workgroupBarrier();
+  }
+  if (lane == 0u) {
+    indirect[0] = 6u;
+    indirect[1] = 0u;
+    indirect[2] = 0u;
+    indirect[3] = 0u;
+    let last = summaries[${COUNT_LANES - 1}u];
+    var overflow = MISSING;
+    if (last.x > limit) {
+      var low = 0u;
+      var high = ${COUNT_LANES}u;
+      while (low < high) {
+        let middle = (low + high) / 2u;
+        if (summaries[middle].x > limit) { high = middle; }
+        else { low = middle + 1u; }
+      }
+      var total = 0u;
+      if (low > 0u) { total = summaries[low - 1u].x; }
+      let stop = min((low + 1u) * span, params.runCount);
+      for (var run = low * span; run < stop; run++) {
+        let count = offsets[run].x;
+        if (count > limit - total) { overflow = run; break; }
+        total += count;
+      }
+    }
+    prefixStatus = 0u;
+    if (overflow != MISSING && overflow <= last.y) { prefixStatus = 2u; }
+    else if (last.y != MISSING) { prefixStatus = offsets[last.y].y; }
+    status[0] = prefixStatus;
+    if (prefixStatus == 0u) { indirect[1] = last.x; }
+  }
+  if (workgroupUniformLoad(&prefixStatus) != 0u) { return; }
+  var total = 0u;
+  if (lane > 0u) { total = summaries[lane - 1u].x; }
+  for (var run = begin; run < end; run++) {
+    let count = offsets[run].x;
+    offsets[run].x = total;
+    total += count;
+  }
+}
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) invocation:vec3u) {
   let run = invocation.x;

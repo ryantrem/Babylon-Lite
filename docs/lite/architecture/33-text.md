@@ -1478,7 +1478,7 @@ offset buffer, then all lanes execute a storage barrier. Lane zero runs the
 unchanged source-ordered failure/capacity checks and prefix, publishing status
 and indirect count. A following parallel packing dispatch consumes the offsets.
 Above 256 runs, the shared count helper executes over 64-lane workgroups,
-followed by the source-ordered prefix dispatch and parallel packing. This
+followed by a 256-lane, contiguous-tiled prefix dispatch and parallel packing. This
 preserves count-stage concurrency rather than serializing a large batch on
 one workgroup. The retained packing schedule rebuilds only on buffer identity
 or a crossing of this count tier; dispatch dimensions still refresh each update.
@@ -1569,13 +1569,51 @@ records directly and does not require a redundant full-run copy. Empty
 candidate lists are checked before live/flag traversal, matching the complete
 directory's proved admission without changing any eligible candidate/rejection.
 
+**Production prefix transfer contract (specified before implementation, 2026-10-07):**
+Apply the experiment's integer-prefix pattern to the existing resident run
+metadata, not on guessed word boundaries. Public APIs, shaping, grouping,
+glyph ordering, integer pen accumulation and f32 placement remain unchanged.
+Keep the existing fused serial prefix for at most 256 runs. For larger batches,
+use one 256-lane prefix workgroup: lane `l` owns the contiguous range
+`[l * ceil(runCount/256), min((l+1) * ceil(runCount/256), runCount))`.
+Each lane reduces its current visible counts and earliest failing run. Scan
+these 256 `vec2u` summaries with private pending values and barriers before and
+after overwrites; combine counts with saturation at instance capacity plus one
+and failing indexes with `min`. Saturation is solely an overflow diagnostic:
+successful offsets/counts are exact integers, never saturated.
+The 12-byte instance stride bounds instance capacity below `2^32/12`, so
+adding two saturated summaries cannot overflow `u32`. The admitted shape
+binding similarly bounds each run's count; no widened floating-point sum or
+unchecked count is used.
+
+Before any metadata rewrite, the leader compares the earliest shape/slot error
+with the earliest instance overflow. Locate the first overflowing summary by
+lower-bound search, then walk only that lane's original range to locate the
+first overflowing run. Capacity failure precedes another failure at the same
+run, exactly as in the serial loop; any earlier run's original status wins.
+Publish `[6,0,0,0]` and that unchanged status on failure. Broadcast the decision
+with a uniform workgroup load before any lane returns or writes offsets. On
+success, each lane uses the previous inclusive summary as its exclusive base
+and rewrites its own original counts to compact offsets in source order;
+publish `[6,totalVisible,0,0]` and status zero. Workgroup storage is fixed at
+2 KiB plus one status word, independent of admitted batch size. This is
+scalable contiguous tiling, not a 1,024-run limit or cross-workgroup fence.
+There is no added dispatch, host readback, allocation or public option.
+Adoption requires complete hardware ABI/error tests and a bounded matched
+production before/after comparison; page experiment ratios are not evidence
+for this transfer. The two independent accepted production comparisons and
+separate pack-stage timestamp diagnostic are recorded in
+`text-blocks-profile-results.md`. Small batches keep their unchanged serial
+prefix; no evidence supports replacing that tier.
+
 Resident packing shares `countRun`, which validates shape status/count and atlas
 slots and writes visible count plus first failure to a private `vec2u` metadata
 buffer, and `prefixOffsets`, which traverses runs in source order, computes
 compact offsets, checks instance capacity, and publishes the first failure or
 `[6,totalVisible,0,0]`. For at most 256 runs, `countRuns` fuses these helpers in
 one 256-lane workgroup. Larger batches dispatch `countParallel` over 64-lane
-workgroups, then `prefixRuns` with one invocation. `main` (64 invocations/workgroup, one
+workgroups, then `prefixRuns` with the single 256-lane workgroup specified above.
+`main` (64 invocations/workgroup, one
 invocation per run) places its records at the assigned offset with the existing
 integer pen accumulation and exact f32 scaling/line/style ABI. Empty outlines
 advance the pen but create no instance. A nonzero status disables every packing
