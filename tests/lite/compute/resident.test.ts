@@ -326,20 +326,23 @@ describe("native M1–3 resident production shaping and packing", () => {
         const modules = vi.spyOn(native.device, "createShaderModule");
         const texts = Array.from({ length: 100 }, (_, index) => (index % 2 ? "office fi To A\u0326 ".repeat(4).slice(0, 50) : "H".repeat(50)));
         await updateComputeTextData(data, texts);
-        expect(modules.mock.calls.some(([descriptor]) => descriptor.code.includes("fn countRuns(") && descriptor.code.includes("fn prefixRuns("))).toBe(true);
+        expect(modules.mock.calls.some(([descriptor]) => descriptor.code.includes("fn packSmall(") && descriptor.code.includes("fn prefixRuns("))).toBe(true);
         expect(modules.mock.calls.some(([descriptor]) => descriptor.code.includes("@workgroup_size(64)"))).toBe(true);
         modules.mockRestore();
         await verifyResident(data, font, texts);
     });
 
-    it("fences lane-striped resident counts before leader prefixing without a separate prefix dispatch", async () => {
+    it("fuses lane-striped resident counts, prefixing and packing into one small-batch dispatch", async () => {
         const font = fixture("Roboto-Regular.ttf");
         const data = block(font, "fused-count-prefix");
         const texts = Array.from({ length: 129 }, (_, run) => (run % 3 === 0 ? "A  " : run % 2 ? "office A\u0326 " : "HH"));
         await updateComputeTextData(data, texts);
         const dispatches = vi.spyOn(GPUComputePassEncoder.prototype, "dispatchWorkgroups");
         await updateComputeTextData(data, texts);
-        expect(dispatches.mock.calls.length).toBe(3);
+        expect(dispatches.mock.calls).toEqual([
+            [129, 1, 1],
+            [1, 1, 1],
+        ]);
         dispatches.mockRestore();
         await verifyResident(data, font, texts);
     });
@@ -350,7 +353,7 @@ describe("native M1–3 resident production shaping and packing", () => {
         const modules = vi.spyOn(native.device, "createShaderModule");
         const texts = Array.from({ length: 512 }, (_, run) => (run % 2 ? "office A\u0326 ".repeat(4) : "H".repeat(50)));
         await updateComputeTextData(data, texts);
-        expect(modules.mock.calls.some(([descriptor]) => descriptor.code.includes("@workgroup_size(256)\nfn countRuns("))).toBe(true);
+        expect(modules.mock.calls.some(([descriptor]) => descriptor.code.includes("@workgroup_size(256)\nfn packSmall("))).toBe(true);
         modules.mockRestore();
         await verifyResident(data, font, texts);
     });

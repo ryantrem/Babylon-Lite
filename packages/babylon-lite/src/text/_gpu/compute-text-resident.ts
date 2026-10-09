@@ -62,28 +62,6 @@ fn countRun(run:u32) {
     offsets[run] = vec2u(visible, failed);
   }
 }
-fn prefixOffsets() {
-  indirect[0] = 6u;
-  indirect[1] = 0u;
-  indirect[2] = 0u;
-  indirect[3] = 0u;
-  var total = 0u;
-  for (var run = 0u; run < params.runCount; run++) {
-    let result = offsets[run];
-    if (result.x > arrayLength(&instances) - total) { status[0] = 2u; return; }
-    if (result.y != 0u) { status[0] = result.y; return; }
-    offsets[run].x = total;
-    total += result.x;
-  }
-  indirect[1] = total;
-  status[0] = 0u;
-}
-@compute @workgroup_size(${COUNT_LANES})
-fn countRuns(@builtin(global_invocation_id) invocation:vec3u) {
-  countRun(invocation.x);
-  storageBarrier();
-  if (invocation.x == 0u) { prefixOffsets(); }
-}
 @compute @workgroup_size(64)
 fn countParallel(@builtin(global_invocation_id) invocation:vec3u) {
   countRun(invocation.x);
@@ -153,10 +131,8 @@ fn prefixRuns(@builtin(local_invocation_index) lane:u32) {
     total += count;
   }
 }
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) invocation:vec3u) {
-  let run = invocation.x;
-  if (run >= params.runCount || status[0] != 0u) { return; }
+fn packRun(run:u32) {
+  if (run >= params.runCount) { return; }
   let out = run * (HEADER + params.capacity * RECORD);
   let count = u32(shaped[out + 1u]);
   let scale = bitcast<f32>(params.scaleBits);
@@ -174,6 +150,66 @@ fn main(@builtin(global_invocation_id) invocation:vec3u) {
     penX += shaped[at + 2u];
     penY += shaped[at + 3u];
   }
+}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) invocation:vec3u) {
+  if (status[0] != 0u) { return; }
+  packRun(invocation.x);
+}
+var<workgroup> packStop: u32;
+@compute @workgroup_size(${COUNT_LANES})
+fn packSmall(@builtin(local_invocation_index) lane:u32) {
+  countRun(lane);
+  storageBarrier();
+  let limit = arrayLength(&instances);
+  var summary = vec2u(0u, MISSING);
+  if (lane < params.runCount) {
+    let result = offsets[lane];
+    summary = vec2u(min(limit + 1u, result.x), select(MISSING, lane, result.y != 0u));
+  }
+  summaries[lane] = summary;
+  workgroupBarrier();
+  for (var distance = 1u; distance < ${COUNT_LANES}u; distance *= 2u) {
+    var pending = summaries[lane];
+    if (lane >= distance) {
+      let previous = summaries[lane - distance];
+      pending = vec2u(min(limit + 1u, pending.x + previous.x), min(pending.y, previous.y));
+    }
+    workgroupBarrier();
+    summaries[lane] = pending;
+    workgroupBarrier();
+  }
+  if (lane == 0u) {
+    indirect[0] = 6u;
+    indirect[1] = 0u;
+    indirect[2] = 0u;
+    indirect[3] = 0u;
+    let last = summaries[${COUNT_LANES - 1}u];
+    var overflow = MISSING;
+    if (last.x > limit) {
+      var low = 0u;
+      var high = ${COUNT_LANES}u;
+      while (low < high) {
+        let middle = (low + high) / 2u;
+        if (summaries[middle].x > limit) { high = middle; }
+        else { low = middle + 1u; }
+      }
+      overflow = low;
+    }
+    packStop = min(overflow, last.y);
+    prefixStatus = 0u;
+    if (overflow != MISSING && overflow <= last.y) { prefixStatus = 2u; }
+    else if (last.y != MISSING) { prefixStatus = offsets[last.y].y; }
+    status[0] = prefixStatus;
+    if (prefixStatus == 0u) { indirect[1] = last.x; }
+  }
+  let failed = workgroupUniformLoad(&prefixStatus);
+  if (lane < params.runCount && lane < packStop) {
+    var total = 0u;
+    if (lane > 0u) { total = summaries[lane - 1u].x; }
+    offsets[lane].x = total;
+  }
+  if (failed == 0u) { packRun(lane); }
 }
 `;
 
@@ -195,7 +231,7 @@ interface ResidentShaders {
     readonly device: GPUDevice;
     shape: ComputeShader;
     pack: ComputeShader;
-    count: ComputeShader;
+    small: ComputeShader;
     countParallel: ComputeShader;
     prefix: ComputeShader;
     params: StorageBuffer;
@@ -258,7 +294,7 @@ export async function executeResidentComputeText(
     if (shaders.packCountDispatch) {
         setComputeDispatchSize(shaders.packCountDispatch, { x: packGroups });
     }
-    setComputeDispatchSize(shaders.packDispatch!, { x: packGroups });
+    setComputeDispatchSize(shaders.packDispatch!, { x: shaders.packParallelCount ? packGroups : 1 });
     for (let index = 0; index < preparedGroups.length; index++) {
         const prepared = preparedGroups[index]!;
         const group = groups[index]!;
@@ -303,7 +339,7 @@ export function releaseResidentComputeText(token: object): void {
     }
     disposeComputeShader(shaders.shape);
     disposeComputeShader(shaders.pack);
-    disposeComputeShader(shaders.count);
+    disposeComputeShader(shaders.small);
     disposeComputeShader(shaders.countParallel);
     disposeComputeShader(shaders.prefix);
     shaders.shapeTask?.dispose();
@@ -341,14 +377,14 @@ function ensureShaders(token: object, engine: EngineContext): ResidentShaders {
     }
     const shape = createComputeTextShapeShader(engine, 1);
     const pack = createPackShader(engine, "main");
-    const count = createPackShader(engine, "countRuns");
+    const small = createPackShader(engine, "packSmall");
     const countParallel = createPackShader(engine, "countParallel");
     const prefix = createPackShader(engine, "prefixRuns");
     const created: ResidentShaders = {
         device: engine._device,
         shape,
         pack,
-        count,
+        small,
         countParallel,
         prefix,
         params: createStorageBuffer(engine, 28, { label: "compute-text-resident-params" }),
@@ -411,17 +447,16 @@ function ensureSchedules(shaders: ResidentShaders, engine: EngineContext, buffer
     ) {
         shaders.packTask?.dispose();
         const resources = { params: shaders.packParams, ...buffers, offsets: shaders.packOffsets };
-        const bindings = createComputeBindingSet(shaders.pack, resources);
+        const pack = parallelCount ? shaders.pack : shaders.small;
+        const bindings = createComputeBindingSet(pack, resources);
         shaders.packTask = createComputeTask(engine, "compute-text-resident-pack");
         shaders.packParallelCount = parallelCount;
         shaders.packCountDispatch = undefined;
-        shaders.packDispatch = createComputeDispatch(shaders.pack, bindings, { size: { x: 1 } });
+        shaders.packDispatch = createComputeDispatch(pack, bindings, { size: { x: 1 } });
         if (parallelCount) {
             shaders.packCountDispatch = createComputeDispatch(shaders.countParallel, createComputeBindingSet(shaders.countParallel, resources), { size: { x: 1 } });
             addComputeDispatch(shaders.packTask, shaders.packCountDispatch);
             addComputeDispatch(shaders.packTask, createComputeDispatch(shaders.prefix, createComputeBindingSet(shaders.prefix, resources), { size: { x: 1 } }));
-        } else {
-            addComputeDispatch(shaders.packTask, createComputeDispatch(shaders.count, createComputeBindingSet(shaders.count, resources), { size: { x: 1 } }));
         }
         addComputeDispatch(shaders.packTask, shaders.packDispatch);
         shaders.packTask.record();

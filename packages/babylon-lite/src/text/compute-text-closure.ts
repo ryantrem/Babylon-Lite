@@ -17,6 +17,8 @@ export interface ComputeTextClosure {
     readonly glyphIds: readonly number[];
 }
 
+let outputsByFont: WeakMap<ComputeFont, Map<string, Map<number, readonly number[]>>> | null = null;
+
 /** Glyph ids that must be installed before a resident shape/pack dispatch. */
 export function closeComputeTextGlyphs(font: ComputeFont, plans: readonly ComputeTextPlan[], seeds: readonly number[]): ComputeTextClosure {
     const selected = new Set<number>();
@@ -40,6 +42,18 @@ export function closeComputeTextGlyphs(font: ComputeFont, plans: readonly Comput
             throw new Error(`updateComputeTextData: closure cannot see GSUB lookup ${index} (${message})`, { cause: error });
         }
     }
+    let bySelection = outputsByFont?.get(font);
+    if (!bySelection) {
+        bySelection = new Map();
+        (outputsByFont ??= new WeakMap()).set(font, bySelection);
+    }
+    // The selected set's insertion order is observable in the returned closure.
+    const key = [...selected].join(",");
+    let outputs = bySelection.get(key);
+    if (!outputs) {
+        outputs = new Map();
+        bySelection.set(key, outputs);
+    }
 
     const closure = new Set<number>();
     const queue: number[] = [];
@@ -57,17 +71,24 @@ export function closeComputeTextGlyphs(font: ComputeFont, plans: readonly Comput
             throw new Error("updateComputeTextData: closure did not converge");
         }
         const glyphId = queue.pop() ?? 0;
-        for (const [lookupIndex, subtables] of lookups) {
-            for (let subtableIndex = 0; subtableIndex < subtables.length; subtableIndex++) {
-                const produced = outputsOf(font, lookupIndex, subtableIndex, subtables[subtableIndex]!, glyphId);
-                for (const output of produced) {
-                    if (closure.has(output)) {
-                        continue;
+        let produced = outputs.get(glyphId);
+        if (!produced) {
+            const pending: number[] = [];
+            for (const [lookupIndex, subtables] of lookups) {
+                for (let subtableIndex = 0; subtableIndex < subtables.length; subtableIndex++) {
+                    for (const output of outputsOf(font, lookupIndex, subtableIndex, subtables[subtableIndex]!, glyphId)) {
+                        pending.push(output);
                     }
-                    closure.add(output);
-                    queue.push(output);
                 }
             }
+            outputs.set(glyphId, (produced = pending));
+        }
+        for (const output of produced) {
+            if (closure.has(output)) {
+                continue;
+            }
+            closure.add(output);
+            queue.push(output);
         }
     }
 

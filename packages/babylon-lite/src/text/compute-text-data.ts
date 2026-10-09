@@ -11,7 +11,7 @@ import type { ComputeTextInputSlab, ComputeTextRunSelection } from "./compute-te
 import { createComputeTextInputSlab, selectComputeTextRun } from "./compute-text-selection.js";
 import { extractComputeGlyphCurves } from "./compute-glyph-extraction.js";
 import { updateGlyphStorage } from "./glyph-storage.js";
-import type { CurveSetId, GlyphStorage } from "./glyph-storage.js";
+import type { CurveSetId, GlyphCurves, GlyphStorage } from "./glyph-storage.js";
 import { TEXT_INSTANCE_BYTES, TEXT_STYLE_BYTES, TEXT_STYLE_FLOATS } from "./text-buffer-layout.js";
 import { ensureSharedAtlasGpu } from "./_gpu/text-textures.js";
 import { createStyleBuffer } from "./_gpu/text-style-buffer.js";
@@ -57,6 +57,12 @@ export interface ComputeTextData {
     /** @internal */
     _slots: StorageBuffer;
     /** @internal */
+    _slotWords: Uint32Array | null;
+    /** @internal */
+    _slotFont: ComputeFont | null;
+    /** @internal */
+    _slotGlyphIds: readonly number[];
+    /** @internal */
     _statusBuffer: StorageBuffer;
     /** @internal */
     _style: GPUBuffer;
@@ -98,6 +104,8 @@ export function createComputeTextData(
     styleWords[4] = font.unitsPerEm / fontSizePx;
     device.queue.writeBuffer(style, 0, styleWords.buffer as ArrayBuffer, styleWords.byteOffset, styleWords.byteLength);
     const indirectWords = new Uint32Array([6, 0, 0, 0]);
+    const missing = new Uint32Array(font.glyphCount);
+    missing.fill(MISSING_SLOT);
     const data = {
         status: "ready",
         fontSizePx,
@@ -114,12 +122,13 @@ export function createComputeTextData(
         _instances: createStorageBuffer(engine, 64, { label: "compute-text-instances", writable: true, vertex: true }),
         _indirect: createStorageBuffer(engine, indirectWords, { label: "compute-text-indirect", writable: true, indirect: true }),
         _slots: createStorageBuffer(engine, font.glyphCount * 4, { label: "compute-text-slots" }),
+        _slotWords: missing,
+        _slotFont: font,
+        _slotGlyphIds: [] as readonly number[],
         _statusBuffer: createStorageBuffer(engine, 4, { label: "compute-text-status", writable: true }),
         _style: style,
         _released: false,
     } as ComputeTextData;
-    const missing = new Uint32Array(font.glyphCount);
-    missing.fill(MISSING_SLOT);
     updateStorageBuffer(engine, data._slots, missing);
     void device.lost.then(() => {
         if (data._device !== device || data.status === "disposed") {
@@ -218,9 +227,10 @@ export function disposeComputeTextData(data: ComputeTextData): void {
 }
 
 function installClosure(data: ComputeTextData, glyphIds: readonly number[]): void {
-    const curves = new Map(data._storage._curveSets.get(data._curveSet)?._curves);
+    const installed = data._storage._curveSets.get(data._curveSet)?._curves;
+    const curves = new Map<number, GlyphCurves>();
     try {
-        extractComputeGlyphCurves(data._font, new Set(glyphIds), curves);
+        extractComputeGlyphCurves(data._font, new Set(glyphIds.filter((glyphId) => !installed?.has(glyphId))), curves);
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`updateComputeTextData: closure cannot install outlines (${message})`, { cause: error });
@@ -231,10 +241,20 @@ function installClosure(data: ComputeTextData, glyphIds: readonly number[]): voi
         throw new Error("updateComputeTextData: curve set is missing");
     }
     ensureSharedAtlasGpu(data._device, curveSet._atlas);
-    const slots = new Uint32Array(data._font.glyphCount);
-    slots.fill(MISSING_SLOT);
+    let slots = data._slotWords;
+    if (!slots || data._slotFont !== data._font || slots.length !== data._font.glyphCount) {
+        slots = new Uint32Array(data._font.glyphCount);
+        slots.fill(MISSING_SLOT);
+        data._slotWords = slots;
+        data._slotFont = data._font;
+    } else {
+        for (const glyphId of data._slotGlyphIds) {
+            slots[glyphId] = MISSING_SLOT;
+        }
+    }
+    data._slotGlyphIds = glyphIds;
     for (const glyphId of glyphIds) {
-        if (curves.has(glyphId)) {
+        if (curveSet._curves.has(glyphId)) {
             const slot = curveSet._atlas._glyphSlots.get(glyphId);
             if (!slot || slot._index > MAX_PACKED_INDEX) {
                 throw new Error(`updateComputeTextData: closure cannot see atlas slot for glyph ${glyphId}`);
@@ -342,6 +362,9 @@ function failTerminal(data: ComputeTextData, status: "lost" | "disposed", messag
         return;
     }
     data._released = true;
+    data._slotWords = null;
+    data._slotFont = null;
+    data._slotGlyphIds = [];
     data._dead = true;
     data._generation++;
     setStatus(data, status);

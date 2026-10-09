@@ -2292,3 +2292,85 @@ retain no text initialization/packing; resident factories retain no CPU palette
 synchronization.
 
 `createComputeTextData` / `updateComputeTextData` / `disposeComputeTextData` / `createComputeTextLayer` are a sibling of `shapeComputeText`. They do not return positions and do not build `PlacedGlyph[]`. The caller owns the `GlyphStorage` and passes it in, so several blocks share one atlas. Each block keeps its own instance and indirect buffers. Disposing a block does not dispose that storage. Different fonts in one storage use different curve-set ids. One block has one base style. The shape kernel writes the shaped-record buffer; a following pack kernel writes the 12-byte instance buffer and the 16-byte indirect args (`6`, instance count, `0`, `0`). Positions are pixels (`fontSizePx / unitsPerEm`) on a Y-up baseline at `(0, 0)`. RTL is reversed once, in the shape kernel. A missing atlas slot, overflow, or unsupported lookup zeros the indirect instance count and writes a nonzero status. JavaScript reads that 4-byte status and nothing else. Outlines come from a cmap-seeded closure plus transitive selected GSUB outputs and outline components, installed before dispatch. Atlas slots are append-only; adapters detect replacement resources before replay. Device loss and dispose drop pending work and prevent replay. There is no external draw override on CPU layers.
+
+### Resident fixed-overhead contract (2026-10-09)
+
+This optimization changes neither the admission/error contract nor any shaped,
+atlas, slots, instance or indirect bytes. `updateComputeTextData(data, texts)`
+still selects every current input, installs its conservative closure, submits
+shaping and packing, and awaits only the ordinary four-byte status before
+resolving. No cache is keyed on text, seeds, revision or an input hash.
+
+**Text-independent closure memo.** `closeComputeTextGlyphs(font, plans, seeds)`
+keeps a lazily allocated `WeakMap<ComputeFont, Map<string,
+Map<number, readonly number[]>>>`. Its key is the joined **insertion-ordered**
+union of each plan's `_gsubRoots` followed by `_gsubDependencies`, in plan-array
+order. A sorted-set-only key is incorrect: reversing plans can change the
+order of reachable glyph insertion. Each glyph entry is exactly the
+concatenation of the existing `outputsOf` results, in selected-lookup order
+and then subtable-index order. Lookup parsing and its wrapped errors still
+precede seed validation. Entries are published only after every subtable
+succeeds; throwing glyphs are not cached. Seed validation, LIFO work queue,
+convergence bound, closure insertion order and the subsequent component walk
+are unchanged. Components use `readComputeGlyfGlyph`'s existing immutable
+font/glyph cache. The returned `glyphIds` is identical element for element,
+including repeated seeds, empty seeds and calls with different plan orders.
+
+**Incremental outline installation.** `installClosure` creates only a pending
+curve map, extracting the insertion-ordered `Set(glyphIds)` minus ids already
+in the installed curve map. Empty outlines remain absent and are not
+remembered as curves. Extraction remains transactional: failures leave the
+installed catalog/atlas unchanged and retain the existing wrapped error.
+`updateGlyphStorage` receives only pending non-null outlines, in exactly the
+order the former full map would append them. Its append-only atlas indices,
+curve/band texels, metadata, versions and growth behavior are unchanged;
+`ensureSharedAtlasGpu` is still called on every successful install.
+
+Each data object owns an internal slots staging `Uint32Array` plus the ids
+touched on the preceding attempt. On reuse, those ids alone are reset to
+`0xffffffff` (MISSING), then current closure ids are written as the exact
+atlas index or `0xfffffffe` (EMPTY). The **entire array** is uploaded, including
+all MISSING entries outside the closure. A partially failed slot build must
+record its touched ids so the next attempt cannot expose stale slots.
+The staging array is invalidated on terminal dispose/device loss and rebuilt
+when font identity or glyph count changes. Missing curve-set and atlas-slot
+errors (including index greater than `0xfffe`) retain their messages and
+ordering relative to extraction, atlas installation and upload. No new public
+fields, entry points or module-level allocations are introduced.
+
+**One-workgroup small-batch packing.** For `runCount <= 256`, one 256-lane
+`packSmall` dispatch replaces the former count/serial-prefix dispatch and
+separate pack dispatch. Every lane counts one run using the unchanged
+`countRun` checks: shaped status; shaped count exceeding capacity; glyph
+outside the font; MISSING slot; count of non-EMPTY slots before a failure.
+Inactive lanes contribute `(0, 0xffffffff)`. Workgroup inclusive scan combines
+`(visible, firstFailingRun)` by saturated count addition at instance capacity
+plus one, and minimum failing-run index. Barriers separate every scan read
+and write. Lane zero finds the first inclusive prefix exceeding instance
+capacity and selects status in this exact order:
+
+1. Overflow at or before the first failing run → `2`.
+2. Otherwise first failing run's original code (including unknown codes).
+3. Otherwise `0`.
+
+Lane zero always writes indirect `[6, 0, 0, 0]`, replacing word one with total
+visible count only on success, and writes the status. A
+`workgroupUniformLoad` broadcasts that status before any instance packing.
+Offsets before the first overflow/failure become exclusive visible prefixes;
+offsets at and after that run retain their counts, as in the former serial
+prefix, including on errors. Successful lanes pack the same six-field records
+in run/glyph order, using integer pen accumulation, the same f32 scaling and
+line advance, and the unchanged twelve-byte `(x, y, slot)` instance layout.
+Zero runs still dispatch one workgroup and write a zero-instance successful
+draw. For more than 256 runs, `countParallel → prefixRuns → main` is unchanged.
+Schedule caching distinguishes these tiers and rebuilds when the tier or any
+bound buffer changes; the small dispatch always has exactly one workgroup.
+
+**Validation.** Unit tests compare closure arrays against the pre-memo
+algorithm for Inter/Roboto, multiple repertoires, seed sets and plan orders,
+and verify repeated throwing calls. Native differential tests compare old
+full-copy installation against growing/shrinking/disjoint/repeated closures,
+including slot failures followed by recovery and lifecycle invalidation.
+Native pack comparisons cover 0/1/2/255/256/257 runs, empty/invisible runs,
+all error precedence cases, raw offsets and complete instance/indirect/status
+bytes, plus repeated tier switches on the same resident token.
