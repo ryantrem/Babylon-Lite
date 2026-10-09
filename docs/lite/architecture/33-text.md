@@ -2453,3 +2453,29 @@ for the CPU path. Two candidates were measured and rejected because neither gain
 A fused shape+pack kernel was not attempted: the measured inter-pass gap was
 ≈0.001 ms. Timestamp-query instrumentation inflated both floor and fence time,
 so it must not be used to predict uninstrumented gains.
+
+### 2026-10-09 — Step 7: wide per-run pack
+
+**ACCEPTED after architect override and confirmation.** No bindings, buffers or uploads added.
+Capacity ≥33 and `0 < runCount <= maxComputeWorkgroupsPerDimension` select wide:
+`countWide(runCount)` → existing `prefixRuns(1)` → `placeWide(runCount)`.
+Otherwise ≤256 runs use small, larger batches parallel; both kernels are unchanged.
+Mode changes re-record the task; both run-sized wide dispatches update every revision.
+Each 64-lane count workgroup finds the first invalid glyph atomically and counts only
+preceding visible glyphs, preserving ordered overflow-before-failure precedence.
+Placement scans 64-record vec3i chunks with carry. Associative/commutative wrapping
+i32 sums make `carry + inclusive - own` bit-identical to serial pens, including overflow.
+Instances keep `f32(pen + off) * scale` and `... - f32(run) * lineAdvance`.
+Zero status proves validation/capacity; base plus visible rank preserves serial order; rank≤capacity≤`(maxStorageBufferBindingSize / 4 - 4) / 6`<2³¹.
+
+Paired HEAD−candidate ms [95% bootstrap interval], 40 same-session real-draw pairs:
+| Cell | Inter | Roboto |
+|---|---|---|
+| english480×1 | +0.6950 [0.5900,0.7400] | +0.3225 [0.2600,0.3500] |
+| english480×4 | +0.5150 [0.3450,0.5725] | +0.5925 [0.4925,0.7950] |
+| english480×16 | +0.4975 [0.4725,0.5350] | +0.4300 [0.3225,0.5075] |
+| natural50×16 | +0.0800 [0.0600,0.1075] | +0.0875 [0.0275,0.1425] |
+| two2×256 confirmation | +0.0125 [-0.0800,0.1025] | +0.0575 [-0.0050,0.1475] |
+| two2×256 HEAD A/A | +0.0400 [-0.0350,0.1100] | +0.0275 [-0.0175,0.0900] |
+Two2 uses the unchanged capacity-2 path; confirmation passes the revised interval gate.
+Timing stops at the real-draw queue fence, never status; all measured output bytes match.

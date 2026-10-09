@@ -26,6 +26,8 @@ import {
 
 const STATUS_MISSING = 3;
 const COUNT_LANES = 256;
+const WIDE_PACK_LANES = 64;
+const WIDE_PACK_MIN_CAPACITY = 33;
 
 const PACK_KERNEL = `
 struct PackParams { runCount:u32, capacity:u32, scaleBits:u32, glyphCount:u32, lineAdvanceBits:u32 }
@@ -212,6 +214,111 @@ fn packSmall(@builtin(local_invocation_index) lane:u32) {
   }
   if (failed == 0u) { packRun(lane); }
 }
+const WIDE: u32 = ${WIDE_PACK_LANES}u;
+var<workgroup> wideFail: atomic<u32>;
+var<workgroup> wideVisible: atomic<u32>;
+var<workgroup> wideStop: u32;
+@compute @workgroup_size(${WIDE_PACK_LANES})
+fn countWide(@builtin(workgroup_id) group:vec3u, @builtin(local_invocation_index) lane:u32) {
+  let run = group.x;
+  if (lane == 0u) {
+    atomicStore(&wideFail, MISSING);
+    atomicStore(&wideVisible, 0u);
+  }
+  workgroupBarrier();
+  let valid = run < params.runCount;
+  let out = run * (HEADER + params.capacity * RECORD);
+  var header = 1u;
+  var count = 0u;
+  if (valid) {
+    header = u32(shaped[out]);
+    if (header == 0u) { count = u32(shaped[out + 1u]); }
+  }
+  let scan = header == 0u && count <= params.capacity;
+  if (scan) {
+    for (var i = lane; i < count; i += WIDE) {
+      let glyph = u32(shaped[out + HEADER + i * RECORD]);
+      if (glyph >= params.glyphCount) { atomicMin(&wideFail, i); }
+      else if (slots[glyph] == MISSING) { atomicMin(&wideFail, i); }
+    }
+  }
+  workgroupBarrier();
+  if (lane == 0u) { wideStop = atomicLoad(&wideFail); }
+  workgroupBarrier();
+  let stop = min(count, wideStop);
+  if (scan) {
+    var visible = 0u;
+    for (var i = lane; i < stop; i += WIDE) {
+      let glyph = u32(shaped[out + HEADER + i * RECORD]);
+      if (slots[glyph] != EMPTY) { visible++; }
+    }
+    atomicAdd(&wideVisible, visible);
+  }
+  workgroupBarrier();
+  if (lane == 0u && valid) {
+    var failed = header;
+    var visible = 0u;
+    if (header == 0u) {
+      if (count > params.capacity) { failed = 2u; }
+      else {
+        failed = select(0u, STATUS_MISSING, wideStop != MISSING);
+        visible = atomicLoad(&wideVisible);
+      }
+    }
+    offsets[run] = vec2u(visible, failed);
+  }
+}
+var<workgroup> wideScan: array<vec3i, ${WIDE_PACK_LANES}>;
+var<workgroup> wideHead: vec2u;
+@compute @workgroup_size(${WIDE_PACK_LANES})
+fn placeWide(@builtin(workgroup_id) group:vec3u, @builtin(local_invocation_index) lane:u32) {
+  let run = group.x;
+  if (lane == 0u) {
+    var s = status[0];
+    var n = 0u;
+    if (run >= params.runCount) { s = 1u; }
+    else { n = u32(shaped[run * (HEADER + params.capacity * RECORD) + 1u]); }
+    wideHead = vec2u(s, n);
+  }
+  let head = workgroupUniformLoad(&wideHead);
+  if (head.x != 0u) { return; }
+  let count = head.y;
+  let out = run * (HEADER + params.capacity * RECORD);
+  let base = offsets[run].x;
+  let scale = bitcast<f32>(params.scaleBits);
+  let lineAdvance = bitcast<f32>(params.lineAdvanceBits);
+  var carry = vec3i(0);
+  for (var chunk = 0u; chunk < count; chunk += WIDE) {
+    let i = chunk + lane;
+    let isActive = i < count;
+    var own = vec3i(0);
+    var slot = EMPTY;
+    var offX = 0;
+    var offY = 0;
+    if (isActive) {
+      let at = out + HEADER + i * RECORD;
+      slot = slots[u32(shaped[at])];
+      own = vec3i(shaped[at + 2u], shaped[at + 3u], select(0, 1, slot != EMPTY));
+      offX = shaped[at + 4u];
+      offY = shaped[at + 5u];
+    }
+    wideScan[lane] = own;
+    workgroupBarrier();
+    for (var distance = 1u; distance < WIDE; distance *= 2u) {
+      var pending = wideScan[lane];
+      if (lane >= distance) { pending += wideScan[lane - distance]; }
+      workgroupBarrier();
+      wideScan[lane] = pending;
+      workgroupBarrier();
+    }
+    let excl = carry + wideScan[lane] - own;
+    if (isActive && slot != EMPTY) {
+      instances[base + u32(excl.z)] = Instance(f32(excl.x + offX) * scale, f32(excl.y + offY) * scale - f32(run) * lineAdvance, slot);
+    }
+    carry += wideScan[WIDE - 1u];
+    workgroupBarrier();
+  }
+}
 `;
 
 export interface ResidentShapeGroup {
@@ -238,6 +345,8 @@ interface ResidentShaders {
     small: ComputeShader;
     countParallel: ComputeShader;
     prefix: ComputeShader;
+    countWide: ComputeShader;
+    placeWide: ComputeShader;
     params: StorageBuffer;
     program: StorageBuffer;
     tables: StorageBuffer;
@@ -250,7 +359,7 @@ interface ResidentShaders {
     shapeTask?: ComputeTask;
     shapeDispatch?: ComputeDispatch;
     packTask?: ComputeTask;
-    packParallelCount?: boolean;
+    packMode?: "small" | "parallel" | "wide";
     packCountDispatch?: ComputeDispatch;
     packDispatch?: ComputeDispatch;
     buffers?: ResidentTextBuffers;
@@ -293,12 +402,12 @@ export async function executeResidentComputeText(
         shaders.packTask = undefined;
         shaders.packOffsets = grow(engine, shaders.packOffsets, Math.max(8, runCount * 8), { label: "compute-text-pack-offsets", writable: true });
     }
-    ensureSchedules(shaders, engine, buffers, runCount);
-    const packGroups = Math.max(1, Math.ceil(runCount / 64));
+    ensureSchedules(shaders, engine, buffers, runCount, capacity);
+    const packGroups = shaders.packMode === "wide" ? runCount : Math.max(1, Math.ceil(runCount / 64));
     if (shaders.packCountDispatch) {
         setComputeDispatchSize(shaders.packCountDispatch, { x: packGroups });
     }
-    setComputeDispatchSize(shaders.packDispatch!, { x: shaders.packParallelCount ? packGroups : 1 });
+    setComputeDispatchSize(shaders.packDispatch!, { x: shaders.packMode === "small" ? 1 : packGroups });
     for (let index = 0; index < preparedGroups.length; index++) {
         const prepared = preparedGroups[index]!;
         const group = groups[index]!;
@@ -369,6 +478,8 @@ export function releaseResidentComputeText(token: object): void {
     disposeComputeShader(shaders.small);
     disposeComputeShader(shaders.countParallel);
     disposeComputeShader(shaders.prefix);
+    disposeComputeShader(shaders.countWide);
+    disposeComputeShader(shaders.placeWide);
     shaders.shapeTask?.dispose();
     shaders.packTask?.dispose();
     for (const buffer of [shaders.params, shaders.program, shaders.tables, shaders.runs, shaders.scratch, shaders.packParams, shaders.packOffsets]) {
@@ -407,6 +518,8 @@ function ensureShaders(token: object, engine: EngineContext): ResidentShaders {
     const small = createPackShader(engine, "packSmall");
     const countParallel = createPackShader(engine, "countParallel");
     const prefix = createPackShader(engine, "prefixRuns");
+    const countWide = createPackShader(engine, "countWide");
+    const placeWide = createPackShader(engine, "placeWide");
     const created: ResidentShaders = {
         device: engine._device,
         statusBuffers: [],
@@ -417,6 +530,8 @@ function ensureShaders(token: object, engine: EngineContext): ResidentShaders {
         small,
         countParallel,
         prefix,
+        countWide,
+        placeWide,
         params: createStorageBuffer(engine, 28, { label: "compute-text-resident-params" }),
         program: createStorageBuffer(engine, 256, { label: "compute-text-resident-program" }),
         tables: createStorageBuffer(engine, 256, { label: "compute-text-resident-tables" }),
@@ -448,9 +563,14 @@ function createPackShader(engine: EngineContext, entryPoint: string): ComputeSha
     });
 }
 
-function ensureSchedules(shaders: ResidentShaders, engine: EngineContext, buffers: ResidentTextBuffers, runCount: number): void {
+function ensureSchedules(shaders: ResidentShaders, engine: EngineContext, buffers: ResidentTextBuffers, runCount: number, capacity: number): void {
     const previous = shaders.buffers;
-    const parallelCount = runCount > COUNT_LANES;
+    const mode =
+        capacity >= WIDE_PACK_MIN_CAPACITY && runCount > 0 && runCount <= engine._device.limits.maxComputeWorkgroupsPerDimension
+            ? "wide"
+            : runCount > COUNT_LANES
+              ? "parallel"
+              : "small";
     if (!shaders.shapeTask || previous?.shaped !== buffers.shaped) {
         shaders.shapeTask?.dispose();
         const bindings = createComputeBindingSet(shaders.shape, {
@@ -468,7 +588,7 @@ function ensureSchedules(shaders: ResidentShaders, engine: EngineContext, buffer
     }
     if (
         !shaders.packTask ||
-        shaders.packParallelCount !== parallelCount ||
+        shaders.packMode !== mode ||
         previous?.shaped !== buffers.shaped ||
         previous?.instances !== buffers.instances ||
         previous?.slots !== buffers.slots ||
@@ -477,14 +597,15 @@ function ensureSchedules(shaders: ResidentShaders, engine: EngineContext, buffer
     ) {
         shaders.packTask?.dispose();
         const resources = { params: shaders.packParams, ...buffers, offsets: shaders.packOffsets };
-        const pack = parallelCount ? shaders.pack : shaders.small;
+        const pack = mode === "wide" ? shaders.placeWide : mode === "parallel" ? shaders.pack : shaders.small;
         const bindings = createComputeBindingSet(pack, resources);
         shaders.packTask = createComputeTask(engine, "compute-text-resident-pack");
-        shaders.packParallelCount = parallelCount;
+        shaders.packMode = mode;
         shaders.packCountDispatch = undefined;
         shaders.packDispatch = createComputeDispatch(pack, bindings, { size: { x: 1 } });
-        if (parallelCount) {
-            shaders.packCountDispatch = createComputeDispatch(shaders.countParallel, createComputeBindingSet(shaders.countParallel, resources), { size: { x: 1 } });
+        if (mode !== "small") {
+            const count = mode === "wide" ? shaders.countWide : shaders.countParallel;
+            shaders.packCountDispatch = createComputeDispatch(count, createComputeBindingSet(count, resources), { size: { x: 1 } });
             addComputeDispatch(shaders.packTask, shaders.packCountDispatch);
             addComputeDispatch(shaders.packTask, createComputeDispatch(shaders.prefix, createComputeBindingSet(shaders.prefix, resources), { size: { x: 1 } }));
         }

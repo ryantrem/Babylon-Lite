@@ -360,7 +360,7 @@ describe("native M1–3 resident production shaping and packing", () => {
         const dispatches = vi.spyOn(GPUComputePassEncoder.prototype, "dispatchWorkgroups");
         await updateComputeTextData(data, texts);
         expect(dispatches.mock.calls.length).toBe(4);
-        expect(dispatches.mock.calls[1]?.[0]).toBe(8);
+        expect(dispatches.mock.calls[1]?.[0]).toBe(512);
         dispatches.mockRestore();
         await verifyResident(data, font, texts);
     });
