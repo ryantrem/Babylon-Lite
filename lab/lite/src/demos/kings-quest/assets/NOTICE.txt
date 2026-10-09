@@ -1,0 +1,17 @@
+King's Quest I: Quest for the Crown - 1987 DOS AGI v2 edition
+Original game resources: copyright Sierra On-Line.
+
+These resource files are not covered by Babylon Lite's Apache-2.0 license.
+They are included for this port at the user's explicit direction and with
+the user's confirmed permission. No original executable or interpreter is
+included. Review distribution permission before any public deployment.
+
+Source:
+https://archive.org/details/msdos_Kings_Quest_I_-_Quest_for_the_Crown_1987
+Archive file: Kings_Quest_I_-_Quest_for_the_Crown_1987.zip
+Archive length: 271962 bytes
+MD5: 75e461588720e9710bdeee2f91235456
+SHA-1: 42939ec9c41b762d0d5aa1086f281e81a5b9650c
+
+The nine files contain original pictures, views, sound, logic, vocabulary
+and inventory. Total resource size: 344614 bytes.

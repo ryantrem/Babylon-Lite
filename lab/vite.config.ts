@@ -428,7 +428,8 @@ function serveReferenceImages(): Plugin {
                 // startup-cache staleness as the .js/.json blocks above: a demo whose assets
                 // were (re)generated after the server started would otherwise fall through to
                 // the SPA fallback (200 text/html) and fail to decode. Serve them from disk.
-                if (url.startsWith("/bundle/demos/") || url.startsWith("/lite/bundle/demos/")) {
+                const sourceAgiResource = /^\/lite\/src\/demos\/kings-quest\/assets\/(?:LOGDIR|PICDIR|VIEWDIR|SNDDIR|WORDS\.TOK|OBJECT|VOL\.\d+)$/i.test(url);
+                if (url.startsWith("/bundle/demos/") || url.startsWith("/lite/bundle/demos/") || sourceAgiResource) {
                     const ASSET_TYPES: Record<string, string> = {
                         ".png": "image/png",
                         ".jpg": "image/jpeg",
@@ -452,10 +453,12 @@ function serveReferenceImages(): Plugin {
                         ".tilespec": "text/plain; charset=utf-8",
                     };
                     const ext = url.slice(url.lastIndexOf(".")).toLowerCase();
-                    const assetType = ASSET_TYPES[ext];
+                    const agiResource =
+                        sourceAgiResource || /^(?:\/(?:lite\/)?bundle\/demos)?\/kings-quest\/(?:LOGDIR|PICDIR|VIEWDIR|SNDDIR|WORDS\.TOK|OBJECT|VOL\.\d+)$/i.test(url);
+                    const assetType = agiResource ? "application/octet-stream" : ASSET_TYPES[ext];
                     if (assetType) {
                         const bundlePath = url.startsWith("/lite/bundle/") ? url.slice("/lite/".length) : url.slice(1);
-                        const filePath = resolve(__dirname, "public", bundlePath);
+                        const filePath = sourceAgiResource ? resolve(__dirname, url.slice(1)) : resolve(__dirname, "public", bundlePath);
                         if (existsSync(filePath) && statSync(filePath).isFile()) {
                             res.setHeader("Content-Type", assetType);
                             res.setHeader("Cache-Control", "no-cache");

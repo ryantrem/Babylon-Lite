@@ -173,6 +173,27 @@ export default tseslint.config(
     },
 
     // ===========================================
+    // Standalone AGI demo (scoped type-checked rules).
+    // ===========================================
+    {
+        files: ["lab/lite/src/demos/kings-quest.ts", "lab/lite/src/demos/kings-quest/**/*.ts"],
+        extends: [...tseslint.configs.recommended],
+        languageOptions: {
+            parser: tseslint.parser,
+            parserOptions: {
+                projectService: true,
+            },
+        },
+        rules: {
+            curly: "error",
+            "no-console": ["error", { allow: ["warn", "error"] }],
+            "@typescript-eslint/no-floating-promises": "error",
+            "@typescript-eslint/consistent-type-imports": "error",
+            "@typescript-eslint/no-unused-vars": ["error", { varsIgnorePattern: "^_" }],
+        },
+    },
+
+    // ===========================================
     // Test files (lighter rules)
     // ===========================================
     {

@@ -53,6 +53,7 @@ const TETRIS_SRC = resolve(labDir, "public/tetris");
 const PLATFORMER_SRC = resolve(labDir, "public/platformer");
 const SANDBLOX_SRC = resolve(labDir, "public/sandblox");
 const RACER_SRC = resolve(labDir, "public/racer");
+const KINGS_QUEST_SRC = resolve(labDir, "lite/src/demos/kings-quest/assets");
 const ANTIGRAVITY_RACER_SRC = resolve(labDir, "public/antigravity-racer");
 const PLAYROOM_SRC = resolve(labDir, "public/playroom");
 const SCREEN_SPACE_EFFECTS_SRC = resolve(labDir, "public/screen-space-effects");
@@ -206,6 +207,9 @@ function copyRequiredDir(source: string, target: string, label: string): void {
 }
 
 function copyDemoRuntimeAssets(demos: DemoConfigEntry[]): void {
+    if (demos.some((demo) => demo.slug === "kings-quest")) {
+        copyRequiredDir(KINGS_QUEST_SRC, resolve(demosDir, "kings-quest"), "King's Quest");
+    }
     if (demos.some((demo) => demo.slug === "ocean")) {
         cpSync(resolve(labDir, "lite", "demo-ocean-reference.html"), resolve(demosDir, "demo-ocean-reference.html"));
     }

@@ -1,5 +1,12 @@
 [
     {
+        "slug": "kings-quest",
+        "name": "King's Quest I (AGI)",
+        "description": "Original DOS AGI v2 game data running through an independently implemented JavaScript runtime, with Babylon Lite WebGPU graphics and native Web Audio. Original graphics and sound are included; no interpreter package, emulator or WASM. Three-treasure winning route and original ending verified; exhaustive compatibility and hardware-perfect parity are not claimed.",
+        "tags": ["game", "adventure", "2d"],
+        "mobile": false
+    },
+    {
         "slug": "ocean",
         "name": "Ocean",
         "description": "A GPU spectral ocean driven by Babylon Lite compute tasks: JONSWAP spectrum generation, time-dependent amplitudes, multi-stage 2D inverse FFT, and a displaced water surface. Port of Playground YX6IB8#758.",
