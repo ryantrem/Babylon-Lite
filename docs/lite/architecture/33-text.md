@@ -1359,9 +1359,14 @@ their global rule descriptors. This is a compiler proof over every original
 rule, not an inference from a particular string or a format flag.
 Any possible nonzero applied second advance retains capability 2 and its
 ordered commit. Two bounded workgroup arrays hold selected rules and successor
-indexes; runs with admitted
-capacity above 256 use the complete serial root executor, not a rejection or
-reduced font policy. Barriers and workgroup-uniform length/failure loads separate
+indexes. Above 256 expansion slots these arrays remain bounded to 256 entries:
+cooperative roots select a contiguous tile in parallel, synchronize, and let
+the leader commit that tile in source order before reusing its slots. A
+mode-5 rejection publishes the first matching source index and prevents the
+next tile; capability-2 second advances retain ordered integer additions.
+Single and first-only Pair successes retain their disjoint lane commits.
+Capability-0 roots retain the complete ordered executor. Barriers and
+workgroup-uniform length/failure loads separate
 all mutation, selection and commit phases; compaction/reversal remain ordered.
 The same production kernel serves readback and resident endpoints.
 
@@ -1509,9 +1514,9 @@ An import failure leaves it empty so a later call may retry.
 
 For capacity at most 256, the same source factory rounds required capacity up
 to the next power of two and sizes glyph scratch to eight words per slot and
-selected-rule/successor arrays to one word per slot. The run-local base is zero.
-Thus a 50-glyph dispatch reserves 2,560 bytes plus state, not the maximum
-10,240 bytes. Together with state, this fits the
+selected-rule/successor/nominal-mask arrays to one word per slot. The run-local base is zero.
+Thus a 50-glyph dispatch reserves 2,816 bytes plus state, not the maximum
+11,264 bytes. Together with state, this fits the
 WebGPU minimum workgroup-storage limit. Larger capacities use the original
 per-run global scratch binding and storage fences. The factory emits the
 correct declaration/base/fences directly from a typed capacity decision; it
@@ -1523,6 +1528,48 @@ compatible shader while replacing mutable buffers on batch/capacity growth.
 Readback and resident use one common shape-shader constructor.
 Existing buffer growth, output stride, device replacement and terminal-loss
 ownership remain unchanged.
+
+**Length-independent fast-path contract (specified before implementation,
+2026-10-08):** Global scratch does not disable nominal admission, simple-run
+proof or fused first-only positioning. During proof `readGlyph` reads immutable
+packed input and `live` applies the same skip predicates without scratch reads.
+Bounded variants retain their glyph-mask cache; global variants read the
+immutable per-glyph program mask directly. Successful proof writes the same
+six fields directly, including scalar-index clusters and RTL reversal, without
+initializing scratch. The compact Pair directory/capability-3 requirement and
+root-count limit remain unchanged. Any GSUB match or inadmissible GPOS root
+restores the **entire original candidate mask**, never a partially filtered one.
+
+For long input runs, 32 lanes OR first-glyph presence and witness masks into
+separate workgroup atomics and intersect the results. They then stripe each
+candidate GSUB root's no-match proof over input indexes; a per-root atomic
+failure flag forces the same all-or-nothing fallback. Short input runs retain
+the serial leader proof even when a long neighbor forces global scratch.
+The input-length threshold is performance-validated, not a semantic boundary.
+Dirty root presence after ordered GSUB mutation retains its exact existing
+leader recomputation. Successful simple-run rejection reduction first selects
+the earliest root, then the earliest matching index for that root using
+separate atomics; no eight-bit glyph-index encoding is valid for long runs.
+Bounded variants retain the original `(root << 8) | index` reduction and do
+not emit long-run atomics, proof helpers or extra tile barriers. Only global
+scratch input lengths above 256 use parallel admission; this threshold retains
+the measured short-run schedule.
+For parallel proof, the leader resets the per-root failure atomic, lanes
+stripe candidate matching, then synchronize before the leader publishes a
+uniform proof result: 0 for a GSUB no-match, 1 for fallback, 2 for admitted
+GPOS. Only result 0 clears that root's bit; result 1 returns the original
+candidate mask. Presence atomics are initialized before any lane scans input.
+
+Tiled cooperative fallback uses uniform length and terminal loads so every
+lane reaches every tile barrier. Global scratch uses storage fences between
+selection, ordered commit and the next tile/root. Local scratch continues to
+use its power-of-two arrays and the single-tile schedule. The largest bounded
+variant, including eight-word scratch, mask/selection/successor arrays and
+scalar/atomic state, stays below the default 16-KiB workgroup-storage limit.
+There is no public API, program ABI, output stride, overflow/rejection encoding,
+placement, ownership or prefix change. Resident shared-owner capacities and
+readback both use the same constructor across growth, shrinking reuse and
+bounded/global transitions.
 
 **Mark-anchor lookup contract (specified before implementation, 2026-10-08):**
 The ordered fallback's mark-base/mark-mark action keeps its existing

@@ -319,8 +319,10 @@ describe("compute text shaper", () => {
     });
 
     it("does not re-fetch successfully committed disjoint actions in the serial rejection scan", () => {
-        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("selected[index] = select(ruleAt + 1u, 0u, mode == 1u);");
-        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("commitPairFirst(base, index, program[ruleAt + 6u], mode); selected[index] = 0u;");
+        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("selected[slot] = select(ruleAt + 1u, 0u, mode == 1u);");
+        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("commitPairFirst(base, index, program[ruleAt + 6u], mode); selected[slot] = 0u;");
+        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("let index = tile + slot;");
+        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("tile += 256u");
     });
 
     it("uses bounded binary membership for remaining glyph-set predicates, not linear coverage scans", () => {

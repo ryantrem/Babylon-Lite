@@ -18,7 +18,7 @@ import { glyphClass } from "../font-parser/opentype-layout.js";
 import { createStorageBuffer, disposeStorageBuffer, updateStorageBuffer } from "../../resource/storage-buffer.js";
 import type { StorageBuffer } from "../../resource/storage-buffer.js";
 import { COMPUTE_TEXT_INPUT_PREDICATES, COMPUTE_TEXT_PREDICATES } from "./compute-text-predicates.js";
-import { COMPUTE_TEXT_SIMPLE_SOURCE } from "./compute-text-simple-wgsl.js";
+import { computeTextSimpleSource } from "./compute-text-simple-wgsl.js";
 import { prepareSimplePairWords } from "./compute-text-pair-program.js";
 
 const STATUS_OK = 0;
@@ -39,6 +39,73 @@ export const COMPUTE_TEXT_STATUS_UNSUPPORTED = STATUS_UNSUPPORTED;
 export const COMPUTE_TEXT_STATUS_OVERFLOW = STATUS_OVERFLOW;
 
 export const COMPUTE_TEXT_KERNEL_SOURCE = /* @__PURE__ */ kernelSource(0);
+
+function cooperativeSource(localScratch: boolean, storageFence: string): string {
+    const slot = localScratch ? "index" : "slot";
+    const selection = `
+for (var ${slot} = lane; ${slot} < ${localScratch ? "count" : "tileCount"}; ${slot} += 32u) {
+${localScratch ? "" : "let index = tile + slot;"}
+selected[${slot}] = 0u;
+if (!live(base, index, count, flag)) { continue; }
+if (capability == 1u) {
+let entry = directory + u32(scratch[glyphAt(base, index)]) * 2u;
+if (program[entry + 1u] == 0u) { continue; }
+let ruleAt = ruleOrigin + program[program[entry]] * 16u;
+let mode = program[ruleAt + 8u];
+selected[${slot}] = select(ruleAt + 1u, 0u, mode == 1u);
+if (mode == 1u) { replaceGlyph(glyphAt(base, index), program[program[ruleAt + 6u] + 1u]); }
+} else {
+let second = pairSecond(base, count, index, flag);
+seconds[${slot}] = second;
+selected[${slot}] = selectPair(base, index, second, count, ruleOrigin, directory);
+if (capability == 3u && selected[${slot}] != 0u) {
+let ruleAt = selected[${slot}] - 1u;
+let mode = program[ruleAt + 8u];
+if (mode != 5u) { commitPairFirst(base, index, program[ruleAt + 6u], mode); selected[${slot}] = 0u; }
+}
+}
+}`;
+    const commit = `
+for (var ${slot} = 0u; ${slot} < ${localScratch ? "count" : "tileCount"}; ${slot}++) {
+if (selected[${slot}] == 0u) { continue; }
+${localScratch ? "" : "let index = tile + slot;"}
+let ruleAt = selected[${slot}] - 1u;
+let mode = program[ruleAt + 8u];
+if (mode == 5u) { rejectRun(out, lookupIndex | (tableBit << 16u), index); break; }
+if (capability == 2u) { commitPair(base, index, seconds[${slot}], program[ruleAt + 6u], mode); }
+}`;
+    const ordered = "length = executeRoot(base, count, flag, ruleOrigin, directory, out, lookupIndex | (tableBit << 16u));";
+    const refresh = `
+if (!isGpos && !cooperative && removed) { length = compactRun(base, length); }
+if (!isGpos && atomicLoad(&idsChanged) != 0u) { rootPresence = activeRoots(base, length); }
+atomicStore(&idsChanged, 0u);`;
+    if (localScratch) {
+        return `
+if (cooperative) { ${selection} }
+else if (lane == 0u) { ${ordered} }
+workgroupBarrier();
+if (lane == 0u) { if (cooperative) { ${commit} } ${refresh} }
+`;
+    }
+    return `
+if (cooperative) {
+for (var tile = 0u; tile < count; tile += 256u) {
+let tileCount = min(256u, count - tile);
+${selection}
+${storageFence}
+workgroupBarrier();
+if (lane == 0u) { ${commit} }
+${storageFence}
+if (workgroupUniformLoad(&terminal) != 0u) { return; }
+}
+} else {
+if (lane == 0u) { ${ordered} }
+${storageFence}
+workgroupBarrier();
+}
+if (lane == 0u) { ${refresh} }
+`;
+}
 
 function kernelSource(scratchCapacity: number): string {
     const localScratch = scratchCapacity > 0;
@@ -61,16 +128,30 @@ var<workgroup> idsChanged:atomic<u32>;
 var<workgroup> selected:array<u32,${scratchCapacity || 256}>;
 var<workgroup> seconds:array<u32,${scratchCapacity || 256}>;
 var<private> removed:bool;
-${localScratch ? `var<private> nominalSource:bool;\nvar<workgroup> nominalMasks:array<u32,${scratchCapacity}>;` : ""}
+var<private> nominalSource:bool;
+${localScratch ? `var<workgroup> nominalMasks:array<u32,${scratchCapacity}>;` : ""}
+${
+    localScratch
+        ? ""
+        : `var<workgroup> presenceBits:atomic<u32>;
+var<workgroup> presenceWitnesses:atomic<u32>;`
+}
 ${COMPUTE_TEXT_PREDICATES}
 fn glyphAt(base:u32, index:u32)->u32 { return base + index * GLYPH_WORDS; }
 fn readGlyph(base:u32, index:u32)->u32 {
-${localScratch ? "if (nominalSource) { return runs[base + 1u + index]; }" : ""}
+if (nominalSource) { return runs[base + 1u + index]; }
 return u32(scratch[glyphAt(base, index)]);
+}
+${
+    localScratch
+        ? ""
+        : `fn nominalMask(base:u32, index:u32)->u32 {
+return program[params.programWords + params.rootCount * 2u + readGlyph(base, index)];
+}`
 }
 fn live(base:u32, index:u32, count:u32, flag:u32)->bool {
   if (index >= count) { return false; }
-  ${localScratch ? "if (nominalSource) { return !skipped(flag, readGlyph(base, index)); }" : ""}
+  if (nominalSource) { return !skipped(flag, readGlyph(base, index)); }
   let at = glyphAt(base, index);
   return scratch[at + 6] == 0 && !skipped(flag, u32(scratch[at]));
 }
@@ -80,7 +161,7 @@ fn activeRoots(base:u32, count:u32)->u32 {
   var witnesses = 0u;
   for (var index = 0u; index < count; index++) {
     let at = glyphAt(base, index);
-    if (${localScratch ? "nominalSource || " : ""}scratch[at + 6] == 0) {
+    if (nominalSource || scratch[at + 6] == 0) {
       let glyph = readGlyph(base, index);
       let first = program[masks + glyph];
       bits |= first;
@@ -89,6 +170,25 @@ fn activeRoots(base:u32, count:u32)->u32 {
     }
   }
   return bits & witnesses;
+}
+${
+    localScratch
+        ? ""
+        : `fn activeRootsParallel(base:u32, count:u32, lane:u32) {
+let masks = params.programWords + params.rootCount * 2u;
+var bits = 0u;
+var witnesses = 0u;
+for (var index = lane; index < count; index += 32u) {
+let glyph = readGlyph(base, index);
+let first = program[masks + glyph];
+bits |= first;
+witnesses |= program[masks + params.glyphCount + glyph];
+}
+atomicOr(&presenceBits, bits);
+atomicOr(&presenceWitnesses, witnesses);
+workgroupBarrier();
+if (lane == 0u) { rootPresence = atomicLoad(&presenceBits) & atomicLoad(&presenceWitnesses); }
+}`
 }
 fn replaceGlyph(at:u32, id:u32) {
   if (scratch[at] != i32(id)) {
@@ -107,7 +207,7 @@ fn main(@builtin(workgroup_id) group:vec3u, @builtin(local_invocation_index) lan
   let out = run * stride;
   let inputOrigin = runs[local];
   let base = ${localScratch ? "0u" : "local * capacity * GLYPH_WORDS"};
-  ${localScratch ? "nominalSource = true;" : ""}
+  nominalSource = true;
   if (lane == 0u) {
     output[out] = 0;
     output[out + 1] = 0;
@@ -117,15 +217,19 @@ fn main(@builtin(workgroup_id) group:vec3u, @builtin(local_invocation_index) lan
     rootCount = params.rootCount;
     gsubCount = program[2u];
     if (length > capacity) { output[out] = ${STATUS_OVERFLOW}; terminal = 1u; }
-    ${
-        localScratch
-            ? `if (terminal == 0u) {
+    if (terminal == 0u${localScratch ? "" : " && length <= 256u"}) {
 rootPresence = activeRoots(inputOrigin, length);
 simpleRoots = proveSimpleRun(inputOrigin, length, rootPresence);
-atomicStore(&firstFailure, 0xffffffffu);
-}`
-            : ""
-    }
+${localScratch ? "atomicStore(&firstFailure, 0xffffffffu);" : ""}
+}
+${
+    localScratch
+        ? ""
+        : `atomicStore(&presenceBits, 0u);
+atomicStore(&presenceWitnesses, 0u);
+atomicStore(&firstFailureIndex, 0xffffffffu);`
+}
+${localScratch ? "" : "atomicStore(&firstFailure, 0xffffffffu);"}
   }
   ${storageFence}
   workgroupBarrier();
@@ -133,11 +237,17 @@ atomicStore(&firstFailure, 0xffffffffu);
   let scalarCount = workgroupUniformLoad(&length);
   ${
       localScratch
-          ? `let simple = workgroupUniformLoad(&simpleRoots);
-if (simple.y != 0u) { finishSimpleRun(inputOrigin, scalarCount, simple.x, out, lane); return; }
-nominalSource = false;`
-          : ""
+          ? ""
+          : `if (scalarCount > 256u) {
+activeRootsParallel(inputOrigin, scalarCount, lane);
+let candidates = workgroupUniformLoad(&rootPresence);
+let proved = proveSimpleRunParallel(inputOrigin, scalarCount, candidates, lane);
+if (lane == 0u) { simpleRoots = proved; }
+}`
   }
+  let simple = workgroupUniformLoad(&simpleRoots);
+if (simple.y != 0u) { finishSimpleRun(inputOrigin, scalarCount, simple.x, out, lane); return; }
+nominalSource = false;
   for (var i = lane; i < scalarCount; i += 32u) {
     let at = glyphAt(base, i);
     let id = runs[inputOrigin + 1u + i];
@@ -155,7 +265,7 @@ nominalSource = false;`
   let rootOrigin = 8u;
   let roots = workgroupUniformLoad(&rootCount);
   let substitutions = workgroupUniformLoad(&gsubCount);
-  ${localScratch ? "var candidates = simple.x;" : "if (lane == 0u) { rootPresence = activeRoots(base, scalarCount); }\nvar candidates = workgroupUniformLoad(&rootPresence);"}
+  var candidates = simple.x;
   for (var root = 0u; root < roots; root++) {
     if (root < 32u && (candidates & (1u << root)) == 0u) { continue; }
     let tableBit = program[program[rootOrigin] + root * 2u];
@@ -165,53 +275,10 @@ nominalSource = false;`
     let ruleOrigin = program[descBase + 3u];
     let directory = program[descBase + 6u];
     let isGpos = tableBit == 1u;
-    let count = length;
+    let count = ${localScratch ? "length" : "workgroupUniformLoad(&length)"};
     let capability = program[descBase + 2u];
-    let cooperative = capability != 0u && capacity <= 256u;
-    if (cooperative) {
-      for (var index = lane; index < count; index += 32u) {
-        selected[index] = 0u;
-        if (!live(base, index, count, flag)) { continue; }
-        if (capability == 1u) {
-          let entry = directory + u32(scratch[glyphAt(base, index)]) * 2u;
-          if (program[entry + 1u] == 0u) { continue; }
-          let ruleAt = ruleOrigin + program[program[entry]] * 16u;
-          let mode = program[ruleAt + 8u];
-          selected[index] = select(ruleAt + 1u, 0u, mode == 1u);
-          if (mode == 1u) { replaceGlyph(glyphAt(base, index), program[program[ruleAt + 6u] + 1u]); }
-        } else {
-          let second = pairSecond(base, count, index, flag);
-          seconds[index] = second;
-          selected[index] = selectPair(base, index, second, count, ruleOrigin, directory);
-          if (capability == 3u && selected[index] != 0u) {
-            let ruleAt = selected[index] - 1u;
-            let mode = program[ruleAt + 8u];
-            if (mode != 5u) { commitPairFirst(base, index, program[ruleAt + 6u], mode); selected[index] = 0u; }
-          }
-        }
-      }
-    } else if (lane == 0u) {
-      length = executeRoot(base, count, flag, ruleOrigin, directory, out, lookupIndex | (tableBit << 16u));
-    }
-    ${storageFence}
-    workgroupBarrier();
-    if (lane == 0u) {
-      if (cooperative) {
-        for (var index = 0u; index < count; index++) {
-          if (selected[index] == 0u) { continue; }
-          let ruleAt = selected[index] - 1u;
-          let mode = program[ruleAt + 8u];
-          if (mode == 5u) {
-            rejectRun(out, lookupIndex | (tableBit << 16u), index);
-            break;
-          }
-          if (capability == 2u) { commitPair(base, index, seconds[index], program[ruleAt + 6u], mode); }
-        }
-      }
-      if (!isGpos && !cooperative && removed) { length = compactRun(base, length); }
-      if (!isGpos && atomicLoad(&idsChanged) != 0u) { rootPresence = activeRoots(base, length); }
-      atomicStore(&idsChanged, 0u);
-    }
+    let cooperative = capability != 0u${localScratch ? " && capacity <= 256u" : ""};
+    ${cooperativeSource(localScratch, storageFence)}
     ${storageFence}
     if (workgroupUniformLoad(&terminal) != 0u) { return; }
     if (root < substitutions) { candidates = workgroupUniformLoad(&rootPresence); }
@@ -504,7 +571,7 @@ fn applyMark(base:u32, count:u32, index:u32, action:u32, mode:u32)->bool {
   return true;
 }
 ${COMPUTE_TEXT_INPUT_PREDICATES}
-${localScratch ? COMPUTE_TEXT_SIMPLE_SOURCE : ""}
+${computeTextSimpleSource(!localScratch)}
 `;
 }
 
