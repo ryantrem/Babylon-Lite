@@ -2433,3 +2433,23 @@ and unchanged CPU admission failures. Native API timing separates submission
 latency from `completed` latency; browser crossover timing uses the supported
 update → real indirect draw → queue-fence path and validates status afterward,
 without submit-hook draw injection.
+
+### 2026-10-09 — Step 6: two-glyph frame overhead experiments (rejected)
+
+Shipping behavior is unchanged from the asynchronous status contract above.
+Cross-origin-isolated timing (≈5 µs clock) at 256 two-glyph blocks put the GPU
+path only ≈0.08–0.20 ms above a draw-only floor (≈0.6 ms), versus ≈0.30–0.42 ms
+for the CPU path. Two candidates were measured and rejected because neither gained
+≥0.03 ms (paired median, same session) on both fonts:
+
+- **Frame-coalesced submission** — record shape/pack/status copy and submit it
+  together with the next frame (engine `_prependCbs` seam, macrotask fallback
+  flush, flush before conflicting writes/reads). Inter −0.0475 ms, Roboto
+  +0.0275 ms.
+- **Closure/selection allocation trimming** — lazy GSUB subtable metadata and
+  no temporary decoded-selection or nominal-error objects on warm paths. Inter
+  −0.0200 ms, Roboto +0.0225 ms.
+
+A fused shape+pack kernel was not attempted: the measured inter-pass gap was
+≈0.001 ms. Timestamp-query instrumentation inflated both floor and fence time,
+so it must not be used to predict uninstrumented gains.
