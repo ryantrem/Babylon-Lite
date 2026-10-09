@@ -58,6 +58,8 @@ export function syntheticFont(
         | "pair-first"
         | "pair-second"
         | "pair-reject"
+        | "refresh-roots"
+        | "refresh-ligature"
 ): Fixture {
     const head = new Uint8Array(54);
     new DataView(head.buffer).setUint32(0, 0x10000);
@@ -101,6 +103,17 @@ export function syntheticFont(
             ],
             [0]
         );
+    } else if (kind === "refresh-roots") {
+        tables.GSUB = layoutFromLookups(
+            [
+                { type: 1, subtable: words(1, 6, 1, 1, 1, 1) },
+                { type: 1, subtable: words(1, 6, 1, 1, 1, 2) },
+                { type: 1, subtable: words(1, 6, 2, 1, 1, 1) },
+            ],
+            [0, 1, 2]
+        );
+    } else if (kind === "refresh-ligature") {
+        tables.GSUB = layout(4, words(1, 8, 1, 14, 1, 1, 1, 1, 4, 3, 3, 2, 3));
     } else if (kind === "transitive") {
         tables.GSUB = layout(1, words(1, 6, 1, 1, 1, 1), "ccmp", words(1, 6, 1, 1, 1, 2));
     } else if (kind === "adjust") {

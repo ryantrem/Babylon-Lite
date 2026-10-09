@@ -337,7 +337,7 @@ describe("compute text shaper", () => {
 
     it("compacts only ordered substitution roots, never independent roots or an already compact GPOS transition", () => {
         const main = COMPUTE_TEXT_KERNEL_SOURCE.slice(COMPUTE_TEXT_KERNEL_SOURCE.indexOf("fn main("), COMPUTE_TEXT_KERNEL_SOURCE.indexOf("fn rejectRun("));
-        expect(main.match(/compactRun\(/g)).toHaveLength(1);
+        expect(main.match(/refreshRun\(/g)).toHaveLength(1);
         expect(main).toContain("!isGpos && !cooperative");
     });
 

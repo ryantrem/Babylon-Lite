@@ -76,13 +76,13 @@ if (capability == 2u) { commitPair(base, index, seconds[${slot}], program[ruleAt
 }`;
     const ordered = "length = executeRoot(base, count, flag, ruleOrigin, directory, out, lookupIndex | (tableBit << 16u));";
     const orderedSelection = `
-if (lane < 8u) { atomicStore(&orderedMatches[lane], 0u); }
+if (lane < 8u) { atomicStore(&indexBits[lane], 0u); }
 workgroupBarrier();
 for (var ${slot} = lane; ${slot} < ${localScratch ? "count" : "tileCount"}; ${slot} += 32u) {
 ${localScratch ? "" : "let index = tile + slot;"}
 selected[${slot}] = selectRule(base, count, index, flag, ruleOrigin, directory);
 seconds[${slot}] = lowRead;
-if (selected[${slot}] != 0u) { atomicOr(&orderedMatches[${slot} / 32u], 1u << (${slot} % 32u)); }
+if (selected[${slot}] != 0u) { atomicOr(&indexBits[${slot} / 32u], 1u << (${slot} % 32u)); }
 }`;
     const orderedCommit = `
 var frontier = 0u;
@@ -107,8 +107,9 @@ length += applied.x - 1u;
 orderedCursor += applied.x;
 }`;
     const refresh = `
-if (!isGpos && !cooperative && removed) { length = compactRun(base, length); }
-if (!isGpos && atomicLoad(&idsChanged) != 0u) { rootPresence = activeRoots(base, length); }
+refreshFlags = select(0u, 1u, !isGpos && !cooperative && removed)
+| select(0u, 2u, !isGpos && atomicLoad(&idsChanged) != 0u)
+| select(0u, 4u, terminal != 0u);
 atomicStore(&idsChanged, 0u);`;
     if (localScratch) {
         return `
@@ -175,19 +176,17 @@ var<workgroup> rootPresence:u32;
 var<workgroup> idsChanged:atomic<u32>;
 var<workgroup> selected:array<u32,${scratchCapacity || 256}>;
 var<workgroup> seconds:array<u32,${scratchCapacity || 256}>;
-var<workgroup> orderedMatches:array<atomic<u32>,8>;
+var<workgroup> indexBits:array<atomic<u32>,8>;
+var<workgroup> refreshFlags:u32;
+var<workgroup> refreshStart:u32;
+var<workgroup> presenceBits:atomic<u32>;
+var<workgroup> presenceWitnesses:atomic<u32>;
 var<private> removed:bool;
 var<private> nominalSource:bool;
 var<private> selecting:bool;
 var<private> trackReads:bool;
 var<private> lowRead:u32;
 ${localScratch ? `var<workgroup> nominalMasks:array<u32,${scratchCapacity}>;` : ""}
-${
-    localScratch
-        ? ""
-        : `var<workgroup> presenceBits:atomic<u32>;
-var<workgroup> presenceWitnesses:atomic<u32>;`
-}
 ${COMPUTE_TEXT_PREDICATES}
 fn glyphAt(base:u32, index:u32)->u32 { return base + index * GLYPH_WORDS; }
 fn readGlyph(base:u32, index:u32)->u32 {
@@ -198,12 +197,12 @@ return u32(scratch[glyphAt(base, index)]);
 fn observeRead(index:u32) { if (selecting) { lowRead = min(lowRead, index); } }
 fn nextSelected(start:u32, count:u32)->u32 {
 var word = start / 32u;
-var bits = atomicLoad(&orderedMatches[word]) & (0xffffffffu << (start % 32u));
+var bits = atomicLoad(&indexBits[word]) & (0xffffffffu << (start % 32u));
 loop {
 if (bits != 0u) { return word * 32u + countTrailingZeros(bits); }
 word++;
 if (word * 32u >= count) { return count; }
-bits = atomicLoad(&orderedMatches[word]);
+bits = atomicLoad(&indexBits[word]);
 }
 }
 ${
@@ -350,7 +349,9 @@ nominalSource = false;
     trackReads = orderedParallel && !isGpos && !orderedForward;
     ${cooperativeSource(localScratch, storageFence)}
     ${storageFence}
-    if (workgroupUniformLoad(&terminal) != 0u) { return; }
+    let flags = workgroupUniformLoad(&refreshFlags);
+    refreshRun(base, lane, flags);
+    if ((flags & 4u) != 0u) { return; }
     if (root < substitutions) { candidates = workgroupUniformLoad(&rootPresence); }
   }
   if (lane == 0u) {
@@ -447,6 +448,104 @@ fn compactRun(base:u32, count:u32)->u32 {
     }
   }
   return write;
+}
+fn refreshRun(base:u32, lane:u32, flags:u32) {
+if ((flags & 3u) == 0u) { return; }
+let count = workgroupUniformLoad(&length);
+let parallelRefresh = count > 32u;
+if (!parallelRefresh) {
+if (lane == 0u) {
+if ((flags & 1u) != 0u) { length = compactRun(base, count); }
+if ((flags & 2u) != 0u) { rootPresence = activeRoots(base, length); }
+}
+${storageFence}
+return;
+}
+if (lane == 0u) {
+atomicStore(&presenceBits, 0u);
+atomicStore(&presenceWitnesses, 0u);
+}
+if ((flags & 1u) != 0u) {
+var writeBase = 0u;
+for (var tile = 0u; tile < count; tile += 256u) {
+let tileCount = min(256u, count - tile);
+let chunks = (tileCount + 31u) / 32u;
+if (lane < 8u) { atomicStore(&indexBits[lane], 0u); }
+workgroupBarrier();
+for (var index = lane; index < tileCount; index += 32u) {
+if (scratch[glyphAt(base, tile + index) + 6u] == 0) { atomicOr(&indexBits[index / 32u], 1u << (index % 32u)); }
+}
+workgroupBarrier();
+if (lane == 0u) {
+refreshStart = 0u;
+if (writeBase == tile) {
+for (var word = 0u; word < chunks; word++) {
+if (atomicLoad(&indexBits[word]) != 0xffffffffu) { break; }
+refreshStart++;
+}
+}
+}
+let start = workgroupUniformLoad(&refreshStart);
+var prefix = writeBase + start * 32u;
+var current:array<i32,8>;
+if (start < chunks) {
+let bitmap = atomicLoad(&indexBits[start]);
+let index = tile + start * 32u + lane;
+let dest = prefix + countOneBits(bitmap & ((1u << lane) - 1u));
+if ((bitmap & (1u << lane)) != 0u && dest != index) {
+let at = glyphAt(base, index);
+for (var word = 0u; word < GLYPH_WORDS; word++) { current[word] = scratch[at + word]; }
+}
+}
+for (var chunk = start; chunk < chunks; chunk++) {
+let bitmap = atomicLoad(&indexBits[chunk]);
+let nextPrefix = prefix + countOneBits(bitmap);
+var next:array<i32,8>;
+if (chunk + 1u < chunks) {
+let nextBits = atomicLoad(&indexBits[chunk + 1u]);
+let index = tile + (chunk + 1u) * 32u + lane;
+let dest = nextPrefix + countOneBits(nextBits & ((1u << lane) - 1u));
+if ((nextBits & (1u << lane)) != 0u && dest != index) {
+let at = glyphAt(base, index);
+for (var word = 0u; word < GLYPH_WORDS; word++) { next[word] = scratch[at + word]; }
+}
+}
+${storageFence}
+workgroupBarrier();
+if ((bitmap & (1u << lane)) != 0u) {
+let index = tile + chunk * 32u + lane;
+let dest = prefix + countOneBits(bitmap & ((1u << lane) - 1u));
+if (dest != index) {
+let at = glyphAt(base, dest);
+for (var word = 0u; word < GLYPH_WORDS; word++) { scratch[at + word] = current[word]; }
+}
+}
+current = next;
+prefix = nextPrefix;
+}
+writeBase = prefix;
+}
+${storageFence}
+workgroupBarrier();
+if (lane == 0u) { length = writeBase; }
+}
+if ((flags & 2u) != 0u) {
+let liveCount = workgroupUniformLoad(&length);
+let masks = params.programWords + params.rootCount * 2u;
+var bits = 0u;
+var witnesses = 0u;
+for (var index = lane; index < liveCount; index += 32u) {
+let at = glyphAt(base, index);
+if (scratch[at + 6u] != 0) { continue; }
+let glyph = u32(scratch[at]);
+bits |= program[masks + glyph];
+witnesses |= program[masks + params.glyphCount + glyph];
+}
+atomicOr(&presenceBits, bits);
+atomicOr(&presenceWitnesses, witnesses);
+workgroupBarrier();
+if (lane == 0u) { rootPresence = atomicLoad(&presenceBits) & atomicLoad(&presenceWitnesses); }
+}
 }
 fn reverseRun(base:u32, count:u32) {
   if (count < 2u) { return; }

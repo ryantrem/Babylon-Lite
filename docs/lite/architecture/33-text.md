@@ -1669,6 +1669,57 @@ in this bounded implementation. Native and counterbalanced actual indirect-draw
 measurements retain the ordered path for repeatable marked-run improvements,
 without a repeatable greater-than-0.1-ms median penalty on short controls.
 
+**Parallel post-GSUB refresh contract (specified before implementation, 2026-10-08):**
+After commitment, lane 0 publishes a plain workgroup `refreshFlags` word:
+bit 0 is exactly `!isGpos && !cooperative && removed`; bit 1 is exactly
+`!isGpos && atomicLoad(&idsChanged) != 0u`; bit 2 snapshots `terminal != 0u`.
+It resets `idsChanged` there. All lanes uniformly load the flags after the
+existing root storage fence, replacing the former terminal uniform load
+without adding a barrier on unaffected roots. `refreshRun(base:u32, lane:u32,
+flags:u32)` skips work when bits 0–1 are zero, then the caller honors bit 2.
+Cooperative substitutions rescan but never compact. Earlier global
+cooperative/ordered terminal exits remain before publication; local and
+global serial terminal exits remain after refresh, exactly as before.
+Initial nominal-source root discovery and nominal masks are unchanged.
+
+Above a measured, uniformly selected count threshold, stable compaction uses
+eight atomic bitmap words, reused from ordered selection under the neutral
+name `indexBits` only after commitment has finished. In each 256-index tile,
+clear the words, barrier, and atomically set one bit per live record (field 6
+equals zero), then barrier. Lane 0 publishes `refreshStart` (the number of
+unshifted, fully live leading chunks), uniformly loaded before movement.
+Every lane derives the same running word prefix from popcounts plus the
+destination base across tiles; no private eight-element prefix/bitmap arrays
+are needed. Process 32-index
+chunks ascending. Read each live record's complete eight words into private
+registers before any lane writes its destination. Pipeline the next chunk's
+reads before the current chunk's writes, with a workgroup barrier and a
+storage barrier on global scratch between chunks. Destination is the word
+prefix plus the count of lower live bits. Skip unchanged destinations and
+unshifted, fully live leading chunks. Lane 0 publishes the final live count.
+All reads precede potentially overlapping writes within a chunk; destinations
+never exceed source indexes, and earlier-chunk destinations precede
+later-chunk sources. Thus neither in-chunk nor cross-chunk/tile overwrite
+can destroy an unread record. Ascending live-bit ranks preserve exact order.
+
+Rescan strides live scratch records by 32 lanes, ORing the same immutable
+first/witness masks into two workgroup atomics, declared in both variants.
+Lane 0 resets these before the accumulation barrier, then publishes their
+intersection after accumulation. Uniform root-presence publication orders
+the following root. Serial refresh remains at counts up to 32, with a storage fence after its
+leader writes even when a short run shares oversized global scratch.
+The retained parallel threshold is greater than 32: greater-than-64 loses
+marked50 benefits, while always adds work to two-character controls.
+Measured fusion is rejected: Roboto medians were flat and Inter mixed.
+Only the separate exact compaction and rescan ship; every survivor, including
+unmoved records, contributes through the rescan's original liveness test.
+Native/oracle and eight-word synthetic differentials cover both scratch
+variants, chunk/tile boundaries, dense and whole-chunk tombstones, gained/lost
+presence, RTL and terminal paths. Measured on Apple M2 Max native Dawn,
+Roboto 480-glyph English shaping passes fell from about 1.9 ms to 1.0 ms and
+Roboto 4096×50 marked from 2.69 ms to 2.36 ms, with two-character controls
+unchanged.
+
 **Mark-anchor lookup contract (specified before implementation, 2026-10-08):**
 The ordered fallback's mark-base/mark-mark action keeps its existing
 `[markClass, markX, markY, baseCount, ...[glyphId, x, y]]` ABI. Pack base
