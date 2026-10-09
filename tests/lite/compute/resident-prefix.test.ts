@@ -35,7 +35,7 @@ describe("production resident prefix boundaries and ordered errors", () => {
             const maps = vi.spyOn(GPUBuffer.prototype, "mapAsync");
             let status: number;
             try {
-                status = await executeResidentComputeText(token, engine, [], buffers, 2, runCount, 32, 2048, 3, () => undefined);
+                status = await (await executeResidentComputeText(token, engine, [], buffers, 2, runCount, 32, 2048, 3, () => undefined)).status;
                 expect(maps.mock.calls.map((call) => call.slice(0, 3))).toEqual([[GPUMapMode.READ, 0, 4]]);
             } finally {
                 maps.mockRestore();

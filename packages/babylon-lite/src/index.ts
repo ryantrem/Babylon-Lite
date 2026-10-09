@@ -1177,7 +1177,7 @@ export type { ComputeFont } from "./text/compute-font.js";
 export { createComputeFontFromBuffer, loadComputeFont } from "./text/compute-font.js";
 export type { ComputeTextGlyph } from "./text/compute-text-shaper.js";
 export { shapeComputeText } from "./text/compute-text-shaper.js";
-export type { ComputeTextData } from "./text/compute-text-data.js";
+export type { ComputeTextData, ComputeTextUpdate } from "./text/compute-text-data.js";
 export { createComputeTextData, updateComputeTextData, disposeComputeTextData } from "./text/compute-text-data.js";
 export type { ComputeTextLayer } from "./text/compute-text-layer.js";
 export { createComputeTextLayer } from "./text/compute-text-layer.js";

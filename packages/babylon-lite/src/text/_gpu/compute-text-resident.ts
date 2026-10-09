@@ -1,6 +1,7 @@
 /** Shape then pack, without mapping shaped records or instances. Only the 4-byte status is read. */
 
 import type { EngineContext } from "../../engine/engine.js";
+import { BU } from "../../engine/gpu-flags.js";
 import { createComputeBindingSet } from "../../compute/compute-bindings.js";
 import { createComputeDispatch, setComputeDispatchSize } from "../../compute/compute-dispatch.js";
 import type { ComputeDispatch } from "../../compute/compute-dispatch.js";
@@ -8,7 +9,7 @@ import { createComputeShader, disposeComputeShader } from "../../compute/compute
 import type { ComputeShader } from "../../compute/compute-shader.js";
 import { addComputeDispatch, createComputeTask, prepareComputeTask, submitComputeTasks } from "../../compute/compute-task.js";
 import type { ComputeTask } from "../../compute/compute-task.js";
-import { readComputeTaskResult } from "../../compute/compute-task-readback.js";
+import { submitComputeTaskResult } from "../../compute/compute-task-readback.js";
 import { computeStorageBufferBinding } from "../../compute/compute-storage-buffer-binding.js";
 import { createStorageBuffer, disposeStorageBuffer, updateStorageBuffer } from "../../resource/storage-buffer.js";
 import type { StorageBuffer } from "../../resource/storage-buffer.js";
@@ -229,6 +230,9 @@ export interface ResidentTextBuffers {
 
 interface ResidentShaders {
     readonly device: GPUDevice;
+    readonly statusBuffers: GPUBuffer[];
+    readonly freeStatusBuffers: GPUBuffer[];
+    released: boolean;
     shape: ComputeShader;
     pack: ComputeShader;
     small: ComputeShader;
@@ -254,7 +258,7 @@ interface ResidentShaders {
 
 let shadersByToken: WeakMap<object, ResidentShaders> | null = null;
 
-/** Dispatch shape, then pack. Returns the status word. Does not map glyph or instance bytes. */
+/** Dispatch shape, pack and status copy. Returns after submission, with a separate status promise. */
 export async function executeResidentComputeText(
     token: object,
     engine: EngineContext,
@@ -266,7 +270,7 @@ export async function executeResidentComputeText(
     unitsPerEm: number,
     glyphCount: number,
     assertLive: () => void
-): Promise<number> {
+): Promise<{ readonly status: Promise<number> }> {
     assertLive();
     const preparedGroups = groups.map((group) => prepareComputeTextShapeWords(group.plan, group.runs, group.outputRun, capacity, engine._device.limits));
     for (const prepared of preparedGroups) {
@@ -326,9 +330,26 @@ export async function executeResidentComputeText(
     await prepareComputeTask(shaders.packTask!);
     assertLive();
     const tasks = preparedGroups.length > 0 && groups[groups.length - 1]!.runs.length > 0 ? [shaders.shapeTask!, shaders.packTask!] : [shaders.packTask!];
-    const status = await readComputeTaskResult(tasks, buffers.status, 4, (bytes) => new DataView(bytes).getUint32(0, true));
-    assertLive();
-    return status;
+    let staging = shaders.freeStatusBuffers.pop();
+    if (!staging) {
+        staging = engine._device.createBuffer({ label: "compute-text-status-readback", size: 4, usage: BU.COPY_DST | BU.MAP_READ });
+        shaders.statusBuffers.push(staging);
+    }
+    const readback = staging;
+    let status: Promise<number>;
+    try {
+        status = submitComputeTaskResult(tasks, buffers.status, 4, (bytes) => new DataView(bytes).getUint32(0, true), readback);
+    } catch (error) {
+        shaders.freeStatusBuffers.push(readback);
+        throw error;
+    }
+    status = status.finally(() => {
+        if (!shaders.released && readback.mapState === "unmapped") {
+            shaders.freeStatusBuffers.push(readback);
+        }
+    });
+    void status.catch(() => undefined);
+    return { status };
 }
 
 /** Drop shaders borrowed by a disposed or lost object. */
@@ -337,6 +358,12 @@ export function releaseResidentComputeText(token: object): void {
     if (!shaders) {
         return;
     }
+    shaders.released = true;
+    for (const buffer of shaders.statusBuffers) {
+        buffer.destroy();
+    }
+    shaders.statusBuffers.length = 0;
+    shaders.freeStatusBuffers.length = 0;
     disposeComputeShader(shaders.shape);
     disposeComputeShader(shaders.pack);
     disposeComputeShader(shaders.small);
@@ -382,6 +409,9 @@ function ensureShaders(token: object, engine: EngineContext): ResidentShaders {
     const prefix = createPackShader(engine, "prefixRuns");
     const created: ResidentShaders = {
         device: engine._device,
+        statusBuffers: [],
+        freeStatusBuffers: [],
+        released: false,
         shape,
         pack,
         small,

@@ -93,7 +93,9 @@ describe("native compute lifecycle and independently owned engines", () => {
             disposeComputeTextData(data);
             await rejected;
             await expect(updateComputeTextData(data, ["A"])).rejects.toThrow(/disposed/);
-            await updateComputeTextData(survivor, ["A"]);
+            await (
+                await updateComputeTextData(survivor, ["A"])
+            ).completed;
             expect(survivor.status).toBe("ready");
         } finally {
             disposeComputeTextData(data);

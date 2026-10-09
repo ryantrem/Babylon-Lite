@@ -35,11 +35,17 @@ async function run(): Promise<void> {
         const robotoData = createComputeTextData(engine, roboto, storage, "roboto", { fontSizePx: 32 });
         const robotoAgain = createComputeTextData(engine, roboto, storage, "roboto", { fontSizePx: 32 });
         const interData = createComputeTextData(engine, inter, storage, "inter", { fontSizePx: 32 });
-        await updateComputeTextData(robotoData, ["fi"]);
+        await (
+            await updateComputeTextData(robotoData, ["fi"])
+        ).completed;
         results.robotoFiStatus = 0;
         disposeComputeTextData(robotoData);
-        await updateComputeTextData(robotoAgain, ["fi"]);
-        await updateComputeTextData(interData, ["AC"]);
+        await (
+            await updateComputeTextData(robotoAgain, ["fi"])
+        ).completed;
+        await (
+            await updateComputeTextData(interData, ["AC"])
+        ).completed;
         results.interAcStatus = 0;
         results.sharedSurvived = true;
     } catch (error) {

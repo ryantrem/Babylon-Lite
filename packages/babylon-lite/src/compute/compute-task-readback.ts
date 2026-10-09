@@ -4,6 +4,39 @@ import type { StorageBuffer } from "../resource/storage-buffer.js";
 import { _recordComputeTasks } from "./compute-task.js";
 import type { ComputeTask } from "./compute-task.js";
 
+/** @internal Submit prepared work with a private status copy, without waiting for GPU completion. */
+export function submitComputeTaskResult<T>(
+    tasks: readonly ComputeTask[],
+    buffer: StorageBuffer,
+    byteLength: number,
+    consume: (bytes: ArrayBuffer) => T,
+    staging: GPUBuffer
+): Promise<T> {
+    const engine = buffer._engine;
+    const source = _getStorageBufferHandle(engine, buffer);
+    if (!buffer._writable || engine._currentEncoder || staging.mapState !== "unmapped") {
+        throw new Error("submitComputeTaskResult requires an idle encoder and unmapped staging allocation.");
+    }
+    if (!Number.isSafeInteger(byteLength) || byteLength <= 0 || (byteLength & 3) !== 0 || byteLength > buffer.byteLength || byteLength > staging.size) {
+        throw new Error("submitComputeTaskResult requires a positive aligned range within output and staging capacity.");
+    }
+    if (tasks.length === 0 || tasks.some((task) => task.engine !== engine)) {
+        throw new Error("submitComputeTaskResult requires tasks from the output's engine.");
+    }
+    const encoder = engine._device.createCommandEncoder({ label: "compute-result" });
+    _recordComputeTasks(tasks, encoder);
+    encoder.copyBufferToBuffer(source, 0, staging, 0, byteLength);
+    engine._device.queue.submit([encoder.finish()]);
+    engine._gpuTaskTimerResolve?.(encoder);
+    return staging.mapAsync(GPUMapMode.READ, 0, byteLength).then(() => {
+        try {
+            return consume(staging.getMappedRange(0, byteLength));
+        } finally {
+            staging.unmap();
+        }
+    });
+}
+
 /** @internal Complete prepared tasks and materialize private, exclusively owned output while mapped. */
 export async function readComputeTaskResult<T>(tasks: readonly ComputeTask[], buffer: StorageBuffer, byteLength: number, consume: (bytes: ArrayBuffer) => T): Promise<T> {
     const engine = buffer._engine;

@@ -1,12 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import {
-    createComputeTextData,
-    createComputeTextLayer,
-    createGlyphStorage,
-    disposeComputeTextData,
-    disposeGlyphStorage,
-    updateComputeTextData,
-} from "../../../packages/babylon-lite/src/index";
+import { createComputeTextData, createComputeTextLayer, createGlyphStorage, disposeComputeTextData, disposeGlyphStorage } from "../../../packages/babylon-lite/src/index";
+import { awaitComputeTextUpdate as updateComputeTextData } from "./await-update";
 import type { ComputeTextData, GlyphStorage } from "../../../packages/babylon-lite/src/index";
 import { createStorageBuffer, disposeStorageBuffer, readStorageBuffer, updateStorageBuffer } from "../../../packages/babylon-lite/src/resource/storage-buffer";
 import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/compute-text-plan";
@@ -469,7 +463,7 @@ describe("native M1–3 resident production shaping and packing", () => {
         updateStorageBuffer(native.engine, data._slots, Uint32Array.of(0xffffffff), font.oracle.glyphId(0x41) * 4);
         const token = {};
         try {
-            const status = await executeResidentComputeText(
+            const submitted = await executeResidentComputeText(
                 token,
                 native.engine,
                 groups,
@@ -487,7 +481,7 @@ describe("native M1–3 resident production shaping and packing", () => {
                 font.font.glyphCount,
                 () => undefined
             );
-            expect(status).toBe(3);
+            expect(await submitted.status).toBe(3);
             expect([...new Uint32Array(await readStorageBuffer(data._indirect))]).toEqual([6, 0, 0, 0]);
         } finally {
             releaseResidentComputeText(token);
@@ -519,7 +513,7 @@ describe("native M1–3 resident production shaping and packing", () => {
         const instances = createStorageBuffer(native.engine, 12, { writable: true, label: "test-undersized-instances" });
         const token = {};
         try {
-            const status = await executeResidentComputeText(
+            const submitted = await executeResidentComputeText(
                 token,
                 native.engine,
                 groups,
@@ -537,7 +531,7 @@ describe("native M1–3 resident production shaping and packing", () => {
                 font.font.glyphCount,
                 () => undefined
             );
-            expect(status).toBe(2);
+            expect(await submitted.status).toBe(2);
             expect([...new Uint32Array(await readStorageBuffer(data._indirect))]).toEqual([6, 0, 0, 0]);
         } finally {
             releaseResidentComputeText(token);

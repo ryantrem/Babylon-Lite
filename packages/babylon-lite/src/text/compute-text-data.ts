@@ -25,6 +25,12 @@ const MISSING_SLOT = 0xffffffff;
 const EMPTY_SLOT = 0xfffffffe;
 const MAX_PACKED_INDEX = 0xfffe;
 
+/** Submitted resident update. GPU-detected failures are reported only through `completed` and draw nothing. */
+export interface ComputeTextUpdate {
+    /** Observe status outside frame timing. Ignoring this promise does not emit an unhandled rejection. */
+    readonly completed: Promise<void>;
+}
+
 /** Branded GPU-resident text block. Not a CPU text block and never a `PlacedGlyph` list. */
 export interface ComputeTextData {
     readonly [computeTextDataBrand]: true;
@@ -48,6 +54,8 @@ export interface ComputeTextData {
     _dead: boolean;
     /** @internal */
     _rejectPending: ((error: Error) => void) | null;
+    /** @internal */
+    _pendingCompletions: Set<(error: Error) => void>;
     /** @internal */
     _shaped: StorageBuffer;
     /** @internal */
@@ -118,6 +126,7 @@ export function createComputeTextData(
         _onDeviceLost: () => failTerminal(data, "lost", "updateComputeTextData: device lost"),
         _dead: false,
         _rejectPending: null,
+        _pendingCompletions: new Set(),
         _shaped: createStorageBuffer(engine, 64, { label: "compute-text-shaped", writable: true }),
         _instances: createStorageBuffer(engine, 64, { label: "compute-text-instances", writable: true, vertex: true }),
         _indirect: createStorageBuffer(engine, indirectWords, { label: "compute-text-indirect", writable: true, indirect: true }),
@@ -139,8 +148,8 @@ export function createComputeTextData(
     return data;
 }
 
-/** Select, close, install outlines, shape, and pack. Reads status only. Throws unless the draw is complete. */
-export async function updateComputeTextData(data: ComputeTextData, texts: readonly string[]): Promise<void> {
+/** Select, close, install outlines, and submit shape/pack/status copy. Render immediately; observe GPU errors through `completed`. */
+export async function updateComputeTextData(data: ComputeTextData, texts: readonly string[]): Promise<ComputeTextUpdate> {
     assertReady(data);
     const generation = data._generation;
     const device = data._device;
@@ -177,7 +186,7 @@ export async function updateComputeTextData(data: ComputeTextData, texts: readon
         const capacity = sharedCapacity(groups);
         const runCount = prepared.length;
         growDrawBuffers(data, runCount, capacity);
-        const status = await Promise.race([
+        const submitted = await Promise.race([
             executeResidentComputeText(
                 data,
                 data._engine,
@@ -199,10 +208,28 @@ export async function updateComputeTextData(data: ComputeTextData, texts: readon
             cancelled,
         ]);
         assertCurrent(data, generation, device);
-        const failure = residentStatusMessage(status);
-        if (failure) {
-            throw new Error(failure);
-        }
+        let rejectCompletion!: (error: Error) => void;
+        const terminal = new Promise<never>((_, reject) => {
+            rejectCompletion = reject;
+        });
+        data._pendingCompletions.add(rejectCompletion);
+        const completed = Promise.race([submitted.status, terminal])
+            .then((status) => {
+                assertCompletionLive(data, device);
+                const failure = residentStatusMessage(status);
+                if (failure) {
+                    throw new Error(failure);
+                }
+            })
+            .catch((error: unknown) => {
+                assertCompletionLive(data, device);
+                throw error;
+            })
+            .finally(() => {
+                data._pendingCompletions.delete(rejectCompletion);
+            });
+        void completed.catch(() => undefined);
+        return { completed };
     } catch (error) {
         if (!data._dead && data._device === data._engine._device) {
             clearIndirect(data);
@@ -371,6 +398,10 @@ function failTerminal(data: ComputeTextData, status: "lost" | "disposed", messag
     const reject = data._rejectPending;
     data._rejectPending = null;
     reject?.(new Error(message));
+    for (const rejectCompletion of data._pendingCompletions) {
+        rejectCompletion(new Error(message));
+    }
+    data._pendingCompletions.clear();
     releaseResidentComputeText(data);
     for (const buffer of [data._shaped, data._instances, data._indirect, data._slots, data._statusBuffer]) {
         disposeStorageBuffer(buffer);
@@ -395,11 +426,20 @@ function assertReady(data: ComputeTextData): void {
 }
 
 function assertCurrent(data: ComputeTextData, generation: number, device: GPUDevice): void {
+    if (data.status === "lost" || data._engine._device !== device || data._device !== device) {
+        throw new Error("updateComputeTextData: device lost");
+    }
     if (data.status === "disposed" || data._dead || data._generation !== generation) {
         throw new Error("updateComputeTextData: disposed");
     }
+}
+
+function assertCompletionLive(data: ComputeTextData, device: GPUDevice): void {
     if (data.status === "lost" || data._engine._device !== device || data._device !== device) {
         throw new Error("updateComputeTextData: device lost");
+    }
+    if (data.status === "disposed" || data._dead) {
+        throw new Error("updateComputeTextData: disposed");
     }
 }
 

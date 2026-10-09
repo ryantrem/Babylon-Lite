@@ -1,12 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import {
-    createComputeTextData,
-    createGlyphStorage,
-    disposeComputeTextData,
-    disposeGlyphStorage,
-    shapeComputeText,
-    updateComputeTextData,
-} from "../../../packages/babylon-lite/src/index";
+import { createComputeTextData, createGlyphStorage, disposeComputeTextData, disposeGlyphStorage, shapeComputeText } from "../../../packages/babylon-lite/src/index";
+import { awaitComputeTextUpdate as updateComputeTextData } from "./await-update";
 import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/compute-text-plan";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 import { mapComputeFontScalar } from "../../../packages/babylon-lite/src/text/compute-font";

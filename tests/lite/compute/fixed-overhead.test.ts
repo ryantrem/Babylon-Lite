@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { createComputeTextData, disposeComputeTextData, updateComputeTextData } from "../../../packages/babylon-lite/src/text/compute-text-data";
+import { createComputeTextData, disposeComputeTextData } from "../../../packages/babylon-lite/src/text/compute-text-data";
+import { awaitComputeTextUpdate as updateComputeTextData } from "./await-update";
 import type { ComputeTextData } from "../../../packages/babylon-lite/src/text/compute-text-data";
 import { createGlyphStorage, disposeGlyphStorage } from "../../../packages/babylon-lite/src/text/glyph-storage";
 import { closeComputeTextGlyphs } from "../../../packages/babylon-lite/src/text/compute-text-closure";
@@ -234,7 +235,7 @@ describe("fixed-overhead differential contracts", () => {
             if (records.length) {
                 updateStorageBuffer(engine, buffers.shaped, records);
             }
-            const status = await executeResidentComputeText(token, engine, [], buffers, 2, count, 32, 2048, 3, () => undefined);
+            const status = await (await executeResidentComputeText(token, engine, [], buffers, 2, count, 32, 2048, 3, () => undefined)).status;
             const allocation = allocate.mock.calls.reduce((last, [descriptor], index) => (descriptor.label === "compute-text-pack-offsets" ? index : last), -1);
             offsets = allocate.mock.results[allocation]!.value as GPUBuffer;
             if (unfused) {

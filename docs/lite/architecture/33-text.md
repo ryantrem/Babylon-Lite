@@ -2374,3 +2374,62 @@ including slot failures followed by recovery and lifecycle invalidation.
 Native pack comparisons cover 0/1/2/255/256/257 runs, empty/invisible runs,
 all error precedence cases, raw offsets and complete instance/indirect/status
 bytes, plus repeated tier switches on the same resident token.
+
+## Asynchronous status contract (2026-10-09)
+
+```typescript
+export interface ComputeTextUpdate {
+    readonly completed: Promise<void>;
+}
+export function updateComputeTextData(data: ComputeTextData, texts: readonly string[]): Promise<ComputeTextUpdate>;
+```
+
+The update promise resolves after CPU admission, closure installation, buffer
+growth, task preparation and submission of shape/pack plus the four-byte status
+copy. It never waits for mapping, GPU completion or a queue fence. The data is
+`busy` only during preparation/submission and becomes `ready` before resolution.
+The caller may immediately render or submit another update: queue order makes
+the indirect draw consume the submitted instances. No text-keyed cache or
+shape-skipping path is introduced; all kernel and buffer layouts are unchanged.
+
+`completed` belongs to that individual submission. It resolves on status zero
+and rejects with the former `residentStatusMessage` error for GPU-detected
+unsupported lookup, reserved-capacity overflow, missing atlas slot or unknown
+kernel status. Such an update has already written indirect instance count zero
+on the GPU and draws nothing. Its asynchronous failure never clears indirect,
+changes data status, or writes any GPU state: a newer update may own the draw.
+An internal no-op rejection handler suppresses unhandled rejection events if
+the caller ignores `completed`, without changing what callers observe when
+awaiting it. Applications should observe `completed` outside frame timing.
+
+CPU-detected failures retain their existing messages, witness text, admission
+order and indirect clearing. Generation/device checks remain around every
+asynchronous preparation boundary and immediately before submission. Disposal
+or device loss during preparation rejects the update promise; neither can
+submit after its terminal check.
+
+Each data object owns a free list of unmapped four-byte MAP_READ/COPY_DST
+staging buffers and a set of all allocations. Submission takes a free buffer
+or allocates one if every existing buffer is in flight, records the ordinary
+shape/pack tasks and status copy in the same encoder, submits once, preserves
+`engine._gpuTaskTimerResolve?.(encoder)`, and starts `mapAsync` without awaiting
+it. Each copied word is private to its submission. After consumption, unmap
+returns the buffer to the free list; typical sequential use needs one buffer,
+while allocation is bounded by peak overlapping reads. The existing
+`readComputeTaskResult` helper remains unchanged for CPU-output shaping.
+
+Terminal disposal/device loss rejects every pending completion respectively
+with `updateComputeTextData: disposed` / `updateComputeTextData: device lost`,
+destroys all staging buffers, and empties the pool. Mapping failures caused by
+destroy/loss receive those same terminal messages, not low-level map errors.
+Late handlers do not recycle destroyed buffers or mutate resident draw state.
+The sole new public symbol is the root-exported `ComputeTextUpdate` type.
+
+Focused native tests cover resolution while mapping is pending, immediately
+queued draw/read correctness for success and all GPU failure kinds, independent
+overlapping statuses in both success/failure orders, three-plus in-flight reads
+and pool reuse, terminal rejection/destruction, ignored completion rejection,
+and unchanged CPU admission failures. Native API timing separates submission
+latency from `completed` latency; browser crossover timing uses the supported
+update → real indirect draw → queue-fence path and validates status afterward,
+without submit-hook draw injection.
