@@ -10,6 +10,7 @@ import {
     COMPUTE_LOOKUP_CANDIDATES,
     COMPUTE_LOOKUP_RULE_ORIGIN,
     COMPUTE_LOOKUP_MEMBERSHIP,
+    COMPUTE_LOOKUP_ORDERED,
     COMPUTE_LOOKUP_KIND,
     COMPUTE_LOOKUP_RULE_COUNT,
     COMPUTE_PROGRAM_LOOKUP_WORDS,
@@ -159,6 +160,18 @@ describe("compileComputeTextProgram", () => {
         }
         expect(singles).toBeGreaterThan(0);
         expect(pairs).toBeGreaterThan(0);
+    });
+
+    it.each(["Inter.ttf", "Roboto-Regular.ttf"])("encodes ordered eligibility and forward-only proof without changing cooperative capabilities: %s", (file) => {
+        const font = createComputeFontFromBuffer(fontBytes(file));
+        const program = compileComputeTextProgram(createComputeTextPlan(font, selectComputeTextRun("A")));
+        for (const lookup of program.lookups) {
+            const base = (lookup.table === "GSUB" ? program.gsubDescriptorOffset : program.gposDescriptorOffset) + lookup.lookupIndex * COMPUTE_PROGRAM_LOOKUP_WORDS;
+            const modes = lookup.table === "GSUB" ? [1, 2, 5, 9, 11] : [3, 4, 5, 7, 8, 10, 12];
+            const eligibility = lookup.rules.every((rule) => modes.includes(rule.mode)) ? (lookup.rules.some((rule) => rule.mode === 11) ? 2 : 1) : 0;
+            const forward = eligibility && lookup.table === "GSUB" && lookup.rules.every((rule) => rule.backtrack.length === 0) ? 4 : 0;
+            expect(program.words[base + COMPUTE_LOOKUP_ORDERED], `${lookup.table}/${lookup.lookupIndex}`).toBe(eligibility | forward);
+        }
     });
 
     it("compiles Roboto's Latin plan as executable text-shaper actions", () => {

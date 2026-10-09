@@ -75,6 +75,37 @@ if (mode == 5u) { rejectRun(out, lookupIndex | (tableBit << 16u), index); break;
 if (capability == 2u) { commitPair(base, index, seconds[${slot}], program[ruleAt + 6u], mode); }
 }`;
     const ordered = "length = executeRoot(base, count, flag, ruleOrigin, directory, out, lookupIndex | (tableBit << 16u));";
+    const orderedSelection = `
+if (lane < 8u) { atomicStore(&orderedMatches[lane], 0u); }
+workgroupBarrier();
+for (var ${slot} = lane; ${slot} < ${localScratch ? "count" : "tileCount"}; ${slot} += 32u) {
+${localScratch ? "" : "let index = tile + slot;"}
+selected[${slot}] = selectRule(base, count, index, flag, ruleOrigin, directory);
+seconds[${slot}] = lowRead;
+if (selected[${slot}] != 0u) { atomicOr(&orderedMatches[${slot} / 32u], 1u << (${slot} % 32u)); }
+}`;
+    const orderedCommit = `
+var frontier = 0u;
+var wrote = false;
+loop {
+if (orderedCursor >= ${localScratch ? "length" : "tile + tileCount"}) { break; }
+if (orderedCursor < count && (isGpos || (orderedForward && (!wrote || orderedCursor > frontier)))) {
+orderedCursor = ${localScratch ? "" : "tile + "}nextSelected(${localScratch ? "orderedCursor, count" : "orderedCursor - tile, tileCount"});
+if (orderedCursor >= ${localScratch ? "count" : "tile + tileCount"}) { break; }
+}
+let index = orderedCursor;
+var chosen = 0u;
+if (index < count && (isGpos || !wrote || (index > frontier && seconds[${localScratch ? "index" : "index - tile"}] > frontier))) {
+chosen = selected[${localScratch ? "index" : "index - tile"}];
+} else { chosen = selectRule(base, length, index, flag, ruleOrigin, directory); }
+if (chosen == 0u) { orderedCursor++; continue; }
+let applied = applySelected(base, length, index, flag, chosen - 1u, out, lookupIndex | (tableBit << 16u));
+if (terminal != 0u) { break; }
+frontier = max(frontier, applied.y);
+wrote = true;
+length += applied.x - 1u;
+orderedCursor += applied.x;
+}`;
     const refresh = `
 if (!isGpos && !cooperative && removed) { length = compactRun(base, length); }
 if (!isGpos && atomicLoad(&idsChanged) != 0u) { rootPresence = activeRoots(base, length); }
@@ -82,9 +113,14 @@ atomicStore(&idsChanged, 0u);`;
     if (localScratch) {
         return `
 if (cooperative) { ${selection} }
+else if (orderedParallel) { ${orderedSelection} }
 else if (lane == 0u) { ${ordered} }
 workgroupBarrier();
-if (lane == 0u) { if (cooperative) { ${commit} } ${refresh} }
+if (lane == 0u) {
+if (cooperative) { ${commit} }
+else if (orderedParallel) { removed = false; var orderedCursor = 0u; ${orderedCommit} }
+${refresh}
+}
 `;
     }
     return `
@@ -95,6 +131,18 @@ ${selection}
 ${storageFence}
 workgroupBarrier();
 if (lane == 0u) { ${commit} }
+${storageFence}
+if (workgroupUniformLoad(&terminal) != 0u) { return; }
+}
+} else if (orderedParallel) {
+var orderedCursor = 0u;
+if (lane == 0u) { removed = false; }
+for (var tile = 0u; tile < count; tile += 256u) {
+let tileCount = min(256u, count - tile);
+${orderedSelection}
+${storageFence}
+workgroupBarrier();
+if (lane == 0u) { ${orderedCommit} }
 ${storageFence}
 if (workgroupUniformLoad(&terminal) != 0u) { return; }
 }
@@ -127,8 +175,12 @@ var<workgroup> rootPresence:u32;
 var<workgroup> idsChanged:atomic<u32>;
 var<workgroup> selected:array<u32,${scratchCapacity || 256}>;
 var<workgroup> seconds:array<u32,${scratchCapacity || 256}>;
+var<workgroup> orderedMatches:array<atomic<u32>,8>;
 var<private> removed:bool;
 var<private> nominalSource:bool;
+var<private> selecting:bool;
+var<private> trackReads:bool;
+var<private> lowRead:u32;
 ${localScratch ? `var<workgroup> nominalMasks:array<u32,${scratchCapacity}>;` : ""}
 ${
     localScratch
@@ -140,7 +192,19 @@ ${COMPUTE_TEXT_PREDICATES}
 fn glyphAt(base:u32, index:u32)->u32 { return base + index * GLYPH_WORDS; }
 fn readGlyph(base:u32, index:u32)->u32 {
 if (nominalSource) { return runs[base + 1u + index]; }
+observeRead(index);
 return u32(scratch[glyphAt(base, index)]);
+}
+fn observeRead(index:u32) { if (selecting) { lowRead = min(lowRead, index); } }
+fn nextSelected(start:u32, count:u32)->u32 {
+var word = start / 32u;
+var bits = atomicLoad(&orderedMatches[word]) & (0xffffffffu << (start % 32u));
+loop {
+if (bits != 0u) { return word * 32u + countTrailingZeros(bits); }
+word++;
+if (word * 32u >= count) { return count; }
+bits = atomicLoad(&orderedMatches[word]);
+}
 }
 ${
     localScratch
@@ -152,6 +216,7 @@ return program[params.programWords + params.rootCount * 2u + readGlyph(base, ind
 fn live(base:u32, index:u32, count:u32, flag:u32)->bool {
   if (index >= count) { return false; }
   if (nominalSource) { return !skipped(flag, readGlyph(base, index)); }
+  observeRead(index);
   let at = glyphAt(base, index);
   return scratch[at + 6] == 0 && !skipped(flag, u32(scratch[at]));
 }
@@ -275,9 +340,14 @@ nominalSource = false;
     let ruleOrigin = program[descBase + 3u];
     let directory = program[descBase + 6u];
     let isGpos = tableBit == 1u;
-    let count = ${localScratch ? "length" : "workgroupUniformLoad(&length)"};
+    let count = workgroupUniformLoad(&length);
     let capability = program[descBase + 2u];
     let cooperative = capability != 0u${localScratch ? " && capacity <= 256u" : ""};
+    let orderedEligibility = program[descBase + 7u];
+    let orderedEligible = (orderedEligibility & 3u) ${localScratch ? "!= 0u" : "== 1u"};
+    let orderedForward = (orderedEligibility & 4u) != 0u;
+    let orderedParallel = count > 32u && orderedEligible && !cooperative;
+    trackReads = orderedParallel && !isGpos && !orderedForward;
     ${cooperativeSource(localScratch, storageFence)}
     ${storageFence}
     if (workgroupUniformLoad(&terminal) != 0u) { return; }
@@ -312,11 +382,27 @@ fn executeRoot(base:u32, inputCount:u32, flag:u32, ruleOrigin:u32, directory:u32
     var index = 0u;
     loop {
       if (index >= count) { break; }
-      var consumed = 1u;
-      let entry = directory + u32(scratch[glyphAt(base, index)]) * 2u;
+      let selectedRule = selectRule(base, count, index, flag, ruleOrigin, directory);
+      var applied = vec2u(1u, index);
+      if (selectedRule != 0u) { applied = applySelected(base, count, index, flag, selectedRule - 1u, out, lookup); }
+      if (terminal != 0u) { return count; }
+      count += applied.x - 1u;
+      index += applied.x;
+    }
+    return count;
+}
+fn selectRule(base:u32, count:u32, index:u32, flag:u32, ruleOrigin:u32, directory:u32)->u32 {
+  lowRead = index;
+  selecting = trackReads;
+  let selectedRule = selectCandidate(base, count, index, flag, ruleOrigin, directory);
+  selecting = false;
+  return selectedRule;
+}
+fn selectCandidate(base:u32, count:u32, index:u32, flag:u32, ruleOrigin:u32, directory:u32)->u32 {
+      let entry = directory + readGlyph(base, index) * 2u;
       let candidates = program[entry];
       let candidateCount = program[entry + 1u];
-      if (candidateCount == 0u || !live(base, index, count, flag)) { index++; continue; }
+      if (candidateCount == 0u || !live(base, index, count, flag)) { return 0u; }
       for (var candidate = 0u; candidate < candidateCount; candidate++) {
         var ruleAt = ruleOrigin + program[candidates + candidate] * 16u;
         let row = program[ruleAt + 10u];
@@ -324,40 +410,29 @@ fn executeRoot(base:u32, inputCount:u32, flag:u32, ruleOrigin:u32, directory:u32
           candidate += program[ruleAt + 13u] - 1u;
           let second = pairSecond(base, count, index, flag);
           if (second >= count) { continue; }
-          let cls = classOf(program[ruleAt + 11u], u32(scratch[glyphAt(base, second)]));
+          let cls = classOf(program[ruleAt + 11u], readGlyph(base, second));
           if (cls >= program[ruleAt + 12u]) { continue; }
           let selected = program[row + cls];
           if (selected == 0u) { continue; }
           ruleAt = ruleOrigin + (selected - 1u) * 16u;
         }
         let mode = program[ruleAt + 8u];
-        // mode 5 is an unsupported-lookup failure, never a successful skip
-        if (mode == 5u && ruleMatches(base, count, index, flag, ruleAt)) {
-          rejectRun(out, lookup, index);
-          return count;
+        if (!matchInput(base, count, index, flag, ruleAt)) { continue; }
+        let action = program[ruleAt + 6u];
+        if (mode == 12u) {
+          if (probeMarkLigature(base, index, action).x != 0u) { return ruleAt + 1u; }
+        } else if (mode == 11u) {
+          if (program[action] != 0u) { return ruleAt + 1u; }
+        } else if (mode == 3u || mode == 4u) {
+          let second = pairSecond(base, count, index, flag);
+          if (second < count && (mode == 4u || program[action] == readGlyph(base, second))) { return ruleAt + 1u; }
+        } else if (mode == 7u || mode == 8u) {
+          if (probeMark(base, index, action, mode).x != 0u) { return ruleAt + 1u; }
+        } else if (mode == 1u || mode == 2u || mode == 5u || mode == 9u || mode == 10u) {
+          return ruleAt + 1u;
         }
-        if (mode == 12u && matchInput(base, count, index, flag, ruleAt)) {
-          let attached = applyMarkLigature(base, index, program[ruleAt + 6u]);
-          if (attached == 2u) {
-            rejectRun(out, lookup, index);
-            return count;
-          }
-          if (attached == 1u) { break; }
-          continue;
-        }
-        if (mode == 11u && matchInput(base, count, index, flag, ruleAt)) {
-          let produced = applyMultiple(base, count, index, program[ruleAt + 6u]);
-          if (produced == 0xffffffffu) { output[out] = ${STATUS_OVERFLOW}; terminal = 1u; return count; }
-          if (produced == 0u) { continue; }
-          count += produced - 1u;
-          consumed = produced;
-          break;
-        }
-        if (mode != 5u && mode != 11u && applyRule(base, count, index, flag, ruleAt, mode)) { break; }
       }
-      index += consumed;
-    }
-    return count;
+      return 0u;
 }
 fn compactRun(base:u32, count:u32)->u32 {
   var write = 0u;
@@ -385,38 +460,42 @@ fn reverseRun(base:u32, count:u32) {
     }
   }
 }
-fn ruleMatches(base:u32, count:u32, index:u32, flag:u32, ruleAt:u32)->bool {
+fn applySelected(base:u32, count:u32, index:u32, flag:u32, ruleAt:u32, out:u32, lookup:u32)->vec2u {
   let mode = program[ruleAt + 8u];
+  let action = program[ruleAt + 6u];
+  if (mode == 5u) { rejectRun(out, lookup, index); }
+  if (mode == 12u && applyMarkLigature(base, index, action) == 2u) { rejectRun(out, lookup, index); }
+  if (mode == 11u) {
+    let produced = applyMultiple(base, count, index, action);
+    if (produced == 0xffffffffu) { output[out] = ${STATUS_OVERFLOW}; terminal = 1u; return vec2u(1u, 0xffffffffu); }
+    return vec2u(produced, 0xffffffffu);
+  }
+  if (mode == 1u) { replaceGlyph(glyphAt(base, index), program[action + 1u]); }
+  if (mode == 2u) { return vec2u(1u, applyContext(base, count, index, action)); }
+  if (mode == 9u) { return vec2u(1u, applyLigature(base, count, index, flag, ruleAt, action)); }
   if (mode == 3u || mode == 4u) {
     let second = pairSecond(base, count, index, flag);
-    return second < count && matchInput(base, count, index, flag, ruleAt);
+    commitPair(base, index, second, action, mode);
+    return vec2u(1u, second);
   }
-  return matchInput(base, count, index, flag, ruleAt);
-}
-fn applyRule(base:u32, count:u32, index:u32, flag:u32, ruleAt:u32, mode:u32)->bool {
-  if (!matchInput(base, count, index, flag, ruleAt)) { return false; }
-  let action = program[ruleAt + 6u];
-  if (mode == 1u) { replaceGlyph(glyphAt(base, index), program[action + 1u]); return true; }
-  if (mode == 2u) { return applyContext(base, count, index, action); }
-  if (mode == 9u) { return applyLigature(base, count, index, flag, ruleAt, action); }
-  if (mode == 3u || mode == 4u) { return applyPair(base, count, index, flag, action, mode); }
-  if (mode == 8u || mode == 7u) { return applyMark(base, count, index, action, mode); }
+  if (mode == 8u || mode == 7u) { applyMark(base, count, index, action, mode); }
   if (mode == 10u) {
     let at = glyphAt(base, index);
     scratch[at + 4] += bitcast<i32>(program[action]);
     scratch[at + 5] += bitcast<i32>(program[action + 1u]);
     scratch[at + 2] += bitcast<i32>(program[action + 2u]);
     scratch[at + 3] += bitcast<i32>(program[action + 3u]);
-    return true;
   }
-  return false;
+  return vec2u(1u, index);
 }
-fn applyContext(base:u32, count:u32, index:u32, action:u32)->bool {
+fn applyContext(base:u32, count:u32, index:u32, action:u32)->u32 {
   let nested = program[action];
+  var high = index;
   for (var i = 0u; i < nested; i++) {
     let at = index + program[action + 1u + i * 2u];
     let lookup = program[action + 2u + i * 2u];
     if (at >= count) { continue; }
+    high = max(high, at);
     let desc = program[4u] + lookup * 8u;
     let ruleOrigin = program[desc + 3u];
     let glyph = u32(scratch[glyphAt(base, at)]);
@@ -425,7 +504,7 @@ fn applyContext(base:u32, count:u32, index:u32, action:u32)->bool {
     for (var candidate = 0u; candidate < program[entry + 1u]; candidate++) {
       let ruleAt = ruleOrigin + program[candidates + candidate] * 16u;
       if (program[ruleAt + 8u] == 5u) {
-        return true;
+        return high;
       }
       if (program[ruleAt + 8u] == 1u) {
         replaceGlyph(glyphAt(base, at), program[program[ruleAt + 6u] + 1u]);
@@ -433,18 +512,19 @@ fn applyContext(base:u32, count:u32, index:u32, action:u32)->bool {
       }
     }
   }
-  return true;
+  return high;
 }
-fn applyMarkLigature(base:u32, index:u32, action:u32)->u32 {
+fn probeMarkLigature(base:u32, index:u32, action:u32)->vec3u {
   var lig = -1;
   var between = 0;
   for (var i = 0u; i < index; i++) {
+    observeRead(i);
     let cls = scratch[glyphAt(base, i) + 7];
     if (cls == 0 || cls == 1 || cls == 2) { lig = i32(i); between = 0; }
     else if (cls == 3 && lig >= 0) { between++; }
   }
-  if (lig < 0 || scratch[glyphAt(base, u32(lig)) + 7] != 2) { return 0u; }
-  let ligId = u32(scratch[glyphAt(base, u32(lig))]);
+  if (lig < 0 || scratch[glyphAt(base, u32(lig)) + 7] != 2) { return vec3u(0u); }
+  let ligId = readGlyph(base, u32(lig));
   var cursor = action + 3u;
   let ligatures = program[action + 2u];
   for (var n = 0u; n < ligatures; n++) {
@@ -453,26 +533,31 @@ fn applyMarkLigature(base:u32, index:u32, action:u32)->u32 {
     let anchorCount = program[cursor + 2u];
     cursor += 3u;
     if (glyphId == ligId) {
-      if (componentCount == 0u) { return 0u; }
+      if (componentCount == 0u) { return vec3u(0u); }
       let component = min(u32(between), componentCount - 1u);
       for (var a = 0u; a < anchorCount; a++) {
         let at = cursor + a * 4u;
         if (program[at] == component) {
-          if (program[at + 1u] != 0u) { return 2u; }
-          let mark = glyphAt(base, index);
-          let baseAt = glyphAt(base, u32(lig));
-          scratch[mark + 4] = bitcast<i32>(program[at + 2u]) - bitcast<i32>(program[action]) + scratch[baseAt + 4];
-          scratch[mark + 5] = bitcast<i32>(program[at + 3u]) - bitcast<i32>(program[action + 1u]) + scratch[baseAt + 5];
-          scratch[mark + 2] = 0;
-          scratch[mark + 3] = 0;
-          return 1u;
+          return vec3u(u32(lig) + 1u, at, program[at + 1u]);
         }
       }
-      return 0u;
+      return vec3u(0u);
     }
     cursor += anchorCount * 4u;
   }
-  return 0u;
+  return vec3u(0u);
+}
+fn applyMarkLigature(base:u32, index:u32, action:u32)->u32 {
+  let probe = probeMarkLigature(base, index, action);
+  if (probe.x == 0u) { return 0u; }
+  if (probe.z != 0u) { return 2u; }
+  let mark = glyphAt(base, index);
+  let baseAt = glyphAt(base, probe.x - 1u);
+  scratch[mark + 4] = bitcast<i32>(program[probe.y + 2u]) - bitcast<i32>(program[action]) + scratch[baseAt + 4];
+  scratch[mark + 5] = bitcast<i32>(program[probe.y + 3u]) - bitcast<i32>(program[action + 1u]) + scratch[baseAt + 5];
+  scratch[mark + 2] = 0;
+  scratch[mark + 3] = 0;
+  return 1u;
 }
 fn applyMultiple(base:u32, count:u32, index:u32, action:u32)->u32 {
   let produced = program[action];
@@ -507,13 +592,12 @@ fn applyMultiple(base:u32, count:u32, index:u32, action:u32)->u32 {
   }
   return produced;
 }
-fn applyLigature(base:u32, count:u32, index:u32, flag:u32, ruleAt:u32, action:u32)->bool {
+fn applyLigature(base:u32, count:u32, index:u32, flag:u32, ruleAt:u32, action:u32)->u32 {
   let inputCount = program[ruleAt + 1u];
   var cursor = index;
   var cluster = scratch[glyphAt(base, index) + 1];
   for (var step = 0u; step < inputCount; step++) {
     if (step > 0u) { cursor = nextLive(base, count, cursor + 1u, flag, 1); }
-    if (cursor >= count) { return false; }
     cluster = min(cluster, scratch[glyphAt(base, cursor) + 1]);
     if (step > 0u) { scratch[glyphAt(base, cursor) + 6] = 1; }
   }
@@ -522,15 +606,7 @@ fn applyLigature(base:u32, count:u32, index:u32, flag:u32, ruleAt:u32, action:u3
   scratch[at + 1] = cluster;
   removed = true;
   atomicStore(&idsChanged, 1u);
-  return true;
-}
-fn applyPair(base:u32, count:u32, index:u32, flag:u32, action:u32, mode:u32)->bool {
-  let second = pairSecond(base, count, index, flag);
-  if (second >= count) { return false; }
-  let secondId = u32(scratch[glyphAt(base, second)]);
-  if (mode == 3u && program[action] != secondId) { return false; }
-  commitPair(base, index, second, action, mode);
-  return true;
+  return cursor;
 }
 fn commitPairFirst(base:u32, index:u32, action:u32, mode:u32) {
   scratch[glyphAt(base, index) + 2] += bitcast<i32>(program[action + select(1u, 2u, mode == 4u)]);
@@ -540,16 +616,23 @@ fn commitPair(base:u32, index:u32, second:u32, action:u32, mode:u32) {
   let applySecond = program[action + select(3u, 4u, mode == 4u)];
   if (applySecond != 0u) { scratch[glyphAt(base, second) + 2] += bitcast<i32>(program[action + select(2u, 3u, mode == 4u)]); }
 }
-fn applyMark(base:u32, count:u32, index:u32, action:u32, mode:u32)->bool {
+fn probeMark(base:u32, index:u32, action:u32, mode:u32)->vec2u {
   var baseIndex = -1;
   if (mode == 7u) {
-    if (index == 0u || scratch[glyphAt(base, index - 1u) + 7] != 3) { return false; }
+    if (index == 0u) { return vec2u(0u); }
+    observeRead(index - 1u);
+    if (scratch[glyphAt(base, index - 1u) + 7] != 3) { return vec2u(0u); }
     baseIndex = i32(index) - 1;
   } else {
-    for (var i = 0; i < i32(index); i++) { if (scratch[glyphAt(base, u32(i)) + 7] != 3) { baseIndex = i; } }
-    if (baseIndex < 0) { return false; }
+    var i = index;
+    while (i > 0u) {
+      i--;
+      observeRead(i);
+      if (scratch[glyphAt(base, i) + 7] != 3) { baseIndex = i32(i); break; }
+    }
+    if (baseIndex < 0) { return vec2u(0u); }
   }
-  let baseId = u32(scratch[glyphAt(base, u32(baseIndex))]);
+  let baseId = readGlyph(base, u32(baseIndex));
   let baseCount = program[action + 3u];
   var low = 0u;
   var high = baseCount;
@@ -558,13 +641,19 @@ fn applyMark(base:u32, count:u32, index:u32, action:u32, mode:u32)->bool {
     if (program[action + 4u + middle * 3u] <= baseId) { low = middle + 1u; }
     else { high = middle; }
   }
-  if (low == 0u) { return false; }
+  if (low == 0u) { return vec2u(0u); }
   let anchor = action + 4u + (low - 1u) * 3u;
-  if (program[anchor] != baseId) { return false; }
+  if (program[anchor] != baseId) { return vec2u(0u); }
+  return vec2u(u32(baseIndex) + 1u, anchor);
+}
+fn applyMark(base:u32, count:u32, index:u32, action:u32, mode:u32)->bool {
+  let probe = probeMark(base, index, action, mode);
+  if (probe.x == 0u) { return false; }
+  let anchor = probe.y;
   let ax = bitcast<i32>(program[anchor + 1u]);
   let ay = bitcast<i32>(program[anchor + 2u]);
   let at = glyphAt(base, index);
-  let baseAt = glyphAt(base, u32(baseIndex));
+  let baseAt = glyphAt(base, probe.x - 1u);
   scratch[at + 4] = ax - bitcast<i32>(program[action + 1u]) + scratch[baseAt + 4];
   scratch[at + 5] = ay - bitcast<i32>(program[action + 2u]) + scratch[baseAt + 5];
   if (mode == 8u) { scratch[at + 2] = 0; scratch[at + 3] = 0; }

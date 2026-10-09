@@ -370,7 +370,7 @@ describe("compute text shaper", () => {
         expect(source).not.toMatch(/layout\.js/);
         expect(source).not.toMatch(/glyph-extraction\.js/);
         expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("@workgroup_size(32)");
-        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("unsupported-lookup failure");
+        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("if (mode == 5u) { rejectRun(out, lookup, index); }");
         expect(COMPUTE_TEXT_KERNEL_SOURCE).not.toContain("mode == 5u) { continue;");
     });
 

@@ -21,11 +21,15 @@ function layout(type: number, subtable: Uint8Array, featureTag = "ccmp", extra?:
     return layoutFromLookups([{ type, subtable }, ...(extra ? [{ type, subtable: extra }] : [])], extra ? [0, 1] : [0], featureTag);
 }
 
-function layoutFromLookups(lookups: readonly { type: number; subtable: Uint8Array; extraSubtable?: Uint8Array }[], roots: readonly number[], featureTag = "ccmp"): Uint8Array {
+function layoutFromLookups(
+    lookups: readonly { type: number; subtable: Uint8Array; extraSubtable?: Uint8Array; flag?: number }[],
+    roots: readonly number[],
+    featureTag = "ccmp"
+): Uint8Array {
     const script = concat(words(1), new TextEncoder().encode("latn"), words(8, 4, 0, 0, 0xffff, 1, 0));
     const feature = concat(words(1), new TextEncoder().encode(featureTag), words(8, 0, roots.length, ...roots));
-    const bodies = lookups.map(({ type, subtable, extraSubtable }) =>
-        extraSubtable ? concat(words(type, 0, 2, 10, 10 + subtable.length), subtable, extraSubtable) : concat(words(type, 0, 1, 8), subtable)
+    const bodies = lookups.map(({ type, subtable, extraSubtable, flag = 0 }) =>
+        extraSubtable ? concat(words(type, flag, 2, 10, 10 + subtable.length), subtable, extraSubtable) : concat(words(type, flag, 1, 8), subtable)
     );
     let offset = 2 + bodies.length * 2;
     const offsets = bodies.map((body) => {
@@ -39,7 +43,21 @@ function layoutFromLookups(lookups: readonly { type: number; subtable: Uint8Arra
 
 /** Valid small sfnt fixtures, independently decoded by text-shaper. No font internals are mutated. */
 export function syntheticFont(
-    kind: "multiple" | "alternate" | "mark-ligature" | "point-anchor" | "adjust" | "transitive" | "context" | "pair-first" | "pair-second" | "pair-reject"
+    kind:
+        | "multiple"
+        | "alternate"
+        | "mark-ligature"
+        | "mark-mark"
+        | "point-anchor"
+        | "adjust"
+        | "transitive"
+        | "context"
+        | "backtrack"
+        | "backtrack-reject"
+        | "ligature-ignore-marks"
+        | "pair-first"
+        | "pair-second"
+        | "pair-reject"
 ): Fixture {
     const head = new Uint8Array(54);
     new DataView(head.buffer).setUint32(0, 0x10000);
@@ -63,6 +81,17 @@ export function syntheticFont(
     };
     if (kind === "multiple" || kind === "alternate") {
         tables.GSUB = layout(kind === "multiple" ? 2 : 3, words(1, 8, 1, 14, 1, 1, 1, 2, 2, 3));
+    } else if (kind === "backtrack" || kind === "backtrack-reject") {
+        tables.GSUB = layoutFromLookups(
+            [
+                { type: 6, subtable: words(3, 1, 20, 2, 26, 32, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1) },
+                kind === "backtrack" ? { type: 1, subtable: words(1, 6, 1, 1, 1, 1) } : { type: 3, subtable: words(1, 8, 1, 14, 1, 1, 1, 2, 2, 3) },
+            ],
+            [0]
+        );
+    } else if (kind === "ligature-ignore-marks") {
+        tables.GSUB = layoutFromLookups([{ type: 4, flag: 8, subtable: words(1, 8, 1, 14, 1, 1, 1, 1, 4, 3, 2, 3) }], [0]);
+        tables.GDEF = concat(words(1, 0, 12, 0, 0, 0), words(1, 1, 3, 1, 3, 1));
     } else if (kind === "context") {
         tables.GSUB = layoutFromLookups(
             [
@@ -76,6 +105,13 @@ export function syntheticFont(
         tables.GSUB = layout(1, words(1, 6, 1, 1, 1, 1), "ccmp", words(1, 6, 1, 1, 1, 2));
     } else if (kind === "adjust") {
         tables.GPOS = layout(1, words(1, 8, 4, 13, 1, 1, 1), "kern");
+    } else if (kind === "mark-mark") {
+        tables.GPOS = layout(
+            6,
+            concat(words(1, 12, 20, 1, 28, 50), words(1, 2, 2, 3), words(1, 2, 2, 3), words(2, 0, 10, 0, 16, 1, 5, 7, 1, 15, 17), words(2, 6, 12, 1, 25, 47, 1, 45, 67)),
+            "mkmk"
+        );
+        tables.GDEF = concat(words(1, 0, 12, 0, 0, 0), words(1, 1, 3, 1, 3, 3));
     } else if (kind === "pair-reject") {
         tables.GPOS = layoutFromLookups(
             [

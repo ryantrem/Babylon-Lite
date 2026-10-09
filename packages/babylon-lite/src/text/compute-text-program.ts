@@ -11,7 +11,7 @@
  *
  *  Lookup descriptor words, at `descriptorOffset + fontLookupIndex * 8`:
  *    0 kind, 1 flag, 2 cooperative capability, 3 rule origin, 4 rule count,
- *    5 expansion, 6 candidate origin, 7 filter admitted (always 0).
+ *    5 expansion, 6 candidate origin, 7 ordered eligibility (low bits: 0 serial, 1 tiled, 2 bounded insertion; bit 2: forward-only GSUB).
  *  Rule words, 16 each:
  *    0 input origin, 1 input count, 2 backtrack origin, 3 backtrack count,
  *    4 lookahead origin, 5 lookahead count, 6 action origin, 7 action length,
@@ -43,7 +43,7 @@ export const COMPUTE_LOOKUP_RULE_ORIGIN = 3;
 export const COMPUTE_LOOKUP_RULE_COUNT = 4;
 export const COMPUTE_LOOKUP_EXPANSION = 5;
 export const COMPUTE_LOOKUP_CANDIDATES = 6;
-export const COMPUTE_LOOKUP_FILTER_ADMITTED = 7;
+export const COMPUTE_LOOKUP_ORDERED = 7;
 export const COMPUTE_RULE_INPUT = 0;
 export const COMPUTE_RULE_INPUT_LENGTH = 1;
 export const COMPUTE_RULE_BACKTRACK = 2;
@@ -842,7 +842,9 @@ function packProgram(
             words[candidateOrigin + glyph * 2] = push(...list);
         });
         words[base + COMPUTE_LOOKUP_CANDIDATES] = candidateOrigin;
-        words[base + COMPUTE_LOOKUP_FILTER_ADMITTED] = 0;
+        const orderedModes = lookup.table === "GSUB" ? [1, 2, 5, 9, 11] : [3, 4, 5, 7, 8, 10, 12];
+        const ordered = lookup.rules.every((rule) => orderedModes.includes(rule.mode)) ? (lookup.rules.some((rule) => rule.mode === 11) ? 2 : 1) : 0;
+        words[base + COMPUTE_LOOKUP_ORDERED] = ordered | (ordered && lookup.table === "GSUB" && lookup.rules.every((rule) => rule.backtrack.length === 0) ? 4 : 0);
     }
     const rootWitnesses = new Uint32Array(plan.font.glyphCount);
     let unconditional = 0;

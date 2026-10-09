@@ -1571,6 +1571,104 @@ placement, ownership or prefix change. Resident shared-owner capacities and
 readback both use the same constructor across growth, shrinking reuse and
 bounded/global transitions.
 
+**Parallel-selection / ordered-commit contract (specified before implementation,
+2026-10-08):** Capability-0 roots share two functions with their serial fallback.
+`selectRule(base, count, index, flag, ruleOrigin, directory) -> u32` is read-only:
+zero means no terminating candidate; otherwise the result is the original
+sixteen-word rule address plus one. It preserves candidate-directory order,
+class-pair row indirection and row-candidate skipping. Rejections select their
+original rule, not a successful no-op. Multiple substitution selects only a
+nonempty output. Pair selection requires the original second-glyph existence
+and explicit-pair ID test. Mark selection requires a present base and anchor;
+mark-ligature probing also preserves the contour-anchor rejection outcome.
+Context, Single, SinglePos and ligature select after the complete input,
+backtrack and lookahead predicate succeeds. A ligature cursor cannot fail after
+that predicate: both walks use the same `nextLive` sequence, and commitment
+only tombstones previously visited components, never its future components.
+
+`applySelected(base, count, index, flag, ruleAt, out, lookup) -> vec2u` returns
+consumed input-cursor steps and the highest written index. It does not re-match
+predicates. Attachment probes may be repeated to recover base/anchor addresses;
+the actual offsets are read at commitment time, including offsets written by
+an earlier attachment in this same lookup. Rejection/overflow still publish
+the unchanged terminal status, lookup word and first source index. Single,
+SinglePos and attachment writes end at their current index; pairs end at their
+second index; ligatures end at their last component; context ends at the
+maximum in-range nested action index. Multiple insertion reports
+`0xffffffff` because it shifts all later positions. Serial execution uses
+exactly these functions, advances past inserted glyphs, and retains ordered
+compaction and root-presence refresh.
+
+Descriptor word 2 retains capabilities 0–3 unchanged. The formerly reserved
+word 7 encodes compiler-proved ordered eligibility: 0 means serial-only,
+1 means tile-safe, 2 means insertion-containing (bounded scratch only).
+Bit 2 additionally proves a GSUB root has no backtrack predicates: its selection
+cannot read below its current index. Eligibility is in the low two bits.
+GSUB admits only modes 1/2/5/9/11; GPOS only 3/4/5/7/8/10/12. Every rule must
+be admitted, and only capability-0 roots use this new schedule. No runtime
+rule scan infers eligibility. The retained threshold is run length greater than
+32: always and greater-than-32 improve marked50 timestamps, whereas
+greater-than-64 misses that gain. Two-character controls stay on the existing
+leader schedule. The naive parallel schedule with a complete leader traversal
+did not pay; the bitmap schedule is the retained implementation.
+
+For an eligible root above the threshold, all 32 lanes select from unchanged
+scratch, storing rule addresses in `selected` and the lowest inspected index
+in `seconds`. Selection-only private tracking starts at the current index and
+records every inspected position for backtracking GSUB, including failed
+candidates and skipped or tombstoned glyphs in `nextLive`. Forward-only GSUB
+has exact lowest read equal to its current index and needs no tracking;
+GPOS needs no tracking because the field-disjoint proof below is sufficient.
+Attachment probes are read-only, including complete mark-ligature scans. A zero
+candidate directory or non-live index still records its current-index read.
+After a barrier, lane 0 commits indexes ascending and preserves the serial
+consumed cursor. It tracks a write frontier: none initially, otherwise the
+maximum index written since this snapshot. A GSUB selection is reusable iff
+there is no frontier, or both its current index and its lowest read exceed
+the frontier; otherwise the leader re-selects from current state. Bounding
+all writes above by the frontier and all selection reads below by the lowest
+read proves disjointness, even for failed selections and contextual backtrack.
+Insertion makes the frontier unbounded, forcing every later re-selection.
+Bounded insertion can increase the cursor past the original snapshot; indexes
+outside the snapshot also always re-select. Eight bounded atomic words record
+nonzero selections, one bit per snapshot index. For GPOS, or a forward-only GSUB
+cursor strictly beyond the write frontier, the leader can skip zero-selection
+spans via `countTrailingZeros`: those selections are proved valid and cannot
+have become matches. For backtracking GSUB, positions at/below the frontier,
+or positions outside an insertion snapshot, it instead visits every position.
+The bitmap is reset before each tile selection; it is never a replacement for
+the lowest-read validity proof. This removes serial empty-directory traversal
+without omitting any index whose selection could have changed.
+
+GPOS selections are always reusable: modes 3/4 read IDs/live flags and write
+only advances (fields 2/3); mode 10 writes only fields 2–5; modes 7/8/12 select
+using IDs, live flags and stored glyph classes (fields 0/6/7), program anchors
+and immutable GDEF, never positioning fields. Mode 5 has no writes. Mark-mark
+inherited offsets and mark-ligature/base offsets are deliberately read only
+at commitment. Thus every admitted GPOS mode has disjoint selection-read and
+mutation-field sets, including overlapping pairs and stacked marks.
+
+Above 256 capacity, selection uses contiguous 256-slot tiles and storage
+fences. Each tile takes its fresh snapshot after previous commitment; its
+frontier resets, while the serial consumed cursor carries across tiles.
+Cross-boundary ligature tombstones are visible to the next snapshot. Roots
+containing mode 11 retain the serial executor in this scratch mode; no shifted
+index is mapped to a stale tile. Workgroup-uniform length/terminal publication
+separates all phases, and rejection prevents the next tile. Bounded scratch
+uses the same selection and commitment logic with one snapshot and the same
+eight-word bitmap. No output record, resident packing, RTL reversal or API changes.
+
+Mode-8 base discovery scans backward from `index-1`, stopping at the first
+stored class other than 3. This is exactly the last such position found by
+the former complete forward scan. Mode 7 still requires the immediately
+preceding stored mark class. Stable upper-bound anchor lookup, including
+last-duplicate precedence, remains unchanged. Root refresh and compaction
+remain serial. Their substantial Roboto attribution is a remaining bottleneck,
+not a claimed gain of this change; parallel refresh/compaction was not included
+in this bounded implementation. Native and counterbalanced actual indirect-draw
+measurements retain the ordered path for repeatable marked-run improvements,
+without a repeatable greater-than-0.1-ms median penalty on short controls.
+
 **Mark-anchor lookup contract (specified before implementation, 2026-10-08):**
 The ordered fallback's mark-base/mark-mark action keeps its existing
 `[markClass, markX, markY, baseCount, ...[glyphId, x, y]]` ABI. Pack base
