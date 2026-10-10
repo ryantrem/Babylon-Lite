@@ -71,6 +71,9 @@ const IGNORE_BASE = 0x0002;
 const IGNORE_LIGATURES = 0x0004;
 const IGNORE_MARKS = 0x0008;
 const USE_MARK_FILTERING_SET = 0x0010;
+const EMPTY_GLYPHS: readonly number[] = [];
+
+type ComputeProgramMarkBases = readonly { readonly glyphId: number; readonly x: number; readonly y: number }[];
 
 export interface ComputeGlyphPredicate {
     readonly kind: "glyphs" | "class";
@@ -110,7 +113,7 @@ export type ComputeProgramAction =
           readonly markClass: number;
           readonly markX: number;
           readonly markY: number;
-          readonly bases: readonly { readonly glyphId: number; readonly x: number; readonly y: number }[];
+          readonly bases: ComputeProgramMarkBases;
           readonly clearAdvance: boolean;
       }
     | { readonly kind: "reject"; readonly reason: string };
@@ -200,10 +203,17 @@ export function compileComputeTextProgram(plan: ComputeTextPlan): ComputeTextPro
                 reason: rule.action.kind === "reject" ? rule.action.reason : "",
             }))
     );
-    const maxExpansion = Math.max(1, ...lookups.map((lookup) => lookup.expansion));
-    const maxPatternDepth = Math.max(1, ...lookups.flatMap((lookup) => lookup.rules.map((rule) => Math.max(rule.input.length, rule.backtrack.length, rule.lookahead.length))));
+    let maxExpansion = 1;
+    let maxPatternDepth = 1;
+    let maxAbsAdjustment = 0;
+    for (const lookup of lookups) {
+        maxExpansion = Math.max(maxExpansion, lookup.expansion);
+        for (const rule of lookup.rules) {
+            maxPatternDepth = Math.max(maxPatternDepth, rule.input.length, rule.backtrack.length, rule.lookahead.length);
+            maxAbsAdjustment = Math.max(maxAbsAdjustment, adjustmentOf(rule));
+        }
+    }
     const maxDependencyDepth = lookups.some((lookup) => lookup.rules.some((rule) => rule.action.kind === "context")) ? 1 : 0;
-    const maxAbsAdjustment = Math.max(0, ...lookups.flatMap((lookup) => lookup.rules.map(adjustmentOf)));
     const packed = packProgram(plan, lookups, rootOrder);
     const program: ComputeTextProgram = {
         plan,
@@ -215,7 +225,7 @@ export function compileComputeTextProgram(plan: ComputeTextPlan): ComputeTextPro
         maxAbsAdjustment,
         rejections,
         fullyExecutable: rejections.length === 0,
-        words: Uint32Array.from(packed.words),
+        words: packed.words,
         rootWitnesses: packed.rootWitnesses,
         gsubDescriptorOffset: packed.gsubDescriptorOffset,
         gposDescriptorOffset: packed.gposDescriptorOffset,
@@ -241,6 +251,10 @@ function compileLookup(
         parsed.table === "GSUB" && parsed.lookupType === 5 && parsed.subtables.every((subtable) => subtable.kind === "context" && !subtable.chaining && subtable.format === 3);
     const candidates = parsed.subtables.flatMap((subtable) => compileSubtable(subtable, parsed, plan, all, applySecond, forceReject, deltaOf));
     const rules = oracleInert ? candidates.filter((rule) => rule.mode === COMPUTE_RULE_MODE_REJECT) : candidates;
+    let expansion = 1;
+    for (const rule of rules) {
+        expansion = Math.max(expansion, expansionOf(rule));
+    }
     return {
         table: parsed.table,
         lookupIndex: parsed.lookupIndex,
@@ -252,7 +266,7 @@ function compileLookup(
         markAttachmentClass: (parsed.lookupFlag >> 8) & 0xff,
         markFilteringSetIgnored: (parsed.lookupFlag & USE_MARK_FILTERING_SET) !== 0,
         rules,
-        expansion: Math.max(1, ...rules.map(expansionOf)),
+        expansion,
     };
 }
 
@@ -445,11 +459,35 @@ function rulesOf(
         });
     }
     if (subtable.kind === "mark-base" || subtable.kind === "mark-mark") {
+        const byClass = new Map<number, { contour: boolean; blocked: boolean; bases: ComputeProgramMarkBases }>();
+        const classBases = (markClass: number) => {
+            let entry = byClass.get(markClass);
+            if (!entry) {
+                let contour = false;
+                let blocked = false;
+                const bases: { glyphId: number; x: number; y: number }[] = [];
+                for (const base of subtable.bases) {
+                    const anchor = base.anchors[markClass] ?? null;
+                    if (!anchor) {
+                        continue;
+                    }
+                    if (anchor.contourPoint) {
+                        contour = true;
+                    }
+                    if (!blocked && variationBlocks(anchor.variationIndexes, deltaOf)) {
+                        blocked = true;
+                    }
+                    bases.push({ glyphId: base.glyphId, x: anchor.x, y: anchor.y });
+                }
+                entry = { contour, blocked, bases };
+                byClass.set(markClass, entry);
+            }
+            return entry;
+        };
         return subtable.marks.map((mark) => {
-            const bases = subtable.bases.map((base) => ({ glyphId: base.glyphId, anchor: base.anchors[mark.markClass] ?? null }));
-            const contour = mark.anchor.contourPoint || bases.some((base) => base.anchor?.contourPoint);
-            const blocked =
-                variationBlocks(mark.anchor.variationIndexes, deltaOf) || bases.some((base) => base.anchor !== null && variationBlocks(base.anchor.variationIndexes, deltaOf));
+            const entry = classBases(mark.markClass);
+            const contour = mark.anchor.contourPoint || entry.contour;
+            const blocked = variationBlocks(mark.anchor.variationIndexes, deltaOf) || entry.blocked;
             if (contour || blocked) {
                 return rule(
                     [[mark.glyphId]],
@@ -473,7 +511,7 @@ function rulesOf(
                     markClass: mark.markClass,
                     markX: mark.anchor.x,
                     markY: mark.anchor.y,
-                    bases: bases.filter((base) => base.anchor).map((base) => ({ glyphId: base.glyphId, x: base.anchor?.x ?? 0, y: base.anchor?.y ?? 0 })),
+                    bases: entry.bases,
                     clearAdvance: subtable.kind === "mark-base",
                 },
                 subtable.kind === "mark-base" ? COMPUTE_RULE_MODE_MARK_BASE : COMPUTE_RULE_MODE_MARK_MARK
@@ -585,6 +623,21 @@ function expansionOf(ruleRecord: ComputeProgramRule): number {
     return 1;
 }
 
+let markBasesMax: WeakMap<ComputeProgramMarkBases, number> | null = null;
+
+function adjustmentOfBases(bases: ComputeProgramMarkBases): number {
+    const existing = markBasesMax?.get(bases);
+    if (existing !== undefined) {
+        return existing;
+    }
+    let maximum = -Infinity;
+    for (const base of bases) {
+        maximum = Math.max(maximum, Math.abs(base.x), Math.abs(base.y));
+    }
+    (markBasesMax ??= new WeakMap()).set(bases, maximum);
+    return maximum;
+}
+
 function adjustmentOf(ruleRecord: ComputeProgramRule): number {
     const action = ruleRecord.action;
     if (action.kind === "pair" || action.kind === "class-pair") {
@@ -594,7 +647,7 @@ function adjustmentOf(ruleRecord: ComputeProgramRule): number {
         return Math.max(Math.abs(action.xPlacement), Math.abs(action.yPlacement), Math.abs(action.xAdvance), Math.abs(action.yAdvance));
     }
     if (action.kind === "mark-base" || action.kind === "mark-mark") {
-        return Math.max(Math.abs(action.markX), Math.abs(action.markY), ...action.bases.flatMap((base) => [Math.abs(base.x), Math.abs(base.y)]));
+        return Math.max(Math.abs(action.markX), Math.abs(action.markY), adjustmentOfBases(action.bases));
     }
     return 0;
 }
@@ -603,15 +656,34 @@ function packProgram(
     plan: ComputeTextPlan,
     lookups: readonly ComputeProgramLookup[],
     rootOrder: readonly number[]
-): { words: number[]; rootWitnesses: Uint32Array; gsubDescriptorOffset: number; gposDescriptorOffset: number; classTables: readonly GlyphClassDef[] } {
-    const words: number[] = [];
-    const push = (...values: number[]): number => {
-        const origin = words.length;
-        words.push(...values);
+): { words: Uint32Array; rootWitnesses: Uint32Array; gsubDescriptorOffset: number; gposDescriptorOffset: number; classTables: readonly GlyphClassDef[] } {
+    let words = new Uint32Array(1 << 16);
+    let length = 0;
+    /** Appends `count` zero words and returns their origin. */
+    const reserve = (count: number): number => {
+        const origin = length;
+        const needed = length + count;
+        if (needed > words.length) {
+            let size = words.length * 2;
+            while (size < needed) {
+                size *= 2;
+            }
+            const grown = new Uint32Array(size);
+            grown.set(words.subarray(0, length));
+            words = grown;
+        }
+        length = needed;
+        return origin;
+    };
+    /** Appends `values` and returns their origin. */
+    const append = (values: ArrayLike<number>): number => {
+        const origin = reserve(values.length);
+        words.set(values, origin);
         return origin;
     };
     const classDefs: GlyphClassDef[] = [];
     const coverages = new Map<GlyphCoverage, number>();
+    const baseWords = new Map<ComputeProgramMarkBases, Uint32Array>();
     const coverageOrigin = (coverage: GlyphCoverage | null): number => {
         if (!coverage) {
             return 0;
@@ -621,23 +693,54 @@ function packProgram(
             return existing;
         }
         const glyphs = coverageGlyphs(coverage, plan.font.glyphCount);
-        const origin = push(glyphs.length, ...glyphs);
+        const origin = reserve(1 + glyphs.length);
+        words[origin] = glyphs.length;
+        words.set(glyphs, origin + 1);
         coverages.set(coverage, origin);
         return origin;
     };
     const denseClasses = new Map<GlyphClassDef, Uint32Array>();
+    const classBuckets = new Map<GlyphClassDef | null, Map<GlyphCoverage | null, Map<number, number[]>>>();
     const firstGlyphs = (predicate: ComputeGlyphPredicate): readonly number[] => {
         if (predicate.kind === "glyphs") {
             return predicate.ids;
         }
         const def = predicate.classDef;
-        let dense = def ? denseClasses.get(def) : undefined;
-        if (def && !dense) {
-            dense = Uint32Array.from({ length: plan.font.glyphCount }, (_, glyph) => glyphClass(def, glyph));
-            denseClasses.set(def, dense);
+        let byCoverage = classBuckets.get(def);
+        if (!byCoverage) {
+            byCoverage = new Map();
+            classBuckets.set(def, byCoverage);
         }
-        const domain = predicate.coverage ? coverageGlyphs(predicate.coverage, plan.font.glyphCount) : Array.from({ length: plan.font.glyphCount }, (_, glyph) => glyph);
-        return domain.filter((glyph) => (dense?.[glyph] ?? 0) === predicate.classId);
+        let buckets = byCoverage.get(predicate.coverage);
+        if (!buckets) {
+            let dense = def ? denseClasses.get(def) : undefined;
+            if (def && !dense) {
+                dense = Uint32Array.from({ length: plan.font.glyphCount }, (_, glyph) => glyphClass(def, glyph));
+                denseClasses.set(def, dense);
+            }
+            const filled = new Map<number, number[]>();
+            const visit = (glyph: number): void => {
+                const cls = dense?.[glyph] ?? 0;
+                const list = filled.get(cls);
+                if (list) {
+                    list.push(glyph);
+                } else {
+                    filled.set(cls, [glyph]);
+                }
+            };
+            if (predicate.coverage) {
+                for (const glyph of coverageGlyphs(predicate.coverage, plan.font.glyphCount)) {
+                    visit(glyph);
+                }
+            } else {
+                for (let glyph = 0; glyph < plan.font.glyphCount; glyph++) {
+                    visit(glyph);
+                }
+            }
+            buckets = filled;
+            byCoverage.set(predicate.coverage, buckets);
+        }
+        return buckets.get(predicate.classId) ?? EMPTY_GLYPHS;
     };
     const classIndex = (def: GlyphClassDef | null): number => {
         if (!def) {
@@ -654,95 +757,169 @@ function packProgram(
         if (predicates.length === 0) {
             return 0;
         }
-        const coverageOrigins = predicates.map((predicate) => (predicate.kind === "class" ? coverageOrigin(predicate.coverage) : 0));
-        const origin = words.length;
-        predicates.forEach((predicate, index) => {
+        const coverageOrigins = new Array<number>(predicates.length);
+        for (let index = 0; index < predicates.length; index++) {
+            const predicate = predicates[index]!;
+            coverageOrigins[index] = predicate.kind === "class" ? coverageOrigin(predicate.coverage) : 0;
+        }
+        const origin = length;
+        for (let index = 0; index < predicates.length; index++) {
+            const predicate = predicates[index]!;
             if (predicate.kind === "class") {
-                push(0x80000000 | (predicate.classId & 0xffff), classIndex(predicate.classDef), coverageOrigins[index] ?? 0);
+                const at = reserve(3);
+                words[at] = 0x80000000 | (predicate.classId & 0xffff);
+                words[at + 1] = classIndex(predicate.classDef);
+                words[at + 2] = coverageOrigins[index] ?? 0;
             } else {
-                push(predicate.ids.length, ...[...predicate.ids].sort((left, right) => left - right));
+                const ids = predicate.ids;
+                const n = ids.length;
+                const at = reserve(1 + n);
+                words[at] = n;
+                let ordered = true;
+                for (let i = 1; i < n; i++) {
+                    if (!(ids[i - 1]! <= ids[i]!)) {
+                        ordered = false;
+                        break;
+                    }
+                }
+                words.set(ordered ? ids : Array.from(ids).sort((left, right) => left - right), at + 1);
             }
-        });
+        }
         return origin;
     };
     const packAction = (action: ComputeProgramAction): { origin: number; length: number } => {
         if (action.kind === "substitute" || action.kind === "multiple") {
-            return { origin: push(action.glyphs.length, ...action.glyphs), length: 1 + action.glyphs.length };
+            const origin = reserve(1 + action.glyphs.length);
+            words[origin] = action.glyphs.length;
+            words.set(action.glyphs, origin + 1);
+            return { origin, length: 1 + action.glyphs.length };
         }
         if (action.kind === "ligature") {
-            return { origin: push(1, action.glyph, action.components.length, ...action.components), length: 3 + action.components.length };
+            const origin = reserve(3 + action.components.length);
+            words[origin] = 1;
+            words[origin + 1] = action.glyph;
+            words[origin + 2] = action.components.length;
+            words.set(action.components, origin + 3);
+            return { origin, length: 3 + action.components.length };
         }
         if (action.kind === "context") {
-            return { origin: push(action.lookups.length, ...action.lookups.flatMap((item) => [item.sequenceIndex, item.lookupIndex])), length: 1 + action.lookups.length * 2 };
+            const origin = reserve(1 + action.lookups.length * 2);
+            words[origin] = action.lookups.length;
+            for (let index = 0; index < action.lookups.length; index++) {
+                const item = action.lookups[index]!;
+                words[origin + 1 + index * 2] = item.sequenceIndex;
+                words[origin + 2 + index * 2] = item.lookupIndex;
+            }
+            return { origin, length: 1 + action.lookups.length * 2 };
         }
         if (action.kind === "pair") {
-            return { origin: push(action.secondGlyph, action.firstXAdvance >>> 0, action.secondXAdvance >>> 0, action.applySecond ? 1 : 0), length: 4 };
+            const origin = reserve(4);
+            words[origin] = action.secondGlyph;
+            words[origin + 1] = action.firstXAdvance >>> 0;
+            words[origin + 2] = action.secondXAdvance >>> 0;
+            words[origin + 3] = action.applySecond ? 1 : 0;
+            return { origin, length: 4 };
         }
         if (action.kind === "class-pair") {
-            return { origin: push(action.class1, action.class2, action.firstXAdvance >>> 0, action.secondXAdvance >>> 0, action.applySecond ? 1 : 0), length: 5 };
+            const origin = reserve(5);
+            words[origin] = action.class1;
+            words[origin + 1] = action.class2;
+            words[origin + 2] = action.firstXAdvance >>> 0;
+            words[origin + 3] = action.secondXAdvance >>> 0;
+            words[origin + 4] = action.applySecond ? 1 : 0;
+            return { origin, length: 5 };
         }
         if (action.kind === "adjust") {
-            return { origin: push(action.xPlacement >>> 0, action.yPlacement >>> 0, action.xAdvance >>> 0, action.yAdvance >>> 0), length: 4 };
+            const origin = reserve(4);
+            words[origin] = action.xPlacement >>> 0;
+            words[origin + 1] = action.yPlacement >>> 0;
+            words[origin + 2] = action.xAdvance >>> 0;
+            words[origin + 3] = action.yAdvance >>> 0;
+            return { origin, length: 4 };
         }
         if (action.kind === "mark-ligature") {
-            return {
-                origin: push(
-                    action.markX >>> 0,
-                    action.markY >>> 0,
-                    action.ligatures.length,
-                    ...action.ligatures.flatMap((ligature) => [
-                        ligature.glyphId,
-                        ligature.componentCount,
-                        ligature.anchors.length,
-                        ...ligature.anchors.flatMap((anchor) => [anchor.component, anchor.reject ? 1 : 0, anchor.x >>> 0, anchor.y >>> 0]),
-                    ])
-                ),
-                length: 3 + action.ligatures.reduce((sum, ligature) => sum + 3 + ligature.anchors.length * 4, 0),
-            };
+            let actionLength = 3;
+            for (const ligature of action.ligatures) {
+                actionLength += 3 + ligature.anchors.length * 4;
+            }
+            const origin = reserve(actionLength);
+            words[origin] = action.markX >>> 0;
+            words[origin + 1] = action.markY >>> 0;
+            words[origin + 2] = action.ligatures.length;
+            let at = origin + 3;
+            for (const ligature of action.ligatures) {
+                words[at++] = ligature.glyphId;
+                words[at++] = ligature.componentCount;
+                words[at++] = ligature.anchors.length;
+                for (const anchor of ligature.anchors) {
+                    words[at++] = anchor.component;
+                    words[at++] = anchor.reject ? 1 : 0;
+                    words[at++] = anchor.x >>> 0;
+                    words[at++] = anchor.y >>> 0;
+                }
+            }
+            return { origin, length: actionLength };
         }
         if (action.kind === "mark-base" || action.kind === "mark-mark") {
-            return {
-                origin: push(
-                    action.markClass,
-                    action.markX >>> 0,
-                    action.markY >>> 0,
-                    action.bases.length,
-                    ...action.bases
-                        .slice()
-                        .sort((left, right) => left.glyphId - right.glyphId)
-                        .flatMap((base) => [base.glyphId, base.x >>> 0, base.y >>> 0])
-                ),
-                length: 4 + action.bases.length * 3,
-            };
+            const bases = action.bases;
+            let cached = baseWords.get(bases);
+            if (!cached) {
+                let sorted = true;
+                for (let index = 1; index < bases.length; index++) {
+                    if (!(bases[index - 1]!.glyphId <= bases[index]!.glyphId)) {
+                        sorted = false;
+                        break;
+                    }
+                }
+                const ordered = sorted ? bases : bases.slice().sort((left, right) => left.glyphId - right.glyphId);
+                cached = new Uint32Array(ordered.length * 3);
+                for (let index = 0; index < ordered.length; index++) {
+                    const base = ordered[index]!;
+                    cached[index * 3] = base.glyphId;
+                    cached[index * 3 + 1] = base.x >>> 0;
+                    cached[index * 3 + 2] = base.y >>> 0;
+                }
+                baseWords.set(bases, cached);
+            }
+            const at = reserve(4 + bases.length * 3);
+            words[at] = action.markClass;
+            words[at + 1] = action.markX >>> 0;
+            words[at + 2] = action.markY >>> 0;
+            words[at + 3] = bases.length;
+            words.set(cached, at + 4);
+            return { origin: at, length: 4 + bases.length * 3 };
         }
         return { origin: 0, length: 0 };
     };
-    push(0x43545031, 2, plan._gsubRoots.length, plan._gposRoots.length, 0, 0, 0, 0, 0, rootOrder.length);
-    const rootOrigin = push(...rootOrder);
+    const headerOrigin = reserve(10);
+    words[headerOrigin] = 0x43545031;
+    words[headerOrigin + 1] = 2;
+    words[headerOrigin + 2] = plan._gsubRoots.length;
+    words[headerOrigin + 3] = plan._gposRoots.length;
+    words[headerOrigin + 4] = 0;
+    words[headerOrigin + 5] = 0;
+    words[headerOrigin + 6] = 0;
+    words[headerOrigin + 7] = 0;
+    words[headerOrigin + 8] = 0;
+    words[headerOrigin + 9] = rootOrder.length;
+    const rootOrigin = append(rootOrder);
     const gsubCapacity = capacity(lookups, "GSUB");
     const gposCapacity = capacity(lookups, "GPOS");
-    const gsubDescriptorOffset = words.length;
-    words.push(...new Array(gsubCapacity * COMPUTE_PROGRAM_LOOKUP_WORDS).fill(0));
-    const gposDescriptorOffset = words.length;
-    words.push(...new Array(gposCapacity * COMPUTE_PROGRAM_LOOKUP_WORDS).fill(0));
+    const gsubDescriptorOffset = reserve(gsubCapacity * COMPUTE_PROGRAM_LOOKUP_WORDS);
+    const gposDescriptorOffset = reserve(gposCapacity * COMPUTE_PROGRAM_LOOKUP_WORDS);
     words[4] = gsubDescriptorOffset;
     words[5] = gposDescriptorOffset;
     words[6] = gsubCapacity;
     words[7] = gposCapacity;
     words[8] = rootOrigin;
     for (const lookup of lookups) {
-        const ruleOrigin = words.length;
-        const ruleSlots = lookup.rules.map(() => {
-            const slot = words.length;
-            words.push(...new Array(COMPUTE_PROGRAM_RULE_WORDS).fill(0));
-            return slot;
-        });
+        const ruleOrigin = reserve(lookup.rules.length * COMPUTE_PROGRAM_RULE_WORDS);
         lookup.rules.forEach((ruleRecord, index) => {
             const input = packPredicates(ruleRecord.input);
             const backtrack = packPredicates(ruleRecord.backtrack);
             const lookahead = packPredicates(ruleRecord.lookahead);
             const action = packAction(ruleRecord.action);
-            const slot = ruleSlots[index] ?? ruleOrigin;
+            const slot = ruleOrigin + index * COMPUTE_PROGRAM_RULE_WORDS;
             words[slot + COMPUTE_RULE_INPUT] = input;
             words[slot + COMPUTE_RULE_INPUT_LENGTH] = ruleRecord.input.length;
             words[slot + COMPUTE_RULE_BACKTRACK] = backtrack;
@@ -789,16 +966,20 @@ function packProgram(
                 }
                 end++;
             }
-            const row = new Array<number>(Math.max(...lookup.rules.slice(start, end).map((rule) => rule.input[1]?.classId ?? 0)) + 1).fill(0);
+            let rowLength = 0;
+            for (let index = start; index < end; index++) {
+                rowLength = Math.max(rowLength, (lookup.rules[index]!.input[1]?.classId ?? 0) + 1);
+            }
+            const row = new Array<number>(rowLength).fill(0);
             for (let index = start; index < end; index++) {
                 const cls = lookup.rules[index]?.input[1]?.classId ?? 0;
                 if (row[cls] === 0) {
                     row[cls] = index + 1;
                 }
             }
-            const origin = push(...row);
+            const origin = append(row);
             for (let index = start; index < end; index++) {
-                const slot = ruleSlots[index]!;
+                const slot = ruleOrigin + index * COMPUTE_PROGRAM_RULE_WORDS;
                 words[slot + 10] = origin;
                 words[slot + 11] = classIndex(input[1].classDef);
                 words[slot + 12] = row.length;
@@ -825,22 +1006,42 @@ function packProgram(
         words[base + COMPUTE_LOOKUP_RULE_ORIGIN] = ruleOrigin;
         words[base + COMPUTE_LOOKUP_RULE_COUNT] = lookup.rules.length;
         words[base + COMPUTE_LOOKUP_EXPANSION] = lookup.expansion;
-        const candidateOrigin = words.length;
-        const candidates: number[][] = Array.from({ length: plan.font.glyphCount }, () => []);
-        lookup.rules.forEach((ruleRecord, index) => {
-            const first = ruleRecord.input[0];
-            if (first) {
-                for (const glyph of firstGlyphs(first)) {
-                    candidates[glyph]?.push(index);
+        const glyphCount = plan.font.glyphCount;
+        const firsts: (readonly number[] | null)[] = new Array(lookup.rules.length);
+        const counts = new Uint32Array(glyphCount);
+        let total = 0;
+        for (let index = 0; index < lookup.rules.length; index++) {
+            const first = lookup.rules[index]!.input[0];
+            const glyphs = first ? firstGlyphs(first) : null;
+            firsts[index] = glyphs;
+            if (glyphs) {
+                for (const glyph of glyphs) {
+                    if (glyph >= 0 && glyph < glyphCount && (glyph | 0) === glyph) {
+                        counts[glyph]!++;
+                        total++;
+                    }
                 }
             }
-        });
-        for (const list of candidates) {
-            push(0, list.length);
         }
-        candidates.forEach((list, glyph) => {
-            words[candidateOrigin + glyph * 2] = push(...list);
-        });
+        const candidateOrigin = reserve(glyphCount * 2);
+        let cursor = reserve(total);
+        const next = new Uint32Array(glyphCount);
+        for (let glyph = 0; glyph < glyphCount; glyph++) {
+            words[candidateOrigin + glyph * 2] = cursor;
+            words[candidateOrigin + glyph * 2 + 1] = counts[glyph]!;
+            next[glyph] = cursor;
+            cursor += counts[glyph]!;
+        }
+        for (let index = 0; index < firsts.length; index++) {
+            const glyphs = firsts[index];
+            if (glyphs) {
+                for (const glyph of glyphs) {
+                    if (glyph >= 0 && glyph < glyphCount && (glyph | 0) === glyph) {
+                        words[next[glyph]!++] = index;
+                    }
+                }
+            }
+        }
         words[base + COMPUTE_LOOKUP_CANDIDATES] = candidateOrigin;
         const orderedModes = lookup.table === "GSUB" ? [1, 2, 5, 9, 11] : [3, 4, 5, 7, 8, 10, 12];
         const ordered = lookup.rules.every((rule) => orderedModes.includes(rule.mode)) ? (lookup.rules.some((rule) => rule.mode === 11) ? 2 : 1) : 0;
@@ -874,7 +1075,7 @@ function packProgram(
     for (let glyph = 0; glyph < rootWitnesses.length; glyph++) {
         rootWitnesses[glyph] = (rootWitnesses[glyph]! | unconditional) >>> 0;
     }
-    return { words, rootWitnesses, gsubDescriptorOffset, gposDescriptorOffset, classTables: classDefs };
+    return { words: words.slice(0, length), rootWitnesses, gsubDescriptorOffset, gposDescriptorOffset, classTables: classDefs };
 }
 
 function capacity(lookups: readonly ComputeProgramLookup[], table: "GSUB" | "GPOS"): number {

@@ -2629,3 +2629,54 @@ NotoSansArabic and NotoSansSC subset were ineligible for all three samples.
 The same deterministic 61-text corpus was checked at every index of each eligible plan.
 Program compile remains a larger separate one-time cost (~67–75 ms cold) and is
 out of scope.
+
+### 2026-10-10 — Step 8b: program compile cost
+
+`compileComputeTextProgram` is the CPU-side compilation of parsed GSUB/GPOS lookups
+into the immutable rule-program buffer. It runs once per plan on first use, not
+per update, and is not WGSL compilation. Acceptance requires a byte-identical
+program, so the rule-program layout, WGSL and runtime path are unchanged.
+
+Profiled base costs: on Inter the main costs were per-rule class-glyph filtering
+(`firstGlyphs`), spread-based word packing and `ValueRecord` parsing. On Roboto they
+were the per-mark copying and packing of the shared mark-base base triples.
+
+Output-identical changes:
+- `packProgram` writes into a growable `Uint32Array`. The append order is the same
+  as before, and the result is returned as one tight slice (no `number[]` and no
+  `Uint32Array.from`).
+- Class predicate first-glyph sets come from per-(ClassDef, coverage) class buckets,
+  built once in domain order, instead of a full domain filter for every rule.
+- Per-lookup candidate directories use counting placement (counts, prefix sums,
+  then fill). Lists are in glyph order and rule order, with the same out-of-range guard.
+- Mark-base and mark-mark rules share one base list per mark class within a subtable.
+  Their packed base triples are cached per list, and sorting is skipped when the
+  list is already ascending.
+- Spread-free maxima, a per-list cache for the maximum anchor magnitude, and a
+  closure-free `readValue` with the same read order, error labels and result shape.
+
+Equivalence: the base and new compilers produce byte-identical words and identical
+root witnesses and metadata. This covers 42 programs (six fonts × seven samples),
+and `parseLookupActions` results deep-equal for all 268 lookups. A unit test pins
+the tight buffer and shared per-class base lists.
+
+Cold headless Chrome 155 medians (ms; nine fresh contexts per cell, first dropped).
+"Rest" is the remainder of first-use immutable preparation:
+
+| Font | Base compile / rest / total | New compile / rest / total |
+|---|---|---|
+| Inter | 73.1 / 5.9 / 79.0 | 36.4 / 8.5 / 44.9 (−43%) |
+| Roboto | 63.7 / 3.2 / 66.9 | 15.2 / 4.0 / 19.2 (−71%) |
+| NotoSansArabic | 29.0 / 1.6 / 30.6 | 9.9 / 1.9 / 11.8 (−61%) |
+
+The rest phase does no new work; its inputs are byte-identical. Its small increase
+comes from V8 heap state. The base compile's garbage grew the young generation,
+which made the push-heavy `prepareSimplePairWords` cheaper afterwards. With untimed
+synthetic churn inserted before the rest phase, the new rest returns to 6.4 / 3.6 /
+1.5 ms. In fresh Node processes, compile drops from 121 to 65 ms on Inter and rest
+moves only from 10.3 to 11.1 ms.
+
+Remaining larger reductions would change the program layout. Options are one
+indirect base list per mark class (Roboto spends 850k of 1.13M words on repeated
+base triples) and compact candidate headers; moving the compile off the main
+thread is another option. All of these are out of scope for this byte-identical step.

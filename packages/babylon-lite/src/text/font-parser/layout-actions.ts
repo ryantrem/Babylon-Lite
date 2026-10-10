@@ -620,47 +620,31 @@ function readValue(cursor: ByteCursor, format: number, subtableStart: number, li
     if (format & ~0x00ff) {
         throw new Error(`${label}: unknown value format 0x${format.toString(16)}`);
     }
+    const xPlacement = format & 0x0001 ? readI16(cursor, `${label} xPlacement`) : 0;
+    const yPlacement = format & 0x0002 ? readI16(cursor, `${label} yPlacement`) : 0;
+    const xAdvance = format & 0x0004 ? readI16(cursor, `${label} xAdvance`) : 0;
+    const yAdvance = format & 0x0008 ? readI16(cursor, `${label} yAdvance`) : 0;
+    let hasDevice = false;
+    let deviceKind: "none" | "variation" | "ppem" = "none";
     const variationIndexes: VariationDeviceIndex[] = [];
-    const mutable = {
-        xPlacement: 0,
-        yPlacement: 0,
-        xAdvance: 0,
-        yAdvance: 0,
-        hasDevice: false,
-        deviceKind: "none" as "none" | "variation" | "ppem",
-        variationIndexes,
-    };
-    const readPlacement = (bit: number, field: "xPlacement" | "yPlacement" | "xAdvance" | "yAdvance"): void => {
-        if (format & bit) {
-            mutable[field] = readI16(cursor, `${label} ${field}`);
-        }
-    };
-    readPlacement(0x0001, "xPlacement");
-    readPlacement(0x0002, "yPlacement");
-    readPlacement(0x0004, "xAdvance");
-    readPlacement(0x0008, "yAdvance");
-    const readDevice = (bit: number): void => {
+    for (let bit = 0x0010; bit <= 0x0080; bit *= 2) {
         if (!(format & bit)) {
-            return;
+            continue;
         }
         const offset = readU16(cursor, `${label} device`);
         if (offset === 0) {
-            return;
+            continue;
         }
-        mutable.hasDevice = true;
+        hasDevice = true;
         const device = classifyDevice(cursor.bytes, subtableStart + offset, limit, label);
         if (device.kind === "variation") {
-            mutable.deviceKind = "variation";
+            deviceKind = "variation";
             variationIndexes.push({ outer: device.outer, inner: device.inner });
-        } else if (mutable.deviceKind === "none") {
-            mutable.deviceKind = "ppem";
+        } else if (deviceKind === "none") {
+            deviceKind = "ppem";
         }
-    };
-    readDevice(0x0010);
-    readDevice(0x0020);
-    readDevice(0x0040);
-    readDevice(0x0080);
-    return mutable;
+    }
+    return { xPlacement, yPlacement, xAdvance, yAdvance, hasDevice, deviceKind, variationIndexes };
 }
 
 function classifyDevice(bytes: Uint8Array, start: number, limit: number, label: string): { kind: "variation" | "ppem"; outer: number; inner: number } {

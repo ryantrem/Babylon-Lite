@@ -35,6 +35,31 @@ function fontBytes(file: string): ArrayBuffer {
 }
 
 describe("compileComputeTextProgram", () => {
+    it("packs a tight program buffer and shares mark-class base lists without changing per-rule anchors", () => {
+        const font = createComputeFontFromBuffer(fontBytes("Roboto-Regular.ttf"));
+        const program = compileComputeTextProgram(createComputeTextPlan(font, selectComputeTextRun("A")));
+        expect(program.words.byteOffset).toBe(0);
+        expect(program.words.buffer.byteLength).toBe(program.words.byteLength);
+        const byClass = new Map<string, object>();
+        let shared = 0;
+        for (const lookup of program.lookups) {
+            lookup.rules.forEach((rule) => {
+                if (rule.action.kind !== "mark-base" && rule.action.kind !== "mark-mark") {
+                    return;
+                }
+                const key = `${lookup.table}/${lookup.lookupIndex}/${rule.action.markClass}/${rule.action.kind}`;
+                const previous = byClass.get(key);
+                if (previous) {
+                    expect(rule.action.bases).toBe(previous);
+                    shared++;
+                } else {
+                    byClass.set(key, rule.action.bases);
+                }
+            });
+        }
+        expect(shared).toBeGreaterThan(100);
+    });
+
     it.each(["Inter.ttf", "Roboto-Regular.ttf", "NotoSansArabic-Regular.ttf"])("packs stable sorted mark anchors with exact signed positions: %s", (file) => {
         const font = createComputeFontFromBuffer(fontBytes(file));
         const program = compileComputeTextProgram(createComputeTextPlan(font, selectComputeTextRun(file.startsWith("Noto") ? "ج" : "A")));
