@@ -77,7 +77,8 @@ interface GlyphInfo {
     free: boolean;
     mark: boolean;
     anchorHits: number[];
-    full: Uint32Array | null;
+    /** Per-slot memo indexed by Slot.bit: 0 unknown, 1 miss, 2 hit. */
+    slots: Uint8Array | null;
 }
 
 let analyses: WeakMap<ComputeTextProgram, SegmentAnalysis | null> | null = null;
@@ -286,25 +287,41 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     const crossings: Crossing[] = [];
     const allSlots: Slot[] = [];
     let maxD = 1;
-    let markBaseHit = false;
+    let markBaseHit: boolean | undefined;
+    const inB = new Uint8Array(0x10000);
+    for (const g of bStar) {
+        inB[g] = 1;
+    }
+    const seesB = (p: ComputeGlyphPredicate) => {
+        if (p.kind === "glyphs") {
+            const ids = p.ids;
+            if (ids.length === 1) {
+                return inB[ids[0]!] === 1;
+            }
+            for (const g of bStar) {
+                if (ids.includes(g)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return bStar.some((g) => matches(p, g));
+    };
     for (const lookup of program.lookups) {
         for (const r of lookup.rules) {
-            if (r.mode === COMPUTE_RULE_MODE_MARK_BASE || r.mode === COMPUTE_RULE_MODE_MARK_MARK) {
-                if ((r.action.kind === "mark-base" || r.action.kind === "mark-mark") && r.action.bases.some((b) => bStar.includes(b.glyphId))) {
-                    markBaseHit = true;
-                }
+            if (r.mode === COMPUTE_RULE_MODE_MARK_BASE || r.mode === COMPUTE_RULE_MODE_MARK_MARK || r.mode === COMPUTE_RULE_MODE_MARK_LIGATURE) {
                 continue;
             }
-            if (r.mode === COMPUTE_RULE_MODE_MARK_LIGATURE) {
-                continue;
-            }
-            const window = [...r.backtrack].reverse().concat(r.input, r.lookahead);
-            for (let k = 0; k + 1 < window.length; k++) {
-                const p = window[k]!;
-                // Most predicates cannot see B*: avoid constructing their membership sets.
-                if (!bStar.some((g) => (p.kind === "glyphs" ? p.ids.includes(g) : matches(p, g)))) {
+            const nb = r.backtrack.length;
+            const ni = r.input.length;
+            const length = nb + ni + r.lookahead.length;
+            let window: ComputeGlyphPredicate[] | null = null;
+            for (let k = 0; k + 1 < length; k++) {
+                // Most predicates cannot see B*: test them before building the reversed window.
+                if (!seesB(k < nb ? r.backtrack[nb - 1 - k]! : k < nb + ni ? r.input[k - nb]! : r.lookahead[k - nb - ni]!)) {
                     continue;
                 }
+                window ??= [...r.backtrack].reverse().concat(r.input, r.lookahead);
                 const slots: Slot[] = [];
                 for (let j = 0; j < window.length; j++) {
                     if (j !== k) {
@@ -321,6 +338,11 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
             }
         }
     }
+    // Only boundaries whose first right glyph can become a mark need the mark-base scan.
+    const hitsMarkBase = () =>
+        (markBaseHit ??= program.lookups.some((l) =>
+            l.rules.some((r) => (r.action.kind === "mark-base" || r.action.kind === "mark-mark") && r.action.bases.some((b) => inB[b.glyphId] === 1))
+        ));
     if (maxD * span > 64) {
         return null;
     }
@@ -350,15 +372,42 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     }
     const scored = new Uint32Array(font.glyphCount);
     let scoreRevision = 0;
+    const classHistograms = new Map<object, Map<number, number>>();
     const count = (p: ComputeGlyphPredicate) => {
         let count = countMemo.get(p);
         if (count === undefined) {
             count = p.kind === "glyphs" ? new Set(p.ids).size : 0;
             if (p.kind === "class") {
-                for (let g = 0; g < font.glyphCount; g++) {
-                    if (matches(p, g)) {
-                        count++;
+                const cov = p.coverage;
+                if (cov) {
+                    // Parsed coverage is strictly ascending, so each glyph is counted once.
+                    if (cov.format === 1) {
+                        for (const g of cov.glyphs) {
+                            if (g < font.glyphCount && glyphClass(p.classDef, g) === p.classId) {
+                                count++;
+                            }
+                        }
+                    } else {
+                        for (const range of cov.ranges) {
+                            for (let g = range.start; g <= range.end && g < font.glyphCount; g++) {
+                                if (glyphClass(p.classDef, g) === p.classId) {
+                                    count++;
+                                }
+                            }
+                        }
                     }
+                } else {
+                    const key = p.classDef ?? classHistograms;
+                    let histogram = classHistograms.get(key);
+                    if (!histogram) {
+                        histogram = new Map();
+                        for (let g = 0; g < font.glyphCount; g++) {
+                            const c = glyphClass(p.classDef, g);
+                            histogram.set(c, (histogram.get(c) ?? 0) + 1);
+                        }
+                        classHistograms.set(key, histogram);
+                    }
+                    count = histogram.get(p.classId) ?? 0;
                 }
             }
             countMemo.set(p, count);
@@ -424,21 +473,19 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
                     anchorHits.push(i);
                 }
             }
-            value = { closure: c, free: c.some(skipped), mark: c.some((y) => cls(y) === 3), anchorHits, full: null };
+            value = { closure: c, free: c.some(skipped), mark: c.some((y) => cls(y) === 3), anchorHits, slots: null };
             info.set(g, value);
         }
         return value;
     };
-    const full = (v: GlyphInfo) => {
-        if (!v.full) {
-            v.full = new Uint32Array(Math.ceil(allSlots.length / 32) || 1);
-            for (const e of allSlots) {
-                if (v.closure.some((y) => matches(e.p, y))) {
-                    v.full[e.bit >> 5]! |= 1 << (e.bit & 31);
-                }
-            }
+    const slotMatches = (v: GlyphInfo, e: Slot) => {
+        const memo = (v.slots ??= new Uint8Array(allSlots.length));
+        let value = memo[e.bit]!;
+        if (value === 0) {
+            value = v.closure.some((y) => matches(e.p, y)) ? 2 : 1;
+            memo[e.bit] = value;
         }
-        return v.full;
+        return value === 2;
     };
     const sideG: GlyphInfo[][] = [[], []];
     const sideN: number[][] = [[], []];
@@ -475,7 +522,7 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
         const glyphs = sideG[k]!;
         const counts = sideN[k]!;
         for (let i = 0; i < glyphs.length && counts[i]! < e.d * span; i++) {
-            if ((full(glyphs[i]!)[e.bit >> 5]! >>> (e.bit & 31)) & 1) {
+            if (slotMatches(glyphs[i]!, e)) {
                 return true;
             }
         }
@@ -494,9 +541,17 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
                 return false;
             }
         }
-        return !markBaseHit || !get(gl[s + 1]!).mark;
+        return !get(gl[s + 1]!).mark || !hitsMarkBase();
     };
-    return { space, span, crossings: crossings.length, markBaseHit, safeAfter };
+    return {
+        space,
+        span,
+        crossings: crossings.length,
+        get markBaseHit() {
+            return hitsMarkBase();
+        },
+        safeAfter,
+    };
 }
 
 /** @internal Segment views in shaped-slot order; null preserves the existing resident path. */

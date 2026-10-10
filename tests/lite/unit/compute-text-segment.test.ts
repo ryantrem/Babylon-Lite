@@ -282,4 +282,10 @@ describe("safe logical-run segmentation", () => {
         expect([...result.table.slice(0, 4)]).toEqual([2, 1, 0, 2]);
         expect(result.groups.map((g) => g.outputRun)).toEqual([0, 2]);
     });
+
+    it("markBaseHit is false for Inter and Roboto English programs", () => {
+        for (const file of ["Inter.ttf", "Roboto-Regular.ttf"]) {
+            expect(analyzeComputeTextSegmentation(program(file))!.markBaseHit).toBe(false);
+        }
+    });
 });

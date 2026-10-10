@@ -2597,3 +2597,35 @@ A 61-round reversed confirmation gave Inter +0.015/+0.035 ms and Roboto
 and Inter's 16×480 result are not confidently attributable; single-run long-run
 gains exceed observed control shifts. No visual/MAD tests or golden changes were
 performed; CI remains responsible for those checks.
+
+### 2026-10-10 — Step 8a: segmentation analysis cost
+
+The one-time segmentation cost includes `analyze()` and first-use lazy per-glyph
+work in `safeAfter`. The architect's prototype run measured base cold Chrome
+timings of Inter 9.8 + 15.9 = 25.5 ms and Roboto 8.0 + 0.6 = 8.6 ms (analysis +
+first segmentation = total); the implementation run's own base is in the table.
+
+Four output-identical changes reduce this cost:
+- Lazy per-(glyph,slot) tri-state memo replaces eager all-slot bitsets.
+- A u16 B* membership mask avoids per-rule window allocation until a crossing is found.
+- `markBaseHit` is lazy, evaluated only when the first right glyph can become a mark
+  (or when the analysis getter is read).
+- Class counts traverse coverage or reuse per-ClassDef histograms rather than
+  scanning the glyph domain for every predicate.
+
+Anchors and counts only order proof work; the `markBaseHit` boolean is unchanged.
+Parsed coverage is strictly ascending, so coverage counting visits each glyph once.
+Cold headless Chrome 155 medians (ms; nine fresh contexts per cell, first dropped):
+
+| Font | Base analyze / first / total | New analyze / first / total |
+|---|---|---|
+| Inter | 9.2 / 14.8 / 24.0 | 7.3 / 2.5 / 9.9 |
+| Roboto | 7.7 / 0.6 / 8.3 | 2.2 / 0.6 / 2.8 |
+
+Equivalence passed 18,720 `safeAfter` positions each for Inter, Roboto,
+NotoSansHebrew and NotoSansGothic (74,880 total), plus all metadata comparisons.
+All 18 eligibility checks matched across six fonts and three script samples;
+NotoSansArabic and NotoSansSC subset were ineligible for all three samples.
+The same deterministic 61-text corpus was checked at every index of each eligible plan.
+Program compile remains a larger separate one-time cost (~67–75 ms cold) and is
+out of scope.
