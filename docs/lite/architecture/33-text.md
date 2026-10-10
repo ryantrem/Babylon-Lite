@@ -2479,3 +2479,121 @@ Paired HEAD−candidate ms [95% bootstrap interval], 40 same-session real-draw p
 | two2×256 HEAD A/A | +0.0400 [-0.0350,0.1100] | +0.0275 [-0.0175,0.0900] |
 Two2 uses the unchanged capacity-2 path; confirmation passes the revised interval gate.
 Timing stops at the real-draw queue fence, never status; all measured output bytes match.
+
+### 2026-10-10 — Step 8: safe segmentation of long runs
+
+**Correctness validated; measured target T=64.** A pure CPU analysis in
+`text/compute-text-segment.ts` proves individual boundaries after U+0020 safe; it
+does not shape text, cache input strings, or change the logical-run API. Analysis
+is lazy on the first run longer than `SEGMENT_TARGET` (64, measured among
+32/64/128), cached by compiled program, including ineligible results. Short-only
+updates do not analyze a program.
+
+Eligibility requires LTR, a mapped space, known rule modes, all GSUB context
+dependencies present, at most one expanding multiple-substitution lookup, and a
+space substitution/multiple closure B* entirely in GDEF class 0. No ligature tail
+may accept B*. Producer indexing by glyph predicates plus a class-producer list
+computes substitution/multiple/ligature closures and a monotone nominal-span
+fixpoint. Span must converge with maximum S≤8 (individual spans capped at 64);
+maximum crossing distance d must satisfy d·S≤64; at most 4096 crossings are allowed.
+
+For each non-mark-attachment rule window `[reverse(backtrack), input, lookahead]`,
+each B*-accepting position other than the last defines a crossing. Other slots
+retain side, distance, predicate and a global bit. An anchor minimizes hits in
+closures of A–Z/a–z/0–9, then accepted glyph count, then distance. Lazy glyph info
+records closure, whether any closure glyph can be skipped by any lookup (`free`),
+whether any can be a mark, anchor hits, and a lazy complete slot-hit bitset.
+`safeAfter(glyphs,s)` requires a nominal space and a following glyph. Independent
+left/right walks visit up to maxD·S non-free glyphs and at most 64 steps each,
+recording the non-free count before each glyph. An anchor hit within its d·S range
+touches a crossing; if every slot can hit its side within its own d·S range the
+boundary is unsafe. If any mark-base/mark-mark base accepts B*, a possibly-mark
+first nominal glyph on the right also makes the boundary unsafe.
+
+Proof sketch: B* is class 0, never skipped/deleted or a ligature tail. A lookup
+reading across a cut must include a B*-derived glyph in its rule window. The d-th
+live glyph is conservatively represented within d·S non-free nominal positions;
+free glyphs cover skipped glyphs and ligature-interior leftovers. Absence of a
+fully possible crossing therefore proves independence by induction over GSUB
+compaction and GPOS. A right-side first live non-mark prevents attachment across
+the space. Rejects are local because crossing rejects cannot match. With only
+one expanding lookup, `length·maxExpansion` bounds both whole and segment outputs.
+Successful stitched headers 0–1 and every six-word record, including clusters,
+must be bit-identical to whole-run shaping. Diagnostics 2–3 are zero on success.
+
+`segmentComputeTextRuns` first searches downward from target−1 to start+1, then
+upward from target to the penultimate glyph, cutting after the first safe space.
+Scalars and nominal glyphs use subarray views. Ineligible/short/unsplittable runs
+stay whole. No splits, excess per-group workgroups, or segment output/table bytes
+above storage/buffer limits return null and retain the existing GPU path.
+
+Logical shape capacity, shaped slots, instance sizing and pack remain unchanged.
+Segment groups preserve group/run order with global segment `outputRun`; segment
+capacity is the maximum shape capacity over these groups. A table maps each
+logical shaped slot to `[firstSegment, segmentCount]`, followed by per-segment
+scalar starts. Resident grow-only buffers are `segmentOutput` (header plus
+segmentCapacity six-word records), `segmentTable` (read storage), `stitchParams`
+(read storage vec4u: runCount, logical capacity, segment capacity, zero).
+Shape binds segment output and selects the segment-capacity scratch tier. Output
+identity invalidates shape bindings; segmentation mode and all stitch buffer
+identities invalidate pack schedules. Release disposes all new buffers/shaders.
+
+A 64-lane stitch dispatch, one workgroup per logical run, precedes existing pack
+dispatches. Every lane sums segment counts and selects the first failure. Lane 0
+writes failure status/count zero and copies failing diagnostics (overflow uses
+zero diagnostics), or success/count/zero diagnostics. Lanes copy segment records
+in order, adding scalarStart only to the cluster word. Total above logical
+capacity yields status 2. Async status aggregation/readback remains unchanged and
+untimed; measurement ends at a queue fence after a real draw.
+
+Tests cover probe-equivalent boundaries, eligibility/fallback/lazy caching,
+search order/limits, native exact shaped records and oracle comparisons at 480
+and 1000 glyphs, mixed groups, rejection, cluster offsets, mode transitions and
+release. Validation is scoped to compute-text unit/native tests, package
+typecheck, changed-file lint and scene1/169/180/181/188 bundle-size checks only.
+
+**Validation result:** all 266 native compute tests pass, including successful
+480/1000-glyph corpus records, clusters, mixed/RTL groups, rejection, transitions
+and buffer release. Package typecheck, changed-file lint and all five scoped
+bundle ceilings pass. Scoped unit tests pass 87/87. The architect's ruling
+corrected §6's isolated-string examples: tests assert complete corpus safe counts
+and exact deduplicated unsafe-context sets, plus safe spaces after `The` and
+unsafe period-before-`To`/`The` boundaries. Counts match exactly: Inter 101/101,
+54/54, 32/45; Roboto 96/101, 51/54, 45/45; zero probe disagreements across
+400 boundaries. Context snippets are witnesses, not context-free classifiers.
+
+**Measured result:** warm fresh-analysis median of five (caches cleared):
+Inter 4.615 ms, Roboto 6.386 ms. Initial Inter analysis exceeded 20 ms; indexed,
+weighted anchor scoring removed repeated predicate membership construction.
+First-update analysis cache misses in the browser full run cost Inter 9.570 ms,
+Roboto 6.605 ms (analysis only, not total update time).
+
+The 15-round real-draw gate passed. The 31-round sweep's equal-weight mean
+percentage changes across 1/16×english480 in both fonts were T32 −30.54%,
+T64 −33.36%, T128 −28.60%; T64 was selected and the source constant remains 64.
+Full results below are 31 same-session interleaved baseline/candidate pairs per
+cell, COOP/COEP-isolated 5 µs timers, update through the real-draw queue fence,
+with ordinary status validation outside timing. Baseline is pinned c3ac8eba.
+
+| Cell | Inter baseline → candidate ms (% change) | Roboto baseline → candidate ms (% change) |
+|---|---|---|
+| 1×english480 | 1.655 → 1.040 (−37.16%) | 1.840 → 0.945 (−48.64%) |
+| 4×english480 | 1.555 → 1.125 (−27.65%) | 1.955 → 1.060 (−45.78%) |
+| 16×english480 | 1.655 → 1.495 (−9.67%) | 2.260 → 1.400 (−38.05%) |
+| 16×natural50 | 1.230 → 1.190 (−3.25%) | 1.415 → 1.415 (0.00%, tie) |
+| 256×two2 | 0.720 → 0.730 (+1.39%, tie) | 0.705 → 0.700 (−0.71%, tie) |
+
+Tie means absolute median difference below 0.02 ms. Full preflight/final checks
+verified 782,166 shaped records and 661,510 GPU instances, with no GPU/browser
+errors; byte comparisons of visible instances, indirect and status all matched.
+Native tests independently compare stitched versus whole-run headers/records.
+Timestamp diagnostics at 1×480 (separate instrumented run) measured shape GPU
+Inter 0.946 → 0.281 ms, Roboto 1.611 → 0.370 ms.
+
+A/A baseline-versus-baseline controls showed ordering noise: 31-round apparent
+changes at 1×480/256×two2 were Inter −0.150/−0.075 ms and Roboto −0.035/−0.070 ms.
+A 61-round reversed confirmation gave Inter +0.015/+0.035 ms and Roboto
++0.010/+0.025 ms. These are not engine improvements. Small short-run differences
+and Inter's 16×480 result are not confidently attributable; single-run long-run
+gains exceed observed control shifts. No visual/MAD tests or golden changes were
+performed; CI remains responsible for those checks.

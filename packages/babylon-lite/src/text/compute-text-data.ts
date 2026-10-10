@@ -7,6 +7,7 @@ import type { ComputeFont } from "./compute-font.js";
 import { mapComputeFontScalars } from "./compute-font.js";
 import { closeComputeTextGlyphs } from "./compute-text-closure.js";
 import { createComputeTextPlan } from "./compute-text-plan.js";
+import { segmentComputeTextRuns } from "./compute-text-segment.js";
 import type { ComputeTextInputSlab, ComputeTextRunSelection } from "./compute-text-selection.js";
 import { createComputeTextInputSlab, selectComputeTextRun } from "./compute-text-selection.js";
 import { extractComputeGlyphCurves } from "./compute-glyph-extraction.js";
@@ -76,6 +77,8 @@ export interface ComputeTextData {
     _style: GPUBuffer;
     /** @internal */
     _released: boolean;
+    /** @internal Test-only whole-run comparison path. */
+    _disableSegmentation?: boolean;
 }
 
 /** Create resident buffers for one font and one base style. `storage` is caller-owned and may be shared. Does not shape. */
@@ -171,6 +174,9 @@ export async function updateComputeTextData(data: ComputeTextData, texts: readon
         const slab = createComputeTextInputSlab(snapshot, false);
         const prepared = snapshot.map((text, run) => prepareRun(data._font, text, run, seeds, slab));
         const groups = groupRuns(data._font, prepared);
+        const segments = data._disableSegmentation
+            ? null
+            : segmentComputeTextRuns(groups, device.limits, { headerWords: COMPUTE_TEXT_HEADER_WORDS, recordWords: COMPUTE_TEXT_RECORD_WORDS });
         let closure;
         try {
             closure = closeComputeTextGlyphs(
@@ -190,7 +196,7 @@ export async function updateComputeTextData(data: ComputeTextData, texts: readon
             executeResidentComputeText(
                 data,
                 data._engine,
-                groups,
+                segments?.groups ?? groups,
                 {
                     shaped: data._shaped,
                     instances: data._instances,
@@ -203,7 +209,8 @@ export async function updateComputeTextData(data: ComputeTextData, texts: readon
                 data.fontSizePx,
                 data._font.unitsPerEm,
                 data._font.glyphCount,
-                () => assertCurrent(data, generation, device)
+                () => assertCurrent(data, generation, device),
+                segments
             ),
             cancelled,
         ]);
