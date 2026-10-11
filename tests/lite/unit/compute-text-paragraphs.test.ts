@@ -13,6 +13,7 @@ import {
     computeTextParagraphFlags,
     computeTextParagraphPoolSize,
 } from "../../../packages/babylon-lite/src/text/compute-text-paragraphs";
+import { createComputeTextParagraphStage } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
 import type { ComputeTextParagraphCache } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
 import type { SegmentAnalysis } from "../../../packages/babylon-lite/src/text/compute-text-segment";
 import * as segmentation from "../../../packages/babylon-lite/src/text/compute-text-segment";
@@ -279,6 +280,7 @@ describe("paragraph synchronous admission", () => {
             Object.defineProperty(test.data._device.limits, kind === "lines" ? "maxStorageBufferBindingSize" : "maxComputeWorkgroupsPerDimension", {
                 value: kind === "lines" ? 512 : 0,
             });
+
             try {
                 expect(() => updateComputeTextParagraphs(test.data, ["A".repeat(20)], { maxWidthPx: 100 })).toThrow(
                     kind === "lines" ? /updateComputeTextParagraphs: layout buffer.*storage limits/ : /updateComputeTextParagraphs:.*workgroup limits/
@@ -288,6 +290,56 @@ describe("paragraph synchronous admission", () => {
             } finally {
                 test.close();
             }
+        }
+    });
+});
+
+describe("paragraph per-record storage", () => {
+    it("linearizes dispatches beyond the per-dimension limit and resets y on smaller edits", () => {
+        const test = block();
+        Object.assign(test.data._device, { createBindGroupLayout: vi.fn(() => ({})), createPipelineLayout: vi.fn(() => ({})), createBindGroup: vi.fn(() => ({})) });
+        Object.defineProperty(test.data._device.limits, "maxComputeWorkgroupsPerDimension", { value: 4 });
+        const words = new Uint32Array(23);
+        words[0] = words[9] = words[11] = 7;
+        words[1] = 1;
+        const stage = createComputeTextParagraphStage({}, test.data._engine, words);
+        try {
+            stage.prepare(test.data._engine, 7, 1);
+            const buffer = stage._lines!;
+            const dispatches = stage.dispatches({ shaped: buffer, slots: buffer, instances: buffer, indirect: buffer, status: buffer });
+            expect(dispatches.map((dispatch) => [dispatch._x, dispatch._y, dispatch.enabled])).toEqual([
+                [4, 2, true],
+                [1, 1, true],
+                [4, 2, true],
+            ]);
+            words[0] = 1;
+            words[9] = 0;
+            stage.prepare(test.data._engine, 0, 1);
+            expect(dispatches.map((dispatch) => [dispatch._x, dispatch._y, dispatch.enabled])).toEqual([
+                [0, 1, false],
+                [1, 1, true],
+                [1, 1, true],
+            ]);
+        } finally {
+            stage.release();
+            test.close();
+        }
+    });
+
+    it("includes both per-record vec4 tables in line storage bounds and allocation", () => {
+        const test = block();
+        const words = new Uint32Array(18);
+        words[1] = 10;
+        words[11] = 2;
+        const stage = createComputeTextParagraphStage({}, test.data._engine, words);
+        try {
+            stage.prepare(test.data._engine, 0, 10);
+            expect(stage._lines!.byteLength).toBe(2 * 10 * 48);
+            Object.defineProperty(test.data._device.limits, "maxStorageBufferBindingSize", { value: 2 * 10 * 48 - 1 });
+            expect(() => createComputeTextParagraphStage({}, test.data._engine, words)).toThrow(/layout buffer of 960 bytes exceeds device storage limits/);
+        } finally {
+            stage.release();
+            test.close();
         }
     });
 });

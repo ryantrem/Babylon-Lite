@@ -29,6 +29,10 @@ import { syntheticFont } from "./synthetic";
 import type { Fixture } from "./fixtures";
 import { assertNativeClean, nativeHarness } from "./native";
 import type { NativeHarness } from "./native";
+import { serialParagraphLayout } from "./serial-paragraph-layout";
+import { createComputeShader, disposeComputeShader } from "../../../packages/babylon-lite/src/compute/compute-shader";
+import { createComputeDispatch, setComputeDispatchSize } from "../../../packages/babylon-lite/src/compute/compute-dispatch";
+import { createComputeBindingSet } from "../../../packages/babylon-lite/src/compute/compute-bindings";
 
 interface Line {
     first: number;
@@ -259,7 +263,7 @@ describe("native GPU paragraph wrapping and placement", () => {
     let storage: GlyphStorage;
     let fused: boolean;
     const live = new Set<ComputeTextData>();
-    function block(face: Fixture, curveSet = face.file): ComputeTextData {
+    function block(face: Fixture, curveSet: string = face.file): ComputeTextData {
         const data = createComputeTextData(native.engine, face.font, storage, curveSet, { fontSizePx: 31.75 });
         live.add(data);
         return data;
@@ -583,6 +587,7 @@ describe("native GPU paragraph wrapping and placement", () => {
             // Run the real layout over a rejecting clean slot and the previously shaped dirty slot.
             stage._words[9] = paragraphs.length;
             stage._words[10] = 1;
+            setComputeDispatchSize(stage._dispatches![0]!, { x: paragraphs.length });
             updateStorageBuffer(native.engine, stage._input!, stage._words.subarray(0, 16));
             return original(tasks.slice(-1), buffer, bytes, consume, staging);
         });
@@ -980,6 +985,148 @@ describe("native GPU paragraph wrapping and placement", () => {
             task.dispose();
             stage.release();
             Object.values(buffers).forEach(disposeStorageBuffer);
+        }
+    });
+
+    it("matches serial WGSL bit-for-bit for blocked scans, candidate events, fallback, failures and incremental reuse (seed 0x31415926)", async () => {
+        let seed = 0x31415926;
+        const random = (limit: number) => {
+            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+            return seed % limit;
+        };
+        const capacity = 4097;
+        const counts = [0, 1, 257, 2049, 4097, 513, 900, 300, 30, 70, 256, 258, 60, 500, 900, 100];
+        const words = layoutWords(counts.length, capacity);
+        words[2] = bits(0.02343751);
+        words[4] = bits(41.37);
+        words[5] = bits(31.12345);
+        words[6] = bits(7.12345);
+        const records = new Int32Array(counts.length * (4 + capacity * 6));
+        counts.forEach((count, p) => {
+            const head = p * (4 + capacity * 6);
+            records[head + 1] = count;
+            let c = 0;
+            for (let i = 0; i < count; i++) {
+                if (i && random(4)) {
+                    c++;
+                }
+                const at = head + 4 + i * 6;
+                const flags = p === 6 ? 4 : p === 7 ? 0 : random(8);
+                const flagAt = 16 + words[11]! + p * words[12]! + Math.floor(c / 4);
+                words[flagAt] = (words[flagAt]! & ~(255 << ((c % 4) * 8))) | (flags << ((c % 4) * 8));
+                records.set([random(2), c, random(90), random(31) - 15, random(70) - 35, random(70) - 35], at);
+            }
+        });
+        // Entirely unbreakable, entirely space, negative advance, and signed-prefix overflow.
+        for (let i = 0; i < counts[8]!; i++) {
+            records[8 * (4 + capacity * 6) + 5 + i * 6] = 0;
+        }
+        words.fill(0x01010101, 16 + words[11]! + 9 * words[12]!, 16 + words[11]! + 10 * words[12]!);
+        records[10 * (4 + capacity * 6) + 6 + 130 * 6] = -300;
+        records[11 * (4 + capacity * 6) + 6] = 0x7fffffff;
+        const shared = {
+            shaped: createStorageBuffer(native.engine, records, { writable: true }),
+            slots: createStorageBuffer(native.engine, Uint32Array.of(13, 0xfffffffe, 0xffffffff)),
+        };
+        const stages = [0, 1].map(() => createComputeTextParagraphStage({}, native.engine, words.slice()));
+        const tasks = [0, 1].map((i) => createComputeTask(native.engine, `parallel-serial-${i}`));
+        const outputs = [0, 1].map(() => ({
+            instances: createStorageBuffer(native.engine, counts.reduce((a, b) => a + b, 0) * 12, { writable: true }),
+            indirect: createStorageBuffer(native.engine, 16, { writable: true }),
+            status: createStorageBuffer(native.engine, 4, { writable: true }),
+        }));
+        const serialShaders: ReturnType<typeof createComputeShader>[] = [];
+        try {
+            stages.forEach((stage, index) => {
+                stage.prepare(native.engine, counts.length, capacity);
+                const dispatches = stage.dispatches({ ...shared, ...outputs[index]! });
+                if (index) {
+                    for (const [i, entryPoint] of [
+                        [0, "serialMeasureTest"],
+                        [2, "serialPlaceTest"],
+                    ] as const) {
+                        const shader = createComputeShader(native.engine, {
+                            computeSource: stage._shaders![i]!._source + serialParagraphLayout,
+                            entryPoint,
+                            bindings: stage._shaders![i]!._decls,
+                        });
+                        serialShaders.push(shader);
+                        dispatches[i] = createComputeDispatch(
+                            shader,
+                            createComputeBindingSet(shader, { input: stage._input!, ...shared, ...outputs[index]!, info: stage._info!, lines: stage._lines! }),
+                            { size: { x: Math.ceil(counts.length / 64) } }
+                        );
+                    }
+                } else {
+                    for (const i of [0, 2]) {
+                        setComputeDispatchSize(dispatches[i]!, { x: 4, y: Math.ceil(counts.length / 4) });
+                    }
+                }
+                dispatches.forEach((dispatch) => addComputeDispatch(tasks[index]!, dispatch));
+                tasks[index]!.record();
+            });
+            async function compare(): Promise<void> {
+                for (const task of tasks) {
+                    await prepareComputeTask(task);
+                    submitComputeTasks([task]);
+                }
+                const results = await Promise.all(
+                    stages.map(async (stage, i) => ({
+                        lines: new Uint8Array(await readStorageBuffer(stage._lines!, 0, counts.length * capacity * 16)),
+                        info: new Uint8Array(await readStorageBuffer(stage._info!)),
+                        instances: new Uint8Array(await readStorageBuffer(outputs[i]!.instances)),
+                        indirect: new Uint8Array(await readStorageBuffer(outputs[i]!.indirect)),
+                        status: new Uint8Array(await readStorageBuffer(outputs[i]!.status)),
+                    }))
+                );
+                expect(results[0]).toEqual(results[1]);
+            }
+            for (const width of [0.0001, 41.37, 1000000, Infinity]) {
+                for (const align of width === Infinity ? [0] : [0, 1, 2]) {
+                    stages.forEach((stage) => {
+                        stage._words[4] = bits(width);
+                        stage._words[7] = align;
+                        updateStorageBuffer(native.engine, stage._input!, stage._words);
+                    });
+                    await compare();
+                }
+            }
+            // Clean slots retain tables while one dirty physical slot changes; display order is permuted.
+            records[2 * (4 + capacity * 6) + 6] = records[2 * (4 + capacity * 6) + 6]! + 10;
+            updateStorageBuffer(native.engine, shared.shaped, records);
+            stages.forEach((stage) => {
+                stage._words[8] = 2;
+                stage._words[9] = 1;
+                stage._words[10] = 0;
+                stage._words.set(
+                    counts.map((_n, i) => counts.length - i - 1),
+                    16
+                );
+                updateStorageBuffer(native.engine, stage._input!, stage._words);
+            });
+            await compare();
+            for (const [failure, count, glyph] of [
+                [1, 1, 2],
+                [0, capacity + 1, 2],
+                [0, 1, 2],
+                [0, 1, 3],
+                [0, 1, 0],
+            ]) {
+                stages.forEach((stage) => {
+                    stage._words[8] = 0;
+                    updateStorageBuffer(native.engine, stage._input!, stage._words);
+                });
+                records[0] = failure!;
+                records[1] = count!;
+                records[4] = glyph!;
+                updateStorageBuffer(native.engine, shared.shaped, records);
+                await compare();
+            }
+        } finally {
+            tasks.forEach((task) => task.dispose());
+            stages.forEach((stage) => stage.release());
+            serialShaders.forEach(disposeComputeShader);
+            [...Object.values(shared), ...outputs.flatMap(Object.values)].forEach(disposeStorageBuffer);
         }
     });
 

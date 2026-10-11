@@ -37,29 +37,7 @@ fn emit(p:u32, line:u32, first:u32, count:u32, width:i32) {
   if (count != 0u) { cluster = u32(shaped[recordAt(p, first) + 1u]); }
   lines[p * input[1] + line] = vec4u(first, count, bitcast<u32>(max(0.0, f32(width) * bitcast<f32>(input[2]))), cluster);
 }
-@compute @workgroup_size(64)
-fn measure(@builtin(global_invocation_id) invocation:vec3u) {
-  let i = invocation.x;
-  if (i >= input[9]) { return; }
-  var p = input[8] + i;
-  if (input[10] == 1u) { p = input[16u + i]; }
-  let head = p * (HEADER + input[1] * RECORD);
-  var failed = u32(shaped[head]);
-  let count = u32(shaped[head + 1u]);
-  var visible = 0u;
-  if (failed == 0u) {
-    if (count > input[1]) { failed = 2u; }
-    else {
-      for (var i = 0u; i < count; i++) {
-        let glyph = u32(shaped[recordAt(p, i)]);
-        if (glyph >= input[3]) { failed = 3u; break; }
-        let slot = slots[glyph];
-        if (slot == MISSING) { failed = 3u; break; }
-        if (slot != EMPTY) { visible++; }
-      }
-    }
-  }
-  if (failed != 0u) { info[p] = vec4u(0u, failed, 1u, 0u); return; }
+fn serialMeasure(p:u32, count:u32, visible:u32) {
   let scale = bitcast<f32>(input[2]);
   let maxWidth = bitcast<f32>(input[4]);
   var line = 0u;
@@ -112,6 +90,227 @@ fn measure(@builtin(global_invocation_id) invocation:vec3u) {
 }
 var<workgroup> summaries: array<vec3u, 256>;
 var<workgroup> prefixStatus: u32;
+var<workgroup> measureFailure: atomic<u32>;
+var<workgroup> serialRequired: atomic<u32>;
+var<workgroup> measureVisible: atomic<u32>;
+var<workgroup> measureStatus: u32;
+var<workgroup> useSerial: u32;
+var<workgroup> measuredLines: u32;
+fn tableAt(p:u32, i:u32) -> u32 {
+  return input[11] * input[1] + 2u * (p * input[1] + i);
+}
+fn nonSpace(p:u32, i:u32) -> bool {
+  return (flags(p, u32(shaped[recordAt(p, i) + 1u])) & 1u) == 0u;
+}
+fn breakOpp(p:u32, i:u32, count:u32) -> bool {
+  if (i + 1u >= count) { return false; }
+  let c = u32(shaped[recordAt(p, i) + 1u]);
+  let next = u32(shaped[recordAt(p, i + 1u) + 1u]);
+  return next > c && (flags(p, next - 1u) & 2u) != 0u;
+}
+fn emergency(p:u32, i:u32) -> bool {
+  if (i == 0u) { return false; }
+  let c = u32(shaped[recordAt(p, i) + 1u]);
+  return nonSpace(p, i) && c != u32(shaped[recordAt(p, i - 1u) + 1u]) && (flags(p, c) & 4u) == 0u;
+}
+fn scanSummary(lane:u32, kind:u32, reverse:bool) {
+  workgroupBarrier();
+  for (var distance = 1u; distance < 256u; distance *= 2u) {
+    var pending = summaries[lane];
+    let other = select(lane - distance, lane + distance, reverse);
+    if (select(lane >= distance, lane + distance < 256u, reverse)) {
+      let previous = summaries[other];
+      if (kind == 0u) { pending += previous; }
+      else if (kind == 1u) { pending = max(pending, previous); }
+      else { pending = min(pending, previous); }
+    }
+    workgroupBarrier();
+    summaries[lane] = pending;
+    workgroupBarrier();
+  }
+}
+@compute @workgroup_size(256)
+fn measure(@builtin(workgroup_id) group:vec3u, @builtin(num_workgroups) groups:vec3u, @builtin(local_invocation_index) lane:u32) {
+  let index = group.x + group.y * groups.x;
+  if (index >= input[9]) { return; }
+  var p = input[8] + index;
+  if (input[10] == 1u) { p = input[16u + index]; }
+  let head = p * (HEADER + input[1] * RECORD);
+  let count = u32(shaped[head + 1u]);
+  if (lane == 0u) {
+    var failed = u32(shaped[head]);
+    if (failed == 0u && count > input[1]) { failed = 2u; }
+    atomicStore(&measureFailure, failed);
+    atomicStore(&serialRequired, 0u);
+    atomicStore(&measureVisible, 0u);
+    measureStatus = failed;
+  }
+  if (workgroupUniformLoad(&measureStatus) != 0u) {
+    if (lane == 0u) { info[p] = vec4u(0u, measureStatus, 1u, 0u); }
+    return;
+  }
+  let span = (count + 255u) / 256u;
+  let begin = min(lane * span, count);
+  let end = min(begin + span, count);
+  var sum = vec3u(0u);
+  for (var i = begin; i < end; i++) {
+    let at = recordAt(p, i);
+    let glyph = u32(shaped[at]);
+    if (glyph >= input[3]) { atomicStore(&measureFailure, 3u); }
+    else {
+      let slot = slots[glyph];
+      if (slot == MISSING) { atomicStore(&measureFailure, 3u); }
+      else if (slot != EMPTY) { sum.z++; }
+    }
+    if (shaped[at + 2u] < 0) { atomicStore(&serialRequired, 1u); }
+    sum = vec3u(sum.xy + bitcast<vec2u>(vec2i(shaped[at + 2u], shaped[at + 3u])), sum.z);
+  }
+  atomicAdd(&measureVisible, sum.z);
+  workgroupBarrier();
+  if (lane == 0u) { measureStatus = atomicLoad(&measureFailure); }
+  if (workgroupUniformLoad(&measureStatus) != 0u) {
+    if (lane == 0u) { info[p] = vec4u(0u, measureStatus, 1u, 0u); }
+    return;
+  }
+  summaries[lane] = sum;
+  scanSummary(lane, 0u, false);
+  sum = vec3u(0u);
+  if (lane > 0u) { sum = summaries[lane - 1u]; }
+  workgroupBarrier();
+  for (var i = begin; i < end; i++) {
+    let at = recordAt(p, i);
+    lines[tableAt(p, i)] = vec4u(sum, 0u);
+    let advance = bitcast<u32>(shaped[at + 2u]);
+    if (advance > 0x7fffffffu - min(sum.x, 0x7fffffffu)) { atomicStore(&serialRequired, 1u); }
+    sum = vec3u(sum.xy + bitcast<vec2u>(vec2i(shaped[at + 2u], shaped[at + 3u])), sum.z);
+    if (slots[u32(shaped[at])] != EMPTY) { sum.z++; }
+  }
+  storageBarrier();
+  var last = vec3u(0u);
+  for (var i = begin; i < end; i++) {
+    if (nonSpace(p, i)) { last.x = i + 1u; }
+    if (breakOpp(p, i, count)) { last.y = i + 1u; }
+  }
+  summaries[lane] = last;
+  scanSummary(lane, 1u, false);
+  last = vec3u(0u);
+  if (lane > 0u) { last = summaries[lane - 1u]; }
+  workgroupBarrier();
+  for (var i = begin; i < end; i++) {
+    var content = 0u;
+    if (nonSpace(p, i)) { last.x = i + 1u; }
+    if (breakOpp(p, i, count)) { last.y = i + 1u; }
+    if (last.x != 0u) {
+      let k = last.x - 1u;
+      content = lines[tableAt(p, k)].x + bitcast<u32>(shaped[recordAt(p, k) + 2u]);
+    }
+    lines[tableAt(p, i)].w = content;
+    lines[tableAt(p, i) + 1u] = vec4u(last.y - 1u, MISSING, MISSING, count);
+  }
+  storageBarrier();
+  var nearest = MISSING;
+  for (var i = end; i > begin;) {
+    i--;
+    if (nonSpace(p, i)) { nearest = i; }
+  }
+  summaries[lane] = vec3u(nearest);
+  scanSummary(lane, 2u, true);
+  nearest = MISSING;
+  if (lane < 255u) { nearest = summaries[lane + 1u].x; }
+  workgroupBarrier();
+  for (var i = end; i > begin;) {
+    i--;
+    if (nonSpace(p, i)) { nearest = i; }
+    lines[tableAt(p, i) + 1u].y = nearest;
+  }
+  storageBarrier();
+  nearest = MISSING;
+  for (var i = end; i > begin;) {
+    i--;
+    var event = MISSING;
+    if (emergency(p, i)) { event = i; }
+    else if (breakOpp(p, i, count)) { event = lines[tableAt(p, i + 1u) + 1u].y; }
+    nearest = min(nearest, event);
+    lines[tableAt(p, i) + 1u].z = nearest;
+  }
+  summaries[lane] = vec3u(nearest);
+  scanSummary(lane, 2u, true);
+  nearest = MISSING;
+  if (lane < 255u) { nearest = summaries[lane + 1u].x; }
+  workgroupBarrier();
+  for (var i = begin; i < end; i++) {
+    lines[tableAt(p, i) + 1u].z = min(nearest, lines[tableAt(p, i) + 1u].z);
+  }
+  storageBarrier();
+  if (lane == 0u) { useSerial = atomicLoad(&serialRequired); }
+  if (workgroupUniformLoad(&useSerial) == 0u) {
+    let scale = bitcast<f32>(input[2]);
+    let maxWidth = bitcast<f32>(input[4]);
+    for (var s = begin; s < end; s++) {
+      if (s != 0u && !breakOpp(p, s - 1u, count) && !emergency(p, s)) { continue; }
+      let startPos = bitcast<i32>(lines[tableAt(p, s)].x);
+      var low = s + 1u;
+      var high = count;
+      while (low < high) {
+        let middle = (low + high) / 2u;
+        let endPos = bitcast<i32>(lines[tableAt(p, middle)].x) + shaped[recordAt(p, middle) + 2u];
+        if (f32(endPos - startPos) * scale <= maxWidth) { low = middle + 1u; }
+        else { high = middle; }
+      }
+      var next = count;
+      if (low < count) {
+        let i = lines[tableAt(p, low) + 1u].y;
+        if (i != MISSING) {
+          var previous = lines[tableAt(p, i - 1u) + 1u].x;
+          if (previous != MISSING && previous >= s) { next = previous + 1u; }
+          else {
+            let k = lines[tableAt(p, i) + 1u].z;
+            if (k != MISSING) {
+              previous = lines[tableAt(p, k - 1u) + 1u].x;
+              if (previous != MISSING && previous >= s) { next = previous + 1u; }
+              else { next = k; }
+            }
+          }
+        }
+      }
+      lines[tableAt(p, s) + 1u].w = next;
+    }
+  }
+  storageBarrier();
+  if (lane == 0u) {
+    let visible = atomicLoad(&measureVisible);
+    if (useSerial != 0u) { serialMeasure(p, count, visible); }
+    else if (count == 0u) {
+      emit(p, 0u, 0u, 0u, 0);
+      info[p] = vec4u(visible, 0u, 1u, 0u);
+    } else {
+      var s = 0u;
+      var line = 0u;
+      loop {
+        let next = lines[tableAt(p, s) + 1u].w;
+        let width = bitcast<i32>(lines[tableAt(p, next - 1u)].w) - bitcast<i32>(lines[tableAt(p, s)].x);
+        emit(p, line, s, next - s, width);
+        line++;
+        if (next == count) { break; }
+        s = next;
+      }
+      info[p] = vec4u(visible, 0u, line, 0u);
+    }
+    measuredLines = info[p].z;
+  }
+  storageBarrier();
+  let lineCount = workgroupUniformLoad(&measuredLines);
+  for (var i = begin; i < end; i++) {
+    var low = 0u;
+    var high = lineCount;
+    while (low + 1u < high) {
+      let middle = (low + high) / 2u;
+      if (lines[p * input[1] + middle].x <= i) { low = middle; }
+      else { high = middle; }
+    }
+    lines[tableAt(p, i) + 1u].x = low;
+  }
+}
 @compute @workgroup_size(256)
 fn prefix(@builtin(local_invocation_index) lane:u32) {
   let limit = arrayLength(&instances);
@@ -176,9 +375,9 @@ fn prefix(@builtin(local_invocation_index) lane:u32) {
     base += result.xz;
   }
 }
-@compute @workgroup_size(64)
-fn place(@builtin(global_invocation_id) invocation:vec3u) {
-  let p = invocation.x;
+@compute @workgroup_size(256)
+fn place(@builtin(workgroup_id) group:vec3u, @builtin(num_workgroups) groups:vec3u, @builtin(local_invocation_index) lane:u32) {
+  let p = group.x + group.y * groups.x;
   if (p >= input[0] || status[0] != 0u) { return; }
   let slot = input[16u + p];
   let paragraph = info[input[11] + p];
@@ -186,28 +385,22 @@ fn place(@builtin(global_invocation_id) invocation:vec3u) {
   let maxWidth = bitcast<f32>(input[4]);
   let lineHeight = bitcast<f32>(input[5]);
   let spacing = bitcast<f32>(input[6]);
-  var total = paragraph.x;
-  var penX = 0;
-  var penY = 0;
-  for (var l = 0u; l < paragraph.z; l++) {
+  let count = u32(shaped[slot * (HEADER + input[1] * RECORD) + 1u]);
+  for (var i = lane; i < count; i += 256u) {
+    let at = recordAt(slot, i);
+    let glyphSlot = slots[u32(shaped[at])];
+    if (glyphSlot == EMPTY) { continue; }
+    let a = lines[tableAt(slot, i)];
+    let l = lines[tableAt(slot, i) + 1u].x;
     let line = lines[slot * input[1] + l];
-    let lineX = penX;
+    let lineX = bitcast<i32>(lines[tableAt(slot, line.x)].x);
     var align = 0.0;
     if (input[7] != 0u) {
       align = max(0.0, maxWidth - bitcast<f32>(line.z));
       if (input[7] == 1u) { align *= 0.5; }
     }
     let baseline = fma(f32(paragraph.w + l), lineHeight, f32(p) * spacing);
-    for (var i = line.x; i < line.x + line.y; i++) {
-      let at = recordAt(slot, i);
-      let slot = slots[u32(shaped[at])];
-      if (slot != EMPTY) {
-        instances[total] = Instance(fma(f32(penX - lineX + shaped[at + 4u]), scale, align), fma(f32(penY + shaped[at + 5u]), scale, -baseline), slot);
-        total++;
-      }
-      penX += shaped[at + 2u];
-      penY += shaped[at + 3u];
-    }
+    instances[paragraph.x + a.z] = Instance(fma(f32(bitcast<i32>(a.x) - lineX + shaped[at + 4u]), scale, align), fma(f32(bitcast<i32>(a.y) + shaped[at + 5u]), scale, -baseline), glyphSlot);
   }
 }
 `;
@@ -334,24 +527,24 @@ export function createComputeTextParagraphStage(token: object, engine: EngineCon
                 const pool = created._words[11]!;
                 created._input = grow(engine, created, created._input, created._words.byteLength, "input");
                 created._info = grow(engine, created, created._info, Math.max(1, pool * 2) * 16, "info");
-                created._lines = grow(engine, created, created._lines, Math.max(1, pool) * capacity * 16, "lines");
+                created._lines = grow(engine, created, created._lines, Math.max(1, pool) * capacity * 48, "lines");
                 for (const [first, end] of created._uploadRanges) {
                     if (end > first) {
                         updateStorageBuffer(engine, created._input, created._words.subarray(first, end), first * 4);
                     }
                 }
                 created._dispatches?.forEach((dispatch, index) => {
-                    const x = dispatchSize(created, index);
-                    setComputeDispatchSize(dispatch, { x });
-                    dispatch.enabled = x > 0;
+                    const size = dispatchSize(created, index);
+                    setComputeDispatchSize(dispatch, size);
+                    dispatch.enabled = size.x > 0;
                 });
                 (stages ??= new WeakMap()).set(token, created);
             },
             dispatches(buffers: ResidentTextBuffers) {
                 const resources = { input: created._input!, ...buffers, info: created._info!, lines: created._lines! };
                 created._dispatches = created._shaders!.map((shader, index) => {
-                    const x = dispatchSize(created, index);
-                    return createComputeDispatch(shader, createComputeBindingSet(shader, resources), { size: { x }, enabled: x > 0 });
+                    const size = dispatchSize(created, index);
+                    return createComputeDispatch(shader, createComputeBindingSet(shader, resources), { size, enabled: size.x > 0 });
                 });
                 return created._dispatches;
             },
@@ -381,18 +574,23 @@ function checkBounds(engine: EngineContext, words: Uint32Array): void {
     const pool = words[11]!;
     const capacity = words[1]!;
     const limits = engine._device.limits;
-    for (const bytes of [words.byteLength, Math.max(1, pool * 2) * 16, Math.max(1, pool) * capacity * 16]) {
+    for (const bytes of [words.byteLength, Math.max(1, pool * 2) * 16, Math.max(1, pool) * capacity * 48]) {
         if (!Number.isSafeInteger(bytes) || bytes > limits.maxBufferSize || bytes > limits.maxStorageBufferBindingSize) {
             throw new Error(`updateComputeTextParagraphs: layout buffer of ${bytes} bytes exceeds device storage limits`);
         }
     }
-    if (Math.ceil(paragraphs / 64) > limits.maxComputeWorkgroupsPerDimension) {
+    if (
+        Math.ceil(paragraphs / 64) > limits.maxComputeWorkgroupsPerDimension ||
+        Math.ceil(Math.max(paragraphs, words[9]!) / limits.maxComputeWorkgroupsPerDimension) > limits.maxComputeWorkgroupsPerDimension
+    ) {
         throw new Error("updateComputeTextParagraphs: paragraph dispatch exceeds device workgroup limits");
     }
 }
 
-function dispatchSize(stage: ComputeTextParagraphStage, index: number): number {
-    return index === 1 ? 1 : Math.ceil(stage._words[index === 0 ? 9 : 0]! / 64);
+function dispatchSize(stage: ComputeTextParagraphStage, index: number): { x: number; y: number } {
+    const count = index === 1 ? 1 : stage._words[index === 0 ? 9 : 0]!;
+    const limit = stage._device!.limits.maxComputeWorkgroupsPerDimension;
+    return { x: Math.min(count, limit), y: Math.max(1, Math.ceil(count / limit)) };
 }
 
 function createLayoutShader(engine: EngineContext, entryPoint: string): ComputeShader {

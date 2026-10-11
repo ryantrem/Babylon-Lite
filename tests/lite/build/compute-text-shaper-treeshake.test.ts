@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { cleanupTempDirs, ensureLibBuilt, LIB_ENTRY, runRollup, runVite } from "./bundler-harness";
 
-const KERNEL_ONLY = "unsupported-lookup failure";
+const KERNEL_ONLY = "fn rejectRun(";
 const PARSER_ONLY = "function compileComputeTextProgram";
 const TEXT_SHAPER_RUNTIME = "Font.load";
 

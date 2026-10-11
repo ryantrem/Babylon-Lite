@@ -12,15 +12,15 @@ redesigned later.
 
 ### Incremental roadmap
 
-| Step                | Babylon Lite                                                                                                                                                                                                                                                    | Pad                                                                                                                                                               | Functionality restored                           |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| **1 (this spec)**   | `updateComputeTextParagraphs`: shape each paragraph once, GPU greedy wrap at shaping-safe spaces, emergency breaks, hanging trailing spaces, left/center/right alignment, paragraph spacing, font line metrics. Per-line records written on the GPU (internal). | "Compute Text (GPU layout)" mode: no LLX shaping/layout on the path; plain-text documents drawn from GPU layout. Caret, selection, hit testing, markers disabled. | Wrapped, aligned plain-text drawing with no LLX. |
-| **2 (implemented)** | Paragraph slots with stable identities; reshape only dirty paragraphs; width/alignment changes re-run layout without reshaping.                                                                                                                                 | Per-keystroke dirty-paragraph updates.                                                                                                                            | Edit latency independent of document size.       |
-| 3                   | Revision-bound async queries over line/cluster records: line extents, cluster↔x, caret stops, hit test.                                                                                                                                                         | Caret, click-to-place, arrow keys, selection highlight.                                                                                                           | Editing.                                         |
-| 4                   | GPU caret/selection rendering from cluster records (no per-keystroke readback).                                                                                                                                                                                 | Remove query round-trip from typing.                                                                                                                              | Latency parity.                                  |
-| 5                   | Within-paragraph parallel wrap (prefix sums + break search) for very long paragraphs; device-level pipeline sharing.                                                                                                                                            | Large documents, many panes.                                                                                                                                      | Scale.                                           |
-| 6                   | Multiple styles per paragraph (style runs, per-run fonts/sizes/colors, line metrics from the tallest run).                                                                                                                                                      | Bold/italic/size/color, decorations.                                                                                                                              | Rich text.                                       |
-| 7                   | Line-local bidi reordering, more scripts, UAX #14 classes beyond spaces, tabs, justification.                                                                                                                                                                   | Remaining eligibility gates removed.                                                                                                                              | Feature parity with LLX.                         |
+| Step                           | Babylon Lite                                                                                                                                                                                                                                                    | Pad                                                                                                                                                               | Functionality restored                           |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| **1 (this spec)**              | `updateComputeTextParagraphs`: shape each paragraph once, GPU greedy wrap at shaping-safe spaces, emergency breaks, hanging trailing spaces, left/center/right alignment, paragraph spacing, font line metrics. Per-line records written on the GPU (internal). | "Compute Text (GPU layout)" mode: no LLX shaping/layout on the path; plain-text documents drawn from GPU layout. Caret, selection, hit testing, markers disabled. | Wrapped, aligned plain-text drawing with no LLX. |
+| **2 (implemented)**            | Paragraph slots with stable identities; reshape only dirty paragraphs; width/alignment changes re-run layout without reshaping.                                                                                                                                 | Per-keystroke dirty-paragraph updates.                                                                                                                            | Edit latency independent of document size.       |
+| 3                              | Revision-bound async queries over line/cluster records: line extents, cluster↔x, caret stops, hit test.                                                                                                                                                         | Caret, click-to-place, arrow keys, selection highlight.                                                                                                           | Editing.                                         |
+| 4                              | GPU caret/selection rendering from cluster records (no per-keystroke readback).                                                                                                                                                                                 | Remove query round-trip from typing.                                                                                                                              | Latency parity.                                  |
+| **5 (wrap/place implemented)** | Within-paragraph parallel wrap (blocked scans + candidate break search) and parallel placement; negative-advance paragraphs retain serial wrapping. Dirty safe-break-chunk reshaping, submission fusion and device-level pipeline sharing remain.               | Large documents, many panes.                                                                                                                                      | Scale.                                           |
+| 6                              | Multiple styles per paragraph (style runs, per-run fonts/sizes/colors, line metrics from the tallest run).                                                                                                                                                      | Bold/italic/size/color, decorations.                                                                                                                              | Rich text.                                       |
+| 7                              | Line-local bidi reordering, more scripts, UAX #14 classes beyond spaces, tabs, justification.                                                                                                                                                                   | Remaining eligibility gates removed.                                                                                                                              | Feature parity with LLX.                         |
 
 LLX remains available as a **test oracle** (line breaks, metrics, positions) and
 as a user-selectable backend; it is never consulted by the GPU layout path.
@@ -258,17 +258,36 @@ in px (f32 bits, excluding hanging spaces), `w` source scalar index of the first
 record (reserved for step-3 queries). Line `l` of physical slot `s` is at
 `s * capacity + l`. Lines ≤ max(1, records) ≤ capacity, so this never overflows.
 
+The same `lines` storage binding also holds persistent per-record tables after
+the `pool * capacity` line records. Record `i` of physical slot `s` uses two
+`vec4u` at `pool * capacity + 2 * (s * capacity + i)`:
+
+- A: `(startX, startY, visibleBefore, contentEnd)`; signed sums use i32 bitcasts.
+- B: `(lineIndex, nextNW, firstEvent, next)`; B.x is `prevBreak` until the final
+  measurement phase replaces it with the record's line index.
+
+Allocate/check `max(1, pool) * capacity * 48` bytes instead of 16 bytes per slot
+record: **+32 * max(1, pool) * capacity bytes**, three times the previous lines
+allocation. Tables for clean slots persist across edits, just like their lines.
+Only active records' A and B.x are placement inputs.
+
 ## Pipeline Configuration
 
 Three compute entry points in one WGSL module, each with the same 8 storage
 bindings (`input`, `shaped`, `slots`, `instances`, `indirect`, `status`,
 `info`, `lines`) to stay within the default 8-storage-buffers-per-stage limit:
 
-1. `measure` — workgroup 64, one invocation per dirty slot or logical paragraph;
+1. `measure` — workgroup 256, one workgroup per dirty slot or logical paragraph;
    disabled when measurement is unnecessary (zero direct dimensions).
 2. `prefix` — one workgroup of 256 lanes.
-3. `place` — workgroup 64, one invocation per paragraph.
+3. `place` — workgroup 256, one workgroup per display paragraph, lanes stride records.
    Disabled for an empty document; prefix still resets all indirect/status words.
+
+Measure/place dispatch `count` workgroups, using `(min(count, limit),
+ceil(count / limit), 1)` when needed, with linear paragraph index
+`workgroup.x + workgroup.y * numWorkgroups.x`. Bounds retain the previously
+supported logical paragraph count (`ceil(N/64) <= limit`) and also check the
+new two-dimensional dispatches.
 
 Dispatch order inside the pack task: [stitch] → measure → prefix → place.
 
@@ -278,8 +297,9 @@ Dispatch order inside the pack task: [stitch] → measure → prefix → place.
 mode 1 selects `order[i]` for `i < N`. Read that slot's shaped header; validate status, count ≤ capacity,
 glyph < glyphCount, slot ≠ MISSING (same codes as the default pack: 1
 unsupported lookup, 2 capacity, 3 missing slot) and count visible slots. On
-failure write `info[p] = (0, status, 1, 0)`. Otherwise run rules 1–4 in one
-sequential pass:
+failure write `info[p] = (0, status, 1, 0)`. The following serial pseudo-code
+remains the **normative reference semantics** (also the negative-x-advance
+fallback, executed verbatim by lane 0):
 
 ```
 lineStart = 0; startPos = 0; pos = 0; contentEnd = 0
@@ -306,6 +326,56 @@ emit(lineStart, count - lineStart, contentEnd - startPos)
 
 `emit` writes a line record with width `max(0, f32(w) * scale)`.
 
+**Parallel measure:** each lane owns a contiguous block of
+`span = ceil(count/256)` records. Validate glyph/slot indices in parallel, count
+visible slots, and detect any negative x advance with workgroup atomics.
+Header failure takes precedence, then count overflow (2), then missing glyph/slot
+(3). Lane 0 publishes failure info; uniform workgroup loads guard all returns.
+Blocked scans use local accumulation, a 256-lane Hillis–Steele summary scan,
+then local application. Workgroup and storage barriers separate producer and
+consumer phases:
+
+1. Exclusive i32 sums `startX[i]`, `startY[i]`, and u32 `visibleBefore[i]`.
+2. Forward last-value scans: `contentEnd[i] = end(k)` for the last non-space
+   `k <= i` (0 if none); `prevBreak[i]` is the last break opportunity `j <= i`
+   (NONE if none). `end(i) = startX[i] + xAdvance[i]`.
+   `breakOpp(j)` means `j+1 < count`, increasing clusters and BREAK_AFTER on
+   `cluster[j+1]-1`.
+3. Reverse min scans: `nextNW[i]` is the first non-space `k >= i`, else NONE;
+   `nextNW[count] = NONE`. `emergency(i)` means `i >= 1`, non-space, a different
+   cluster than `i-1`, and no NO_BREAK_BEFORE.
+   `selfEvent(i)` is `i` if emergency, otherwise `nextNW[i+1]` if breakOpp,
+   otherwise NONE. `firstEvent[i] = min(selfEvent(k), k >= i)`.
+4. Parallel candidate-start search: only `s == 0 || breakOpp(s-1) ||
+emergency(s)` can start a line. For each candidate compute:
+
+    ```
+    i0 = first i in (s, count) with !(f32(end(i) - startX[s]) * scale <= maxWidth)
+         // binary search on non-decreasing end(i)
+    if none: next(s) = FINAL
+    else i = nextNW[i0]
+    if i == NONE: next(s) = FINAL
+    else if prevBreak[i-1] != NONE && prevBreak[i-1] >= s:
+      next(s) = prevBreak[i-1] + 1
+    else:
+      k = firstEvent[i]
+      if k == NONE: next(s) = FINAL
+      else if prevBreak[k-1] != NONE && prevBreak[k-1] >= s:
+        next(s) = prevBreak[k-1] + 1
+      else next(s) = k
+    ```
+
+5. Lane 0 follows `0 -> next(0) -> ...`, emitting `[s,next)` with width
+   `contentEnd[next-1] - startX[s]`, or final `[s,count)` with width
+   `contentEnd[count-1] - startX[s]`. Empty paragraphs emit one empty line.
+   `contentEnd` is global and never reset at line starts. For nonnegative
+   advances this orbit is exactly the normative greedy walk: skipped records
+   after a normal break are either whitespace or non-overflowing and contain no
+   later break opportunity. A negative advance (or signed prefix overflow,
+   which also invalidates monotonicity) selects the serial fallback instead.
+6. Publish slot info, then lanes binary-search emitted line starts and replace
+   B.x with each record's line index. A and B.x are filled even on fallback.
+
 **prefix:** read `info[order[p]]`; exclusive scans of visible counts (instance bases) and line counts
 (global line bases) using a 256-lane span scan; the lowest failing paragraph's
 status is written to `status[0]`; `indirect = [6, total visible or 0, 0, 0]`.
@@ -313,9 +383,12 @@ Write bases to `info[pool+p]`, not persistent slot info. Failure selection and
 overflow precedence use logical order, including cached clean failures.
 
 **place(p):** if `status[0] != 0` return. Select `s = order[p]` and logical
-bases at `info[pool+p]`. Walk slot `s`'s lines and shaped records, keeping a
-running pen `(penX, penY)` in font units across the whole paragraph. At each
-line start, `lineX = penX`; for each visible record:
+bases at `info[pool+p]`. Lanes stride shaped records. Record `i` selects line
+`l = B[s,i].x`, loads its line record and `lineX = A[s,line.first].startX`.
+For every visible glyph, write instance `paragraph.instanceBase +
+A[s,i].visibleBefore` directly. The normative serial placement sequence below
+is unchanged mathematically: `penX = A[s,i].startX`, `penY = A[s,i].startY`,
+both global across lines, and alignment uses the same line width:
 
 ```
 baseline = fma(f32(globalLine), lineHeight, f32(p) * paragraphSpacing)
@@ -392,6 +465,13 @@ nearest Lite analogue but has different whitespace semantics.
   spacing, and alternation with `updateComputeTextData`. Updates read back only
   the 4-byte status.
 - **Build:** a resident-only bundle must not contain the layout kernels.
+- **Parallel native:** retain the pre-parallel measure/place WGSL only as a test
+  fixture. Compare complete reserved line ranges, info, instance bytes, indirect
+  and status for fixed-seed records at 0/1/256/257/2049/4097 lengths, small/large/
+  infinite widths, all alignments, space/break/protected flags, repeated clusters,
+  empty glyph slots, y advances, negative x and signed-prefix overflow. Exercise
+  2D-linearized workgroups, permuted order, clean-table reuse, dirty remeasurement,
+  width remeasurement and failure recovery. Unit bounds include the extra tables.
 - **Incremental unit:** positional prefix/suffix diff (duplicates, empty,
   replace-all, split/merge), first-fit contiguous slots, fragmentation fallback,
   pool sizing and snapshot invalidation decisions.
