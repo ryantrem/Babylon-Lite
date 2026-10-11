@@ -52,6 +52,23 @@ describe("compute text shaper tree shaking", () => {
     const computeOnly = /\/text\/(compute-|font-parser\/|unicode-script-data)|\/text\/_gpu\/compute-/;
     const cpuOnly = /\/vendor\/text-shaper|\/text\/(font|layout|glyph-extraction|default-text-data|text-data|text-data-state|text-layer-cpu)\.js$|\/_gpu\/text-style-gpu\.js$/;
 
+    it("retains paragraph layout only for the opt-in root consumer", async () => {
+        const entrySource =
+            `import { updateComputeTextParagraphs, getComputeFontLineMetrics } from ${JSON.stringify(LIB_ENTRY)};\n` +
+            "console.log(updateComputeTextParagraphs, getComputeFontLineMetrics);\n";
+        for (const result of [await runRollup({ entrySource, format: "es", minify: false }), await runVite(entrySource)]) {
+            expect(result.errors).toEqual([]);
+            const ids = result.modules!.map((module) => module.id);
+            expect(ids.some((id) => id.endsWith("/text/compute-text-paragraphs.js"))).toBe(true);
+            expect(ids.some((id) => id.endsWith("/text/_gpu/compute-text-paragraph-layout.js"))).toBe(true);
+            expect(result.code).toContain("fn measure(");
+            expect(result.code).toContain("fn prefix(");
+            expect(result.code).toContain("fn place(");
+            expect(result.code).toContain("fma(");
+            expect(ids.filter((id) => cpuOnly.test(id))).toEqual([]);
+        }
+    });
+
     it("does not pull CPU palette synchronization into the resident factories", async () => {
         const entrySource =
             `import { createComputeTextData, createComputeTextLayer } from ${JSON.stringify(LIB_ENTRY)};\n` + "console.log(createComputeTextData, createComputeTextLayer);\n";
@@ -116,6 +133,8 @@ describe("compute text shaper tree shaking", () => {
                 expect(kernel.renderedExports).not.toContain("COMPUTE_TEXT_KERNEL_SOURCE");
                 expect(kernel.renderedExports).not.toContain("executeComputeTextShape");
                 expect(ids.some((id) => /compute-text-(reference|shaper|placement)\.js$/.test(id))).toBe(false);
+                expect(ids.some((id) => /compute-text-paragraph(s|-layout)\.js$/.test(id))).toBe(false);
+                expect(result.code).not.toContain("fn measure(");
                 expect(result.code).toContain("drawIndirect");
                 expect(result.code).not.toContain("createEmptyTextData");
                 expect(result.code).not.toContain("ensureStyleGpu");
@@ -149,6 +168,8 @@ describe("compute text shaper tree shaking", () => {
             }
             if (name === "resident") {
                 expect(viteIds.filter((id) => cpuOnly.test(id))).toEqual([]);
+                expect(viteIds.some((id) => /compute-text-paragraph(s|-layout)\.js$/.test(id))).toBe(false);
+                expect(vite.code).not.toContain("fn measure(");
                 expect(vite.code).not.toMatch(/function (packGlyphAtSlot|executeComputeTextShape|shapeComputeText)\(/);
             } else if (name !== "combined") {
                 expect(viteIds.filter((id) => computeOnly.test(id))).toEqual([]);
@@ -163,6 +184,8 @@ describe("compute text shaper tree shaking", () => {
             if (name === "resident") {
                 expect(minifiedIds.filter((id) => cpuOnly.test(id))).toEqual([]);
                 expect(minifiedIds.some((id) => /compute-text-(reference|shaper|placement)\.js$/.test(id))).toBe(false);
+                expect(minifiedIds.some((id) => /compute-text-paragraph(s|-layout)\.js$/.test(id))).toBe(false);
+                expect(minified.code).not.toContain("fn measure(");
             } else if (name !== "combined") {
                 expect(minifiedIds.filter((id) => computeOnly.test(id) || /compute-text-layer\.js$/.test(id))).toEqual([]);
             }

@@ -2293,6 +2293,27 @@ synchronization.
 
 `createComputeTextData` / `updateComputeTextData` / `disposeComputeTextData` / `createComputeTextLayer` are a sibling of `shapeComputeText`. They do not return positions and do not build `PlacedGlyph[]`. The caller owns the `GlyphStorage` and passes it in, so several blocks share one atlas. Each block keeps its own instance and indirect buffers. Disposing a block does not dispose that storage. Different fonts in one storage use different curve-set ids. One block has one base style. The shape kernel writes the shaped-record buffer; a following pack kernel writes the 12-byte instance buffer and the 16-byte indirect args (`6`, instance count, `0`, `0`). Positions are pixels (`fontSizePx / unitsPerEm`) on a Y-up baseline at `(0, 0)`. RTL is reversed once, in the shape kernel. A missing atlas slot, overflow, or unsupported lookup zeros the indirect instance count and writes a nonzero status. JavaScript reads that 4-byte status and nothing else. Outlines come from a cmap-seeded closure plus transitive selected GSUB outputs and outline components, installed before dispatch. Atlas slots are append-only; adapters detect replacement resources before replay. Device loss and dispose drop pending work and prevent replay. There is no external draw override on CPU layers.
 
+`createComputeTextData(engine, font, storage, curveSet, options?)` accepts
+`options.defaultColor?: readonly [number, number, number, number]` alongside
+`fontSizePx`. This is the block's base linear RGBA in `[0, 1]`, matching
+`GlyphRun.defaultColor`; omission preserves opaque white. Validate exactly four
+finite channels in range before allocating any GPU resources. Copy the channels
+into the first four floats of the existing eight-float style record, without
+premultiplication; font scale and reserved floats are unchanged. Caller mutation
+of the supplied tuple cannot change the uploaded style. Layer opacity still
+multiplies the base alpha. The color is fixed for the block's lifetime; this adds
+neither per-run styling nor a palette-update API.
+
+`updateComputeTextParagraphs(data, paragraphs, layout)` is the opt-in
+[GPU paragraph layout](compute-text-paragraph-layout.md) sibling of
+`updateComputeTextData`: LTR paragraphs wrap at shaping-safe ASCII spaces (with
+emergency cluster breaks and hanging trailing spaces), align left/center/right,
+and use font line metrics or a custom line height plus paragraph spacing.
+`getComputeFontLineMetrics` reads scaled hhea metrics without GPU work. Layout
+and placement remain GPU-resident with only the existing four-byte status read;
+plain updates do not retain the layout kernels. The same block can alternate
+between plain and paragraph updates.
+
 ### Resident fixed-overhead contract (2026-10-09)
 
 This optimization changes neither the admission/error contract nor any shaped,
@@ -2493,8 +2514,22 @@ Eligibility requires LTR, a mapped space, known rule modes, all GSUB context
 dependencies present, at most one expanding multiple-substitution lookup, and a
 space substitution/multiple closure B* entirely in GDEF class 0. No ligature tail
 may accept B*. Producer indexing by glyph predicates plus a class-producer list
-computes substitution/multiple/ligature closures and a monotone nominal-span
-fixpoint. Span must converge with maximum S≤8 (individual spans capped at 64);
+computes substitution/multiple/ligature closures. Nominal spans are bounded
+separately in GSUB root application order (`program.rootOrder`, not the appended
+dependency list). Each root rule reads pre-root spans: a ligature sums input
+predicate maxima, while single/multiple outputs inherit the input maximum.
+Class predicates inspect matching glyph spans, including class-0 defaults.
+Rules in the same lookup never consume that lookup's own outputs. Each context
+rule composes its nested lookups in record order at that root, not at a separate
+dependency pass; a nested lookup that is also a root still runs at its later
+root position. Because non-leading targets can be revisited by overlapping
+context matches, span-preserving nested substitutions are closed within the
+context root. That closure only transfers existing bounds and terminates.
+Nested ligatures, cardinality-changing multiple substitutions, or deeper
+contexts fail closed: repeated child applications within one root can consume
+prior child outputs, so a once-per-root span bound does not prove them safe.
+The compiler currently emits executable contexts only for depth-1 singles.
+The maximum S must be ≤8 (individual spans capped at 64);
 maximum crossing distance d must satisfy d·S≤64; at most 4096 crossings are allowed.
 
 For each non-mark-attachment rule window `[reverse(backtrack), input, lookahead]`,
@@ -2515,7 +2550,10 @@ reading across a cut must include a B*-derived glyph in its rule window. The d-t
 live glyph is conservatively represented within d·S non-free nominal positions;
 free glyphs cover skipped glyphs and ligature-interior leftovers. Absence of a
 fully possible crossing therefore proves independence by induction over GSUB
-compaction and GPOS. A right-side first live non-mark prevents attachment across
+compaction and GPOS. S is itself proved by induction over ordered GSUB roots,
+using pre-pass spans and the span-preserving context closure described above;
+decompose/recompose cycles across different roots are finite, not a global
+span fixpoint. A right-side first live non-mark prevents attachment across
 the space. Rejects are local because crossing rejects cannot match. With only
 one expanding lookup, `length·maxExpansion` bounds both whole and segment outputs.
 Successful stitched headers 0–1 and every six-word record, including clusters,

@@ -393,6 +393,17 @@ export interface ResidentTextBuffers {
     readonly status: StorageBuffer;
 }
 
+/** @internal Replaces the default pack dispatches; runs after shaping and stitching in the same task. */
+export interface ResidentPackStage {
+    /** Bumped whenever the stage's bound resources change, forcing a pack-task rebuild. */
+    readonly version: number;
+    /** Size and upload stage resources before scheduling. */
+    prepare(engine: EngineContext, runCount: number, capacity: number): void;
+    /** Create dispatches bound to the current resident buffers. */
+    dispatches(buffers: ResidentTextBuffers): ComputeDispatch[];
+    release(): void;
+}
+
 interface ResidentShaders {
     readonly device: GPUDevice;
     readonly statusBuffers: GPUBuffer[];
@@ -431,6 +442,9 @@ interface ResidentShaders {
     packCountDispatch?: ComputeDispatch;
     packDispatch?: ComputeDispatch;
     buffers?: ResidentTextBuffers;
+    stage?: ResidentPackStage;
+    boundStage?: ResidentPackStage;
+    boundStageVersion?: number;
 }
 
 let shadersByToken: WeakMap<object, ResidentShaders> | null = null;
@@ -447,7 +461,8 @@ export async function executeResidentComputeText(
     unitsPerEm: number,
     glyphCount: number,
     assertLive: () => void,
-    segments?: ComputeTextSegments | null
+    segments?: ComputeTextSegments | null,
+    stage?: ResidentPackStage
 ): Promise<{ readonly status: Promise<number> }> {
     assertLive();
     const shapeCapacity = segments?.capacity ?? capacity;
@@ -470,20 +485,29 @@ export async function executeResidentComputeText(
     if (segments) {
         ensureSegmentBuffers(shaders, engine, segments, runCount, capacity);
     }
-    if (shaders.packOffsets.byteLength < Math.max(8, runCount * 8)) {
+    if (!stage && shaders.packOffsets.byteLength < Math.max(8, runCount * 8)) {
         shaders.packTask?.dispose();
         shaders.packTask = undefined;
         shaders.packOffsets = grow(engine, shaders.packOffsets, Math.max(8, runCount * 8), { label: "compute-text-pack-offsets", writable: true });
     }
-    ensureSchedules(shaders, engine, buffers, runCount, capacity, !!segments);
+    if (stage) {
+        if (shaders.stage !== stage) {
+            shaders.stage?.release();
+        }
+        shaders.stage = stage;
+        stage.prepare(engine, runCount, capacity);
+    }
+    ensureSchedules(shaders, engine, buffers, runCount, capacity, !!segments, stage);
     if (segments) {
         setComputeDispatchSize(shaders.stitchDispatch!, { x: runCount });
     }
-    const packGroups = shaders.packMode === "wide" ? runCount : Math.max(1, Math.ceil(runCount / 64));
-    if (shaders.packCountDispatch) {
-        setComputeDispatchSize(shaders.packCountDispatch, { x: packGroups });
+    if (!stage) {
+        const packGroups = shaders.packMode === "wide" ? runCount : Math.max(1, Math.ceil(runCount / 64));
+        if (shaders.packCountDispatch) {
+            setComputeDispatchSize(shaders.packCountDispatch, { x: packGroups });
+        }
+        setComputeDispatchSize(shaders.packDispatch!, { x: shaders.packMode === "small" ? 1 : packGroups });
     }
-    setComputeDispatchSize(shaders.packDispatch!, { x: shaders.packMode === "small" ? 1 : packGroups });
     for (let index = 0; index < preparedGroups.length; index++) {
         const prepared = preparedGroups[index]!;
         const group = groups[index]!;
@@ -504,14 +528,16 @@ export async function executeResidentComputeText(
             submitComputeTasks([shaders.shapeTask!]);
         }
     }
-    const scale = fontSizePx / unitsPerEm;
-    const packParams = new Uint32Array(5);
-    packParams[0] = runCount;
-    packParams[1] = capacity;
-    packParams[2] = floatBits(scale);
-    packParams[3] = glyphCount;
-    packParams[4] = floatBits(fontSizePx);
-    updateStorageBuffer(engine, shaders.packParams, packParams);
+    if (!stage) {
+        const scale = fontSizePx / unitsPerEm;
+        const packParams = new Uint32Array(5);
+        packParams[0] = runCount;
+        packParams[1] = capacity;
+        packParams[2] = floatBits(scale);
+        packParams[3] = glyphCount;
+        packParams[4] = floatBits(fontSizePx);
+        updateStorageBuffer(engine, shaders.packParams, packParams);
+    }
     await prepareComputeTask(shaders.packTask!);
     assertLive();
     const tasks = preparedGroups.length > 0 && groups[groups.length - 1]!.runs.length > 0 ? [shaders.shapeTask!, shaders.packTask!] : [shaders.packTask!];
@@ -544,6 +570,7 @@ export function releaseResidentComputeText(token: object): void {
         return;
     }
     shaders.released = true;
+    shaders.stage?.release();
     for (const buffer of shaders.statusBuffers) {
         buffer.destroy();
     }
@@ -681,14 +708,23 @@ function ensureSegmentBuffers(shaders: ResidentShaders, engine: EngineContext, s
     updateStorageBuffer(engine, shaders.stitchParams!, Uint32Array.of(runCount, capacity, segments.capacity, 0));
 }
 
-function ensureSchedules(shaders: ResidentShaders, engine: EngineContext, buffers: ResidentTextBuffers, runCount: number, capacity: number, segmented: boolean): void {
+function ensureSchedules(
+    shaders: ResidentShaders,
+    engine: EngineContext,
+    buffers: ResidentTextBuffers,
+    runCount: number,
+    capacity: number,
+    segmented: boolean,
+    stage?: ResidentPackStage
+): void {
     const previous = shaders.buffers;
-    const mode =
-        capacity >= WIDE_PACK_MIN_CAPACITY && runCount > 0 && runCount <= engine._device.limits.maxComputeWorkgroupsPerDimension
-            ? "wide"
-            : runCount > COUNT_LANES
-              ? "parallel"
-              : "small";
+    const mode = stage
+        ? undefined
+        : capacity >= WIDE_PACK_MIN_CAPACITY && runCount > 0 && runCount <= engine._device.limits.maxComputeWorkgroupsPerDimension
+          ? "wide"
+          : runCount > COUNT_LANES
+            ? "parallel"
+            : "small";
     const shapeOutput = segmented ? shaders.segmentOutput! : buffers.shaped;
     if (!shaders.shapeTask || shaders.boundShapeOutput !== shapeOutput) {
         shaders.shapeTask?.dispose();
@@ -709,6 +745,8 @@ function ensureSchedules(shaders: ResidentShaders, engine: EngineContext, buffer
     if (
         !shaders.packTask ||
         shaders.packMode !== mode ||
+        shaders.boundStage !== stage ||
+        shaders.boundStageVersion !== stage?.version ||
         shaders.segmented !== segmented ||
         (segmented &&
             (shaders.boundSegmentOutput !== shaders.segmentOutput || shaders.boundSegmentTable !== shaders.segmentTable || shaders.boundStitchParams !== shaders.stitchParams)) ||
@@ -719,9 +757,6 @@ function ensureSchedules(shaders: ResidentShaders, engine: EngineContext, buffer
         previous?.status !== buffers.status
     ) {
         shaders.packTask?.dispose();
-        const resources = { params: shaders.packParams, ...buffers, offsets: shaders.packOffsets };
-        const pack = mode === "wide" ? shaders.placeWide : mode === "parallel" ? shaders.pack : shaders.small;
-        const bindings = createComputeBindingSet(pack, resources);
         shaders.packTask = createComputeTask(engine, "compute-text-resident-pack");
         shaders.stitchDispatch = undefined;
         if (segmented) {
@@ -735,14 +770,24 @@ function ensureSchedules(shaders: ResidentShaders, engine: EngineContext, buffer
         }
         shaders.packMode = mode;
         shaders.packCountDispatch = undefined;
-        shaders.packDispatch = createComputeDispatch(pack, bindings, { size: { x: 1 } });
-        if (mode !== "small") {
-            const count = mode === "wide" ? shaders.countWide : shaders.countParallel;
-            shaders.packCountDispatch = createComputeDispatch(count, createComputeBindingSet(count, resources), { size: { x: 1 } });
-            addComputeDispatch(shaders.packTask, shaders.packCountDispatch);
-            addComputeDispatch(shaders.packTask, createComputeDispatch(shaders.prefix, createComputeBindingSet(shaders.prefix, resources), { size: { x: 1 } }));
+        shaders.boundStage = stage;
+        shaders.boundStageVersion = stage?.version;
+        if (stage) {
+            for (const dispatch of stage.dispatches(buffers)) {
+                addComputeDispatch(shaders.packTask, dispatch);
+            }
+        } else {
+            const resources = { params: shaders.packParams, ...buffers, offsets: shaders.packOffsets };
+            const pack = mode === "wide" ? shaders.placeWide : mode === "parallel" ? shaders.pack : shaders.small;
+            shaders.packDispatch = createComputeDispatch(pack, createComputeBindingSet(pack, resources), { size: { x: 1 } });
+            if (mode !== "small") {
+                const count = mode === "wide" ? shaders.countWide : shaders.countParallel;
+                shaders.packCountDispatch = createComputeDispatch(count, createComputeBindingSet(count, resources), { size: { x: 1 } });
+                addComputeDispatch(shaders.packTask, shaders.packCountDispatch);
+                addComputeDispatch(shaders.packTask, createComputeDispatch(shaders.prefix, createComputeBindingSet(shaders.prefix, resources), { size: { x: 1 } }));
+            }
+            addComputeDispatch(shaders.packTask, shaders.packDispatch);
         }
-        addComputeDispatch(shaders.packTask, shaders.packDispatch);
         shaders.packTask.record();
         shaders.segmented = segmented;
         shaders.boundSegmentOutput = shaders.segmentOutput;

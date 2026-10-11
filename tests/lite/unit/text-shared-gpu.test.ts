@@ -156,6 +156,38 @@ describe("neutral text state and GPU helpers", () => {
         expect(device.queue.writeBuffer).not.toHaveBeenCalled();
     });
 
+    it.each([
+        [0, 0, 0, 1],
+        [0.25, 0.5, 0.75, 0.5],
+        [0.25, 0.5, 0.75, 0],
+    ] as const)("uploads the selected resident linear RGBA (%s, %s, %s, %s) without premultiplication", (r, g, b, a) => {
+        const { surface, device } = mockSurface();
+        const color: [number, number, number, number] = [r, g, b, a];
+        const data = createComputeTextData(surface.engine, { glyphCount: 2, unitsPerEm: 1000 } as ComputeFont, storage(), "font", {
+            fontSizePx: 20,
+            defaultColor: color,
+        });
+        color.fill(1);
+        const upload = device.queue.writeBuffer.mock.calls.find(([buffer]) => buffer === data._style)!;
+        expect(upload[1]).toBe(0);
+        expect(upload[4]).toBe(TEXT_STYLE_BYTES);
+        expect(new Float32Array(upload[2] as ArrayBuffer)).toEqual(new Float32Array([r, g, b, a, 50, 0, 0, 0]));
+        disposeComputeTextData(data);
+    });
+
+    it.each(
+        [null, "black", [], Array(4), [0, 0, 0], [0, 0, 0, 1, 1], [-0.1, 0, 0, 1], [0, 0, 0, 1.1], [0, NaN, 0, 1], [0, 0, Infinity, 1], [0, 0, 0, "1"]].map((defaultColor) => ({
+            defaultColor,
+        }))
+    )("rejects malformed resident colors before allocating or uploading resources: $defaultColor", ({ defaultColor }) => {
+        const { surface, device } = mockSurface();
+        expect(() => Reflect.apply(createComputeTextData, undefined, [surface.engine, { glyphCount: 2, unitsPerEm: 1000 }, storage(), "font", { defaultColor }])).toThrow(
+            /defaultColor must contain four finite RGBA channels in \[0, 1\]/
+        );
+        expect(device.createBuffer).not.toHaveBeenCalled();
+        expect(device.queue.writeBuffer).not.toHaveBeenCalled();
+    });
+
     it("shares allocation/bindings in CPU and resident draws while preserving cached bundles and atlas ownership", () => {
         const { surface, device, encoder } = mockSurface();
         const atlas = storage();

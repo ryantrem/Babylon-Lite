@@ -8,8 +8,10 @@ import {
     COMPUTE_RULE_MODE_MULTIPLE,
     COMPUTE_RULE_MODE_MARK_BASE,
     COMPUTE_RULE_MODE_LIGATURE,
+    COMPUTE_RULE_MODE_CONTEXT,
+    COMPUTE_RULE_MODE_SUBSTITUTE,
 } from "../../../packages/babylon-lite/src/text/compute-text-program";
-import type { ComputeGlyphPredicate, ComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
+import type { ComputeGlyphPredicate, ComputeProgramLookup, ComputeProgramRule, ComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 import {
     analyzeComputeTextSegmentation,
@@ -59,6 +61,31 @@ function group(p: ComputeTextProgram, texts: readonly string[], outputRun = 0): 
 
 function predicate(...ids: number[]): ComputeGlyphPredicate {
     return { kind: "glyphs", ids, classId: 0, classDef: null, coverage: null };
+}
+
+function orderedProgram(roots: readonly (readonly ComputeProgramRule[])[], dependencies: readonly (readonly ComputeProgramRule[])[] = []): ComputeTextProgram {
+    const p = program();
+    const lookups: ComputeProgramLookup[] = [...roots, ...dependencies].map((rules, lookupIndex) => ({
+        ...p.lookups[0]!,
+        table: "GSUB",
+        lookupIndex,
+        rules,
+    }));
+    return {
+        ...p,
+        plan: { ...p.plan, _gsubRoots: roots.map((_rules, index) => index), _gsubDependencies: dependencies.map((_rules, index) => roots.length + index), _gposRoots: [] },
+        lookups,
+        rootOrder: roots.map((_rules, index) => index),
+        maxDependencyDepth: dependencies.length ? 1 : 0,
+    };
+}
+
+function substitution(input: ComputeGlyphPredicate, output: number): ComputeProgramRule {
+    return { input: [input], backtrack: [], lookahead: [], mode: COMPUTE_RULE_MODE_SUBSTITUTE, action: { kind: "substitute", glyphs: [output] } };
+}
+
+function ligature(input: number[], output: number): ComputeProgramRule {
+    return { input: input.map((g) => predicate(g)), backtrack: [], lookahead: [], mode: COMPUTE_RULE_MODE_LIGATURE, action: { kind: "ligature", components: [], glyph: output } };
 }
 
 describe("safe logical-run segmentation", () => {
@@ -189,6 +216,79 @@ describe("safe logical-run segmentation", () => {
             rules: [{ input: [predicate(100)], backtrack: [], lookahead: [], mode: COMPUTE_RULE_MODE_MULTIPLE, action: { kind: "multiple" as const, glyphs: [101, 102] } }],
         };
         expect(analyzeComputeTextSegmentation({ ...real, lookups: [expand, { ...expand, lookupIndex: 999 }] })).toBeNull();
+    });
+
+    it("bounds ordered multiple-to-ligature decompose/recompose cycles without re-consuming lookup outputs", () => {
+        const decompose: ComputeProgramRule = {
+            input: [predicate(103)],
+            backtrack: [],
+            lookahead: [],
+            mode: COMPUTE_RULE_MODE_MULTIPLE,
+            action: { kind: "multiple", glyphs: [100, 101] },
+        };
+        const recompose = [ligature([100, 100], 102), ligature([100, 101], 103), ligature([103, 101], 104)];
+        const p = orderedProgram([[decompose], recompose]);
+        const a = analyzeComputeTextSegmentation(p);
+        expect(a).not.toBeNull();
+        expect(a!.span).toBe(2);
+        expect(a!.safeAfter(glyphs(p, "Plain Latin paragraph."), 5)).toBe(true);
+        expect(analyzeComputeTextSegmentation(orderedProgram([recompose, [decompose], [ligature([100, 101], 103)]]))!.span).toBe(4);
+    });
+
+    it("propagates ordered spans through class substitutions", () => {
+        const cls: ComputeGlyphPredicate = {
+            kind: "class",
+            ids: [],
+            classId: 1,
+            classDef: { format: 1, startGlyphId: 103, classes: Uint16Array.of(1), ranges: [] },
+            coverage: null,
+        };
+        const p = orderedProgram([[ligature([100, 101], 103)], [substitution(cls, 104)], [ligature([104, 101], 105)]]);
+        expect(analyzeComputeTextSegmentation(p)!.span).toBe(3);
+    });
+
+    it("composes nested records at the context root, including a dependency that is also a later root", () => {
+        const context: ComputeProgramRule = {
+            input: [predicate(103)],
+            backtrack: [],
+            lookahead: [],
+            mode: COMPUTE_RULE_MODE_CONTEXT,
+            action: {
+                kind: "context",
+                lookups: [
+                    { sequenceIndex: 0, lookupIndex: 2 },
+                    { sequenceIndex: 0, lookupIndex: 4 },
+                ],
+            },
+        };
+        const p = orderedProgram([[ligature([100, 101], 103)], [context], [substitution(predicate(103), 104)], [ligature([105, 101], 106)]], [[substitution(predicate(104), 105)]]);
+        expect(analyzeComputeTextSegmentation(p)!.span).toBe(3);
+    });
+
+    it("closes span-preserving nested substitutions across overlapping context matches", () => {
+        const context = (input: number, child: number): ComputeProgramRule => ({
+            input: [predicate(100), predicate(input)],
+            backtrack: [],
+            lookahead: [],
+            mode: COMPUTE_RULE_MODE_CONTEXT,
+            action: { kind: "context", lookups: [{ sequenceIndex: 1, lookupIndex: child }] },
+        });
+        const p = orderedProgram(
+            [[ligature([100, 101], 103)], [context(104, 4), context(103, 3)], [ligature([105, 101], 106)]],
+            [[substitution(predicate(103), 104)], [substitution(predicate(104), 105)]]
+        );
+        expect(analyzeComputeTextSegmentation(p)!.span).toBe(3);
+    });
+
+    it("rejects span-growing nested lookups whose outputs can be re-consumed by overlapping contexts", () => {
+        const context: ComputeProgramRule = {
+            input: [predicate(100), predicate(103)],
+            backtrack: [],
+            lookahead: [],
+            mode: COMPUTE_RULE_MODE_CONTEXT,
+            action: { kind: "context", lookups: [{ sequenceIndex: 1, lookupIndex: 1 }] },
+        };
+        expect(analyzeComputeTextSegmentation(orderedProgram([[context]], [[ligature([103, 101], 103)]]))).toBeNull();
     });
 
     it("rejects unknown modes, missing nested dependencies and space ligature tails", () => {

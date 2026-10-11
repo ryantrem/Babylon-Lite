@@ -1173,12 +1173,14 @@ export {
 // ─── Text ────────────────────────────────────────────────────────────
 export type { Font } from "./text/font.js";
 export { loadFont, createFontFromBuffer } from "./text/font.js";
-export type { ComputeFont } from "./text/compute-font.js";
-export { createComputeFontFromBuffer, loadComputeFont } from "./text/compute-font.js";
+export type { ComputeFont, ComputeFontLineMetrics } from "./text/compute-font.js";
+export { createComputeFontFromBuffer, loadComputeFont, getComputeFontLineMetrics } from "./text/compute-font.js";
 export type { ComputeTextGlyph } from "./text/compute-text-shaper.js";
 export { shapeComputeText } from "./text/compute-text-shaper.js";
 export type { ComputeTextData, ComputeTextUpdate } from "./text/compute-text-data.js";
 export { createComputeTextData, updateComputeTextData, disposeComputeTextData } from "./text/compute-text-data.js";
+export type { ComputeTextParagraphLayout } from "./text/compute-text-paragraphs.js";
+export { updateComputeTextParagraphs } from "./text/compute-text-paragraphs.js";
 export type { ComputeTextLayer } from "./text/compute-text-layer.js";
 export { createComputeTextLayer } from "./text/compute-text-layer.js";
 export { extractGlyphCurves, cubicToQuadratics } from "./text/glyph-extraction.js";

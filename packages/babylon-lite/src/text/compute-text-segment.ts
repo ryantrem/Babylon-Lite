@@ -3,9 +3,12 @@
  * B* stays class 0, never skipped/deleted or consumed as a ligature tail. Every
  * cross-boundary lookup therefore has a B*-accepting window. Closures and the
  * d*S non-free nominal range overapproximate every slot, including skipped and
- * ligature-interior glyphs. Excluding all such windows proves independence by
- * induction over lookups. A non-mark first right glyph prevents cross-space
- * attachment; rejection stays local and one expanding lookup bounds overflow.
+ * ligature-interior glyphs. S bounds spans by induction over ordered GSUB roots:
+ * each pass reads pre-pass spans, never its own outputs. Nested records compose
+ * in order at their context root; span-preserving closure covers overlapping
+ * contexts. Excluding all such windows then proves independence by induction
+ * over lookups. A non-mark first right glyph prevents cross-space attachment;
+ * rejection stays local and one expanding lookup bounds overflow.
  */
 
 import { ensureComputeFontLayout, mapComputeFontScalars } from "./compute-font.js";
@@ -236,17 +239,15 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     if ((gdef && bStar.some((g) => cls(g) !== 0)) || ligatures.some((r) => r.input.slice(1).some((p) => bStar.some((g) => matches(p, g))))) {
         return null;
     }
-    const spans = new Map<number, number>();
-    const pending = [...ligatures];
-    const queued = new Set(pending);
-    const sourceSpan = (p: ComputeGlyphPredicate) => {
+    let spans = new Map<number, number>();
+    const sourceSpan = (p: ComputeGlyphPredicate, before: ReadonlyMap<number, number>) => {
         let value = 1;
         if (p.kind === "glyphs") {
             for (const g of p.ids) {
-                value = Math.max(value, spans.get(g) ?? 1);
+                value = Math.max(value, before.get(g) ?? 1);
             }
         } else {
-            for (const [g, span] of spans) {
+            for (const [g, span] of before) {
                 if (span > value && matches(p, g)) {
                     value = span;
                 }
@@ -254,29 +255,82 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
         }
         return value;
     };
-    const enqueue = (r: ComputeProgramRule, g: number) => {
-        if (!queued.has(r) && accepts(r, g, true)) {
-            queued.add(r);
-            pending.push(r);
+    const mergeSpans = (into: Map<number, number>, from: ReadonlyMap<number, number>) => {
+        let changed = false;
+        for (const [g, value] of from) {
+            if (value > (into.get(g) ?? 1)) {
+                into.set(g, value);
+                changed = true;
+            }
         }
+        return changed;
     };
     let span = 1;
-    while (pending.length) {
-        const r = pending.pop()!;
-        queued.delete(r);
-        const value = r.action.kind === "ligature" ? r.input.reduce((v, p) => v + sourceSpan(p), 0) : sourceSpan(r.input[0]!);
-        if (value > 64) {
+    const applyRules = (rules: readonly ComputeProgramRule[], before: ReadonlyMap<number, number>, nested = false): Map<number, number> | null => {
+        const after = new Map(before);
+        for (const r of rules) {
+            if (r.action.kind === "context") {
+                if (nested) {
+                    return null;
+                }
+                let branch = new Map(before);
+                for (const record of r.action.lookups) {
+                    const child = program.lookups.find((l) => l.table === "GSUB" && l.lookupIndex === record.lookupIndex)!;
+                    const next = applyRules(child.rules, branch, true);
+                    if (!next) {
+                        return null;
+                    }
+                    branch = next;
+                }
+                mergeSpans(after, branch);
+                continue;
+            }
+            if (r.action.kind !== "ligature" && r.action.kind !== "substitute" && r.action.kind !== "multiple") {
+                continue;
+            }
+            // The supported depth-1 single children preserve spans. Growing
+            // children need a separate bound on repeated overlapping invocations.
+            if (nested && (r.action.kind === "ligature" || (r.action.kind === "multiple" && r.action.glyphs.length !== 1))) {
+                return null;
+            }
+            const value = r.action.kind === "ligature" ? r.input.reduce((v, p) => v + sourceSpan(p, before), 0) : sourceSpan(r.input[0]!, before);
+            if (value > 64) {
+                return null;
+            }
+            for (const g of outputs(r)) {
+                if (value > (after.get(g) ?? 1)) {
+                    after.set(g, value);
+                    span = Math.max(span, value);
+                }
+            }
+        }
+        return after;
+    };
+    for (const index of program.rootOrder) {
+        const lookup = program.lookups[index];
+        if (!lookup) {
             return null;
         }
-        for (const g of outputs(r)) {
-            if (value > (spans.get(g) ?? 1)) {
-                spans.set(g, value);
-                span = Math.max(span, value);
-                for (const next of byGlyph.get(g) ?? []) {
-                    enqueue(next, g);
+        if (lookup.table !== "GSUB") {
+            continue;
+        }
+        const after = applyRules(lookup.rules, spans);
+        if (!after) {
+            return null;
+        }
+        spans = after;
+        const contexts = lookup.rules.filter((r) => r.action.kind === "context");
+        if (contexts.length) {
+            // Non-leading nested targets may be visited by later context matches
+            // in this same root pass. This finite closure only transfers spans;
+            // it cannot increase their maximum or revisit a ligature/multiple root.
+            for (;;) {
+                const next = applyRules(contexts, spans);
+                if (!next) {
+                    return null;
                 }
-                for (const next of classProducers) {
-                    enqueue(next, g);
+                if (!mergeSpans(spans, next)) {
+                    break;
                 }
             }
         }

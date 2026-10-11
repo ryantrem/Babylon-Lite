@@ -18,7 +18,7 @@ import { ensureSharedAtlasGpu } from "./_gpu/text-textures.js";
 import { createStyleBuffer } from "./_gpu/text-style-buffer.js";
 import { COMPUTE_TEXT_HEADER_WORDS, COMPUTE_TEXT_RECORD_WORDS, computeTextShapeCapacity } from "./_gpu/compute-text-shape.js";
 import { executeResidentComputeText, releaseResidentComputeText, residentStatusMessage } from "./_gpu/compute-text-resident.js";
-import type { ResidentShapeGroup } from "./_gpu/compute-text-resident.js";
+import type { ResidentPackStage, ResidentShapeGroup } from "./_gpu/compute-text-resident.js";
 
 declare const computeTextDataBrand: unique symbol;
 
@@ -87,7 +87,11 @@ export function createComputeTextData(
     font: ComputeFont,
     storage: GlyphStorage,
     curveSet: CurveSetId,
-    options?: { readonly fontSizePx?: number }
+    options?: {
+        readonly fontSizePx?: number;
+        /** Base linear RGBA in [0, 1], multiplied by layer opacity. Defaults to opaque white. */
+        readonly defaultColor?: readonly [number, number, number, number];
+    }
 ): ComputeTextData {
     if (!engine?._device) {
         throw new Error("createComputeTextData: engine has no device");
@@ -105,13 +109,17 @@ export function createComputeTextData(
     if (!Number.isFinite(fontSizePx) || fontSizePx <= 0) {
         throw new Error("createComputeTextData: fontSizePx must be a positive finite number");
     }
+    const defaultColor = options?.defaultColor;
+    if (
+        defaultColor !== undefined &&
+        (!Array.isArray(defaultColor) || defaultColor.length !== 4 || Array.from(defaultColor).some((channel) => !Number.isFinite(channel) || channel < 0 || channel > 1))
+    ) {
+        throw new Error("createComputeTextData: defaultColor must contain four finite RGBA channels in [0, 1]");
+    }
     const device = engine._device;
     const style = createStyleBuffer(device, TEXT_STYLE_BYTES, "compute-text-style");
     const styleWords = new Float32Array(TEXT_STYLE_FLOATS);
-    styleWords[0] = 1;
-    styleWords[1] = 1;
-    styleWords[2] = 1;
-    styleWords[3] = 1;
+    styleWords.set(defaultColor ?? [1, 1, 1, 1]);
     styleWords[4] = font.unitsPerEm / fontSizePx;
     device.queue.writeBuffer(style, 0, styleWords.buffer as ArrayBuffer, styleWords.byteOffset, styleWords.byteLength);
     const indirectWords = new Uint32Array([6, 0, 0, 0]);
@@ -153,6 +161,15 @@ export function createComputeTextData(
 
 /** Select, close, install outlines, and submit shape/pack/status copy. Render immediately; observe GPU errors through `completed`. */
 export async function updateComputeTextData(data: ComputeTextData, texts: readonly string[]): Promise<ComputeTextUpdate> {
+    return submitComputeTextData(data, texts);
+}
+
+/** @internal Shared submission. `createStage` validates the grouped runs before any atlas change and replaces default packing. */
+export function submitComputeTextData(
+    data: ComputeTextData,
+    texts: readonly string[],
+    createStage?: (groups: readonly ResidentShapeGroup[], capacity: number) => ResidentPackStage
+): Promise<ComputeTextUpdate> {
     assertReady(data);
     const generation = data._generation;
     const device = data._device;
@@ -177,78 +194,88 @@ export async function updateComputeTextData(data: ComputeTextData, texts: readon
         const segments = data._disableSegmentation
             ? null
             : segmentComputeTextRuns(groups, device.limits, { headerWords: COMPUTE_TEXT_HEADER_WORDS, recordWords: COMPUTE_TEXT_RECORD_WORDS });
-        let closure;
-        try {
-            closure = closeComputeTextGlyphs(
-                data._font,
-                groups.map((group) => group.plan),
-                [...seeds]
-            );
-        } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            throw new Error(`${message} (witness: ${snapshot.join(" | ") || "<empty>"})`, { cause: error });
-        }
-        installClosure(data, closure.glyphIds);
         const capacity = sharedCapacity(groups);
-        const runCount = prepared.length;
-        growDrawBuffers(data, runCount, capacity);
-        const submitted = await Promise.race([
-            executeResidentComputeText(
-                data,
-                data._engine,
-                segments?.groups ?? groups,
-                {
-                    shaped: data._shaped,
-                    instances: data._instances,
-                    indirect: data._indirect,
-                    slots: data._slots,
-                    status: data._statusBuffer,
-                },
-                capacity,
-                runCount,
-                data.fontSizePx,
-                data._font.unitsPerEm,
-                data._font.glyphCount,
-                () => assertCurrent(data, generation, device),
-                segments
-            ),
-            cancelled,
-        ]);
-        assertCurrent(data, generation, device);
-        let rejectCompletion!: (error: Error) => void;
-        const terminal = new Promise<never>((_, reject) => {
-            rejectCompletion = reject;
-        });
-        data._pendingCompletions.add(rejectCompletion);
-        const completed = Promise.race([submitted.status, terminal])
-            .then((status) => {
-                assertCompletionLive(data, device);
-                const failure = residentStatusMessage(status);
-                if (failure) {
-                    throw new Error(failure);
+        const stage = createStage?.(groups, capacity);
+        return (async () => {
+            try {
+                let closure;
+                try {
+                    closure = closeComputeTextGlyphs(
+                        data._font,
+                        groups.map((group) => group.plan),
+                        [...seeds]
+                    );
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    throw new Error(`${message} (witness: ${snapshot.join(" | ") || "<empty>"})`, { cause: error });
                 }
-            })
-            .catch((error: unknown) => {
-                assertCompletionLive(data, device);
+                installClosure(data, closure.glyphIds);
+                const runCount = prepared.length;
+                growDrawBuffers(data, runCount, capacity);
+                const submitted = await Promise.race([
+                    executeResidentComputeText(
+                        data,
+                        data._engine,
+                        segments?.groups ?? groups,
+                        {
+                            shaped: data._shaped,
+                            instances: data._instances,
+                            indirect: data._indirect,
+                            slots: data._slots,
+                            status: data._statusBuffer,
+                        },
+                        capacity,
+                        runCount,
+                        data.fontSizePx,
+                        data._font.unitsPerEm,
+                        data._font.glyphCount,
+                        () => assertCurrent(data, generation, device),
+                        segments,
+                        stage
+                    ),
+                    cancelled,
+                ]);
+                assertCurrent(data, generation, device);
+                let rejectCompletion!: (error: Error) => void;
+                const terminal = new Promise<never>((_, reject) => {
+                    rejectCompletion = reject;
+                });
+                data._pendingCompletions.add(rejectCompletion);
+                const completed = Promise.race([submitted.status, terminal])
+                    .then((status) => {
+                        assertCompletionLive(data, device);
+                        const failure = residentStatusMessage(status);
+                        if (failure) {
+                            throw new Error(failure);
+                        }
+                    })
+                    .catch((error: unknown) => {
+                        assertCompletionLive(data, device);
+                        throw error;
+                    })
+                    .finally(() => {
+                        data._pendingCompletions.delete(rejectCompletion);
+                    });
+                void completed.catch(() => undefined);
+                return { completed };
+            } catch (error) {
+                if (!data._dead && data._device === data._engine._device) {
+                    clearIndirect(data);
+                }
                 throw error;
-            })
-            .finally(() => {
-                data._pendingCompletions.delete(rejectCompletion);
-            });
-        void completed.catch(() => undefined);
-        return { completed };
+            } finally {
+                if (data._rejectPending === rejectPending) {
+                    data._rejectPending = null;
+                }
+                if (data.status === "busy") {
+                    setStatus(data, "ready");
+                }
+            }
+        })();
     } catch (error) {
-        if (!data._dead && data._device === data._engine._device) {
-            clearIndirect(data);
-        }
+        data._rejectPending = null;
+        setStatus(data, "ready");
         throw error;
-    } finally {
-        if (data._rejectPending === rejectPending) {
-            data._rejectPending = null;
-        }
-        if (data.status === "busy") {
-            setStatus(data, "ready");
-        }
     }
 }
 

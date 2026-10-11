@@ -170,6 +170,30 @@ export function readComputeFontAdvance(font: ComputeFont, glyphId: number): numb
     return font._advances[glyphId] ?? 0;
 }
 
+/** Font vertical metrics scaled to a pixel size. `descentPx` is positive below the baseline. */
+export interface ComputeFontLineMetrics {
+    readonly ascentPx: number;
+    readonly descentPx: number;
+    readonly lineGapPx: number;
+    /** `ascentPx + descentPx + lineGapPx`; the natural baseline-to-baseline distance. */
+    readonly lineHeightPx: number;
+}
+
+/** Read `hhea` ascender, descender and lineGap scaled to `fontSizePx`. Pure; no GPU work. */
+export function getComputeFontLineMetrics(font: ComputeFont, fontSizePx: number): ComputeFontLineMetrics {
+    if (!Number.isFinite(fontSizePx) || fontSizePx <= 0) {
+        throw new Error("getComputeFontLineMetrics: fontSizePx must be a positive finite number");
+    }
+    // Construction already checked that hhea is present, version 1 and at least 36 bytes.
+    const hhea = font._directory.tables.get("hhea")!;
+    const view = new DataView(font._bytes.buffer, font._bytes.byteOffset + hhea.offset, 10);
+    const scale = fontSizePx / font.unitsPerEm;
+    const ascentPx = view.getInt16(4) * scale;
+    const descentPx = -view.getInt16(6) * scale;
+    const lineGapPx = Math.max(0, view.getInt16(8)) * scale;
+    return { ascentPx, descentPx, lineGapPx, lineHeightPx: ascentPx + descentPx + lineGapPx };
+}
+
 /** Decode GDEF/GSUB/GPOS once. Optional tables may be absent; present tables must be well formed. */
 export function ensureComputeFontLayout(font: ComputeFont): ComputeFontLayout {
     if (font._layout) {
