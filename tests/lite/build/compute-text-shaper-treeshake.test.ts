@@ -42,6 +42,7 @@ describe("compute text shaper tree shaking", () => {
         expect(result.code).not.toContain(PARSER_ONLY);
         expect(result.code).not.toContain("function parseMarkLigature");
         expect(ids.some((id) => /compute-text-(program|shape|shaper)\.js$/.test(id))).toBe(false);
+        expect(ids.some((id) => id.endsWith("/compute/deferred-submit.js"))).toBe(false);
     });
 
     const common = ["createGlyphStorage", "createTextRenderer"];
@@ -60,6 +61,7 @@ describe("compute text shaper tree shaking", () => {
             expect(result.errors).toEqual([]);
             const ids = result.modules!.map((module) => module.id);
             expect(ids.some((id) => id.endsWith("/text/compute-text-paragraphs.js"))).toBe(true);
+            expect(ids.some((id) => id.endsWith("/compute/deferred-submit.js"))).toBe(true);
             expect(ids.some((id) => id.endsWith("/text/_gpu/compute-text-paragraph-layout.js"))).toBe(true);
             expect(result.code).toContain("fn measure(");
             expect(result.code).toContain("fn prefix(");
@@ -141,6 +143,7 @@ describe("compute text shaper tree shaking", () => {
                 expect(ids.some((id) => id.endsWith("/text/compute-text-layer.js"))).toBe(true);
             } else if (name !== "combined") {
                 expect(ids.filter((id) => computeOnly.test(id))).toEqual([]);
+                expect(ids.some((id) => id.endsWith("/compute/deferred-submit.js"))).toBe(false);
                 expect(result.code).not.toContain("fn advanceOf");
                 expect(result.code).not.toContain("fn pack");
                 expect(result.code).not.toContain(PARSER_ONLY);
@@ -173,6 +176,7 @@ describe("compute text shaper tree shaking", () => {
                 expect(vite.code).not.toMatch(/function (packGlyphAtSlot|executeComputeTextShape|shapeComputeText)\(/);
             } else if (name !== "combined") {
                 expect(viteIds.filter((id) => computeOnly.test(id))).toEqual([]);
+                expect(viteIds.some((id) => id.endsWith("/compute/deferred-submit.js"))).toBe(false);
                 expect(vite.code).not.toContain("fn advanceOf");
             }
             for (const helper of sharedGpu) {

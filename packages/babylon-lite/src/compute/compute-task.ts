@@ -187,6 +187,7 @@ export function submitComputeTasks(tasks: readonly ComputeTask[]): void {
     if (!engine) {
         return;
     }
+    engine._flushPendingWork?.(engine);
     const encoder = engine._device.createCommandEncoder({ label: "direct-compute-tasks" });
     recordComputeTasks(tasks, engine, encoder);
     engine._device.queue.submit([encoder.finish()]);

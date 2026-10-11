@@ -9,7 +9,7 @@ import { createComputeShader, disposeComputeShader } from "../../compute/compute
 import type { ComputeShader } from "../../compute/compute-shader.js";
 import { addComputeDispatch, createComputeTask, prepareComputeTask, submitComputeTasks } from "../../compute/compute-task.js";
 import type { ComputeTask } from "../../compute/compute-task.js";
-import { submitComputeTaskResult } from "../../compute/compute-task-readback.js";
+import { submitDeferredComputeTaskResult } from "../../compute/compute-task-readback.js";
 import { computeStorageBufferBinding } from "../../compute/compute-storage-buffer-binding.js";
 import { createStorageBuffer, disposeStorageBuffer, updateStorageBuffer } from "../../resource/storage-buffer.js";
 import type { StorageBuffer } from "../../resource/storage-buffer.js";
@@ -449,7 +449,7 @@ interface ResidentShaders {
 
 let shadersByToken: WeakMap<object, ResidentShaders> | null = null;
 
-/** Dispatch shape, pack and status copy. Returns after submission, with a separate status promise. */
+/** Record shape, pack and status copy. Returns after admission, with a separate status promise. */
 export async function executeResidentComputeText(
     token: object,
     engine: EngineContext,
@@ -466,6 +466,7 @@ export async function executeResidentComputeText(
     runBase = 0
 ): Promise<{ readonly status: Promise<number> }> {
     assertLive();
+    engine._flushPendingWork?.(engine);
     const shapeCapacity = segments?.capacity ?? capacity;
     const preparedGroups = groups.map((group) =>
         prepareComputeTextShapeWords(group.plan, group.runs, group.outputRun + (segments ? 0 : runBase), shapeCapacity, engine._device.limits)
@@ -554,7 +555,7 @@ export async function executeResidentComputeText(
     const readback = staging;
     let status: Promise<number>;
     try {
-        status = submitComputeTaskResult(tasks, buffers.status, 4, (bytes) => new DataView(bytes).getUint32(0, true), readback);
+        status = submitDeferredComputeTaskResult(tasks, buffers.status, 4, (bytes) => new DataView(bytes).getUint32(0, true), readback);
     } catch (error) {
         shaders.freeStatusBuffers.push(readback);
         throw error;
@@ -574,6 +575,7 @@ export function releaseResidentComputeText(token: object): void {
     if (!shaders) {
         return;
     }
+    shaders.params._engine._flushPendingWork?.(shaders.params._engine);
     shaders.released = true;
     shaders.stage?.release();
     for (const buffer of shaders.statusBuffers) {

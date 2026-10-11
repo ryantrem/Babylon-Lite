@@ -11,6 +11,7 @@ import type { GpuTaskTimer } from "./gpu-task-timer.js";
 import type { RenderTaskGpuTimings } from "./gpu-task-timing.js";
 import type { DeviceLostRecoveryState } from "./device-lost-recovery.js";
 import type { SceneContext } from "../scene/scene-core.js";
+import type { DeferredSubmitState } from "../compute/deferred-submit.js";
 
 // Module-scoped visibility epoch. setSubtreeVisible (scene/visibility.ts,
 // loaded only by KHR_node_visibility / KHR_animation_pointer features) bumps
@@ -150,6 +151,10 @@ export interface EngineContext extends SurfaceContext {
     _currentDelta: number;
     /** @internal */
     _cbs: GPUCommandBuffer[];
+    /** @internal Installed only while opt-in command buffers await submission; null abandons them. */
+    _flushPendingWork?: (engine: EngineContext, frameCbs?: readonly GPUCommandBuffer[] | null) => void;
+    /** @internal Lazily allocated, device-owned deferred submission state. */
+    _pendingWork?: DeferredSubmitState;
     /** @internal Frame-boundary flush installed on the first queued GPU resource retirement. */
     _flushGpuRetirements?: (engine: EngineContext) => void;
     /** @internal GPU resource disposers waiting for the next frame command buffer to be submitted. */
@@ -556,20 +561,23 @@ export function startEngine(engine: EngineContext): Promise<void> {
 }
 
 /** Resolve when every GPU command submitted before this call has completed.
+ *  Admitted deferred work is submitted before requesting the fence.
  *  This does not wait for deferred resource releases; use `waitForGpuResourceRetirements` for teardown.
  *  This is a synchronization boundary for infrequent lifecycle transitions such as revealing a fully
  *  prepared scene; frame loops should not await it during steady rendering. */
 export function waitForGpuIdle(engine: EngineContext): Promise<void> {
+    engine._flushPendingWork?.(engine);
     return engine._device.queue.onSubmittedWorkDone();
 }
 
-/** Stop the render loop. */
+/** Stop the render loop and submit admitted deferred work on the live device. */
 export function stopEngine(engine: EngineContext): void {
     if (engine._animFrameId) {
         cancelAnimationFrame(engine._animFrameId);
     }
     engine._animFrameId = 0;
     engine._renderFn = null;
+    engine._flushPendingWork?.(engine);
     // No further frame will submit, so retirements queued by (say) a `removeFromScene` issued right
     // before the stop would otherwise sit pending until `disposeEngine`. Flush them behind a fence.
     engine._flushGpuRetirements?.(engine);
@@ -603,6 +611,7 @@ function _renderFrame(engine: EngineContext, delta: number, surfaces: readonly [
     }
     if (!total) {
         engine.drawCallCount = 0;
+        engine._flushPendingWork?.(engine);
         // Nothing left to draw (e.g. the last scene was unregistered). No submit will happen this frame,
         // so any retirement queued by that removal has to be drained behind a fence instead of waiting
         // for a `queue.submit` that will never come.
@@ -652,7 +661,11 @@ function _renderFrame(engine: EngineContext, delta: number, surfaces: readonly [
         // frame's recorded GPU work (a no-op short-circuit when timing is disabled).
         engine._gpuTimerEnd?.(finalEncoder);
         engine._cbs[0] = finalEncoder.finish();
-        engine._device.queue.submit(engine._cbs);
+        if (engine._flushPendingWork) {
+            engine._flushPendingWork(engine, engine._cbs);
+        } else {
+            engine._device.queue.submit(engine._cbs);
+        }
         engine._flushGpuRetirements?.(engine);
         engine.drawCallCount = total;
         // Resolve + read back the timestamp pair asynchronously (its own submit, after the frame's) and

@@ -57,16 +57,19 @@ describe("independent asynchronous resident status", () => {
         return {
             buffers,
             async mapped() {
+                native.engine._flushPendingWork?.(native.engine);
+                await new Promise<void>((resolve) => setTimeout(resolve, 0));
                 await Promise.allSettled(pendingMaps);
             },
             release() {
+                native.engine._flushPendingWork?.(native.engine);
                 releases.splice(0).forEach((resolve) => resolve());
             },
         };
     }
     function inject(data: ComputeTextData, kind: "overflow" | "unsupported" | "missing"): void {
-        const original = readback.submitComputeTaskResult;
-        vi.spyOn(readback, "submitComputeTaskResult").mockImplementationOnce((tasks, buffer, bytes, consume, staging) => {
+        const original = readback.submitDeferredComputeTaskResult;
+        vi.spyOn(readback, "submitDeferredComputeTaskResult").mockImplementationOnce((tasks, buffer, bytes, consume, staging) => {
             const words = new Int32Array(data._shaped.byteLength / 4);
             words[0] = kind === "unsupported" ? 1 : 0;
             words[1] = kind === "overflow" ? 0x7fffffff : kind === "missing" ? 1 : 0;
@@ -94,7 +97,7 @@ describe("independent asynchronous resident status", () => {
         try {
             const update = await updateComputeTextData(data, ["office", "HH"]);
             expect(data.status).toBe("ready");
-            expect(held.buffers).toHaveLength(1);
+            expect(held.buffers).toHaveLength(0);
             let settled = false;
             void update.completed.then(
                 () => {
@@ -116,7 +119,8 @@ describe("independent asynchronous resident status", () => {
                 const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), clearValue: [0, 0, 0, 0], loadOp: "clear", storeOp: "store" }] });
                 pass.executeBundles([bundle.finish()]);
                 pass.end();
-                native.device.queue.submit([encoder.finish()]);
+                native.engine._flushPendingWork?.(native.engine, [encoder.finish()]);
+                expect(held.buffers).toHaveLength(1);
                 const indirect = await readStorageBuffer(data._indirect);
                 expect(new Uint32Array(indirect)[1]).toBeGreaterThan(0);
                 expect(settled).toBe(false);
@@ -170,6 +174,7 @@ describe("independent asynchronous resident status", () => {
                 inject(data, "missing");
             }
             const second = await updateComputeTextData(data, ["AV"]);
+            native.engine._flushPendingWork?.(native.engine);
             expect(held.buffers).toHaveLength(2);
             expect(held.buffers[0]).not.toBe(held.buffers[1]);
             const before = await drawBytes(data);
@@ -194,6 +199,7 @@ describe("independent asynchronous resident status", () => {
             for (let index = 0; index < 4; index++) {
                 updates.push(await updateComputeTextData(data, [index % 2 ? "AV" : "HH"]));
             }
+            native.engine._flushPendingWork?.(native.engine);
             expect(new Set(held.buffers).size).toBe(4);
             held.release();
             await Promise.all(updates.map((update) => update.completed));

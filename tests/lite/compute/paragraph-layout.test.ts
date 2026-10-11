@@ -369,7 +369,7 @@ describe("native GPU paragraph wrapping and placement", () => {
         const prepare = vi.spyOn(shapePreparation, "prepareComputeTextShapeWords");
         const writes = vi.spyOn(native.device.queue, "writeBuffer");
         const textures = vi.spyOn(native.device.queue, "writeTexture");
-        const submit = vi.spyOn(submission, "submitComputeTaskResult");
+        const submit = vi.spyOn(submission, "submitDeferredComputeTaskResult");
         paragraphs[57] = paragraphs[57]! + "A"; // Existing closure glyph, nonzero physical runBase.
         await (
             await updateComputeTextParagraphs(data, paragraphs, layout)
@@ -413,7 +413,7 @@ describe("native GPU paragraph wrapping and placement", () => {
         paragraphs[1] += "α";
         paragraphs[2] += "І";
         const prepare = vi.spyOn(shapePreparation, "prepareComputeTextShapeWords");
-        const submit = vi.spyOn(submission, "submitComputeTaskResult");
+        const submit = vi.spyOn(submission, "submitDeferredComputeTaskResult");
         await (
             await updateComputeTextParagraphs(data, paragraphs, layout)
         ).completed;
@@ -449,7 +449,7 @@ describe("native GPU paragraph wrapping and placement", () => {
             const prepare = vi.spyOn(shapePreparation, "prepareComputeTextShapeWords");
             const pipelines = vi.spyOn(native.device, "createComputePipelineAsync");
             const writes = vi.spyOn(native.device.queue, "writeBuffer");
-            const submit = vi.spyOn(submission, "submitComputeTaskResult");
+            const submit = vi.spyOn(submission, "submitDeferredComputeTaskResult");
             await (
                 await updateComputeTextParagraphs(data, paragraphs, layout)
             ).completed;
@@ -579,8 +579,8 @@ describe("native GPU paragraph wrapping and placement", () => {
             await updateComputeTextParagraphs(data, paragraphs, layout)
         ).completed;
         const stage = getComputeTextParagraphStage(data)!;
-        const original = submission.submitComputeTaskResult;
-        const injected = vi.spyOn(submission, "submitComputeTaskResult").mockImplementationOnce((tasks, buffer, bytes, consume, staging) => {
+        const original = submission.submitDeferredComputeTaskResult;
+        const injected = vi.spyOn(submission, "submitDeferredComputeTaskResult").mockImplementationOnce((tasks, buffer, bytes, consume, staging) => {
             const slot = stage._words[16 + 2]!;
             const stride = 4 + stage._words[1]! * 6;
             updateStorageBuffer(native.engine, data._shaped, Int32Array.of(1, 0, 4, 2), slot * stride * 4);
@@ -662,8 +662,8 @@ describe("native GPU paragraph wrapping and placement", () => {
         const gate = new Promise<void>((resolve) => {
             release = resolve;
         });
-        const original = submission.submitComputeTaskResult;
-        const held = vi.spyOn(submission, "submitComputeTaskResult").mockImplementationOnce((...args) => original(...args).then(() => gate.then(() => 1)));
+        const original = submission.submitDeferredComputeTaskResult;
+        const held = vi.spyOn(submission, "submitDeferredComputeTaskResult").mockImplementationOnce((...args) => original(...args).then(() => gate.then(() => 1)));
         paragraphs = ["office AA", ...paragraphs.slice(1)];
         const previous = await updateComputeTextParagraphs(data, paragraphs, layout);
         if (full) {

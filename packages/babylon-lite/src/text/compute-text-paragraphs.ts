@@ -23,6 +23,7 @@ export interface ComputeTextParagraphLayout {
 /** Shape, wrap and place LTR paragraphs on the GPU. Input and layout admission reject synchronously. */
 export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: readonly string[], layout: ComputeTextParagraphLayout): Promise<ComputeTextUpdate> {
     try {
+        data?._engine?._flushPendingWork?.(data._engine);
         if (!Array.isArray(paragraphs)) {
             throw new Error("paragraphs must be an array of strings");
         }

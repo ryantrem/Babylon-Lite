@@ -193,6 +193,7 @@ export function readStorageBuffer(buffer: StorageBuffer, byteOffset = 0, byteLen
         return Promise.resolve(new ArrayBuffer(0));
     }
     const device = buffer._engine._device;
+    buffer._engine._flushPendingWork?.(buffer._engine);
     if (buffer._readPending) {
         if (buffer._readbackDevice !== device) {
             return Promise.reject(new Error("StorageBuffer device changed during a pending readback."));

@@ -2,6 +2,9 @@
 
 ## Purpose
 
+The production admission, fused submission, status completion and fallback
+contract is specified in [resident text submission](compute-text-submission.md).
+
 Move paragraph wrapping and line placement onto the GPU, after resident
 shaping, so a host such as LineLayoutPad can draw plain-text documents without
 any LLX WASM shaping or layout. The work is **incremental**: each step ships a
@@ -12,15 +15,15 @@ redesigned later.
 
 ### Incremental roadmap
 
-| Step                           | Babylon Lite                                                                                                                                                                                                                                                    | Pad                                                                                                                                                               | Functionality restored                           |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| **1 (this spec)**              | `updateComputeTextParagraphs`: shape each paragraph once, GPU greedy wrap at shaping-safe spaces, emergency breaks, hanging trailing spaces, left/center/right alignment, paragraph spacing, font line metrics. Per-line records written on the GPU (internal). | "Compute Text (GPU layout)" mode: no LLX shaping/layout on the path; plain-text documents drawn from GPU layout. Caret, selection, hit testing, markers disabled. | Wrapped, aligned plain-text drawing with no LLX. |
-| **2 (implemented)**            | Paragraph slots with stable identities; reshape only dirty paragraphs; width/alignment changes re-run layout without reshaping.                                                                                                                                 | Per-keystroke dirty-paragraph updates.                                                                                                                            | Edit latency independent of document size.       |
-| 3                              | Revision-bound async queries over line/cluster records: line extents, cluster↔x, caret stops, hit test.                                                                                                                                                         | Caret, click-to-place, arrow keys, selection highlight.                                                                                                           | Editing.                                         |
-| 4                              | GPU caret/selection rendering from cluster records (no per-keystroke readback).                                                                                                                                                                                 | Remove query round-trip from typing.                                                                                                                              | Latency parity.                                  |
-| **5 (wrap/place implemented)** | Within-paragraph parallel wrap (blocked scans + candidate break search) and parallel placement; negative-advance paragraphs retain serial wrapping. Dirty safe-break-chunk reshaping, submission fusion and device-level pipeline sharing remain.               | Large documents, many panes.                                                                                                                                      | Scale.                                           |
-| 6                              | Multiple styles per paragraph (style runs, per-run fonts/sizes/colors, line metrics from the tallest run).                                                                                                                                                      | Bold/italic/size/color, decorations.                                                                                                                              | Rich text.                                       |
-| 7                              | Line-local bidi reordering, more scripts, UAX #14 classes beyond spaces, tabs, justification.                                                                                                                                                                   | Remaining eligibility gates removed.                                                                                                                              | Feature parity with LLX.                         |
+| Step                           | Babylon Lite                                                                                                                                                                                                                                                                     | Pad                                                                                                                                                               | Functionality restored                           |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| **1 (this spec)**              | `updateComputeTextParagraphs`: shape each paragraph once, GPU greedy wrap at shaping-safe spaces, emergency breaks, hanging trailing spaces, left/center/right alignment, paragraph spacing, font line metrics. Per-line records written on the GPU (internal).                  | "Compute Text (GPU layout)" mode: no LLX shaping/layout on the path; plain-text documents drawn from GPU layout. Caret, selection, hit testing, markers disabled. | Wrapped, aligned plain-text drawing with no LLX. |
+| **2 (implemented)**            | Paragraph slots with stable identities; reshape only dirty paragraphs; width/alignment changes re-run layout without reshaping.                                                                                                                                                  | Per-keystroke dirty-paragraph updates.                                                                                                                            | Edit latency independent of document size.       |
+| 3                              | Revision-bound async queries over line/cluster records: line extents, cluster↔x, caret stops, hit test.                                                                                                                                                                          | Caret, click-to-place, arrow keys, selection highlight.                                                                                                           | Editing.                                         |
+| 4                              | GPU caret/selection rendering from cluster records (no per-keystroke readback).                                                                                                                                                                                                  | Remove query round-trip from typing.                                                                                                                              | Latency parity.                                  |
+| **5 (wrap/place implemented)** | Within-paragraph parallel wrap (blocked scans + candidate break search) and parallel placement; negative-advance paragraphs retain serial wrapping. Same-task frame submission fusion is implemented. Dirty safe-break-chunk reshaping and device-level pipeline sharing remain. | Large documents, many panes.                                                                                                                                      | Scale.                                           |
+| 6                              | Multiple styles per paragraph (style runs, per-run fonts/sizes/colors, line metrics from the tallest run).                                                                                                                                                                       | Bold/italic/size/color, decorations.                                                                                                                              | Rich text.                                       |
+| 7                              | Line-local bidi reordering, more scripts, UAX #14 classes beyond spaces, tabs, justification.                                                                                                                                                                                    | Remaining eligibility gates removed.                                                                                                                              | Feature parity with LLX.                         |
 
 LLX remains available as a **test oracle** (line breaks, metrics, positions) and
 as a user-selectable backend; it is never consulted by the GPU layout path.
@@ -144,7 +147,7 @@ only `updateComputeTextData` do not pull in the layout kernels.
 
 ### Dirty-range preparation and physical slots
 
-The stage retains a string-array snapshot **only after successful submission**,
+The stage retains a string-array snapshot **only after successful admission**,
 plus the font, size, device, generation, shaped-buffer identity, pool size,
 record capacity, flag stride, logical order and last uploaded layout parameters.
 It is internal state, not a new public API. Compare strings by `===`, finding
@@ -427,14 +430,14 @@ without preserving old contents.
 Invalidate the snapshot on synchronous admission/pre-submission errors, async
 status failures, plain resident updates, disposal/device loss/change, font/size
 changes, unexpected shaped-buffer replacement, and any rebuild. Generic
-submission plumbing uses a revision to distinguish submissions without importing
+submission plumbing uses a revision to distinguish admitted updates without importing
 paragraph code. A late completion failure invalidates only its own snapshot;
-it must not discard a subsequently submitted full rebuild. Busy rejections
+it must not discard a subsequently admitted full rebuild. Busy rejections
 invalidate reuse but never mutate the in-flight input. Commit the candidate
-snapshot only when submission succeeds, not when preparing words/flags. Any
+snapshot only when admission succeeds, not when preparing words/flags. Any
 failure during incremental preparation abandons the candidate. Pool/capacity
 changes perform a full preparation and install before committing new state.
-The snapshot also retains atlas identity/version after submission. External
+The snapshot also retains atlas identity/version after admission. External
 mutation conservatively rebuilds, because callers can install outlines for a
 previously empty glyph (which changes cached visibility and slot words). Ordinary
 append work from this submission records the new version on commit and does not

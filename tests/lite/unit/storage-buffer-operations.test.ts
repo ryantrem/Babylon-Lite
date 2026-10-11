@@ -34,6 +34,28 @@ function makeEngine() {
 }
 
 describe("compat storage-buffer operations", () => {
+    it.each(["clear", "range", "readback"] as const)("flushes deferred work before %s touches its buffers", async (operation) => {
+        const { engine, device, frameEncoder } = makeEngine();
+        const storage = createStorageBuffer(engine, 16, { writable: true });
+        engine._currentEncoder = frameEncoder as unknown as GPUCommandEncoder;
+        const flush = (engine._flushPendingWork = vi.fn(() => {
+            expect(device.queue.writeBuffer).not.toHaveBeenCalled();
+            expect(frameEncoder.clearBuffer).not.toHaveBeenCalled();
+            expect(frameEncoder.copyBufferToBuffer).not.toHaveBeenCalled();
+        }));
+        if (operation === "clear") {
+            clearStorageBuffer(engine, storage);
+        } else if (operation === "range") {
+            updateStorageBufferRange(engine, storage, new Uint8Array([1]), 0);
+        } else {
+            const pending = readStorageBufferAfterFrame(storage, 0, 4);
+            engine._gpuTaskTimerResolve!(engine._currentEncoder);
+            await pending;
+        }
+        expect(flush).toHaveBeenCalledOnce();
+        expect(flush).toHaveBeenCalledWith(engine);
+    });
+
     it("records GPU clears in-frame and submits them directly out-of-frame", () => {
         const { engine, device, source, frameEncoder, directEncoder } = makeEngine();
         const storage = createStorageBuffer(engine, 16, { writable: true });

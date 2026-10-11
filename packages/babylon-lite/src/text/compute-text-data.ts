@@ -26,7 +26,7 @@ const MISSING_SLOT = 0xffffffff;
 const EMPTY_SLOT = 0xfffffffe;
 const MAX_PACKED_INDEX = 0xfffe;
 
-/** Submitted resident update. GPU-detected failures are reported only through `completed` and draw nothing. */
+/** Admitted resident update. GPU-detected failures are reported only through `completed` and draw nothing. */
 export interface ComputeTextUpdate {
     /** Observe status outside frame timing. Ignoring this promise does not emit an unhandled rejection. */
     readonly completed: Promise<void>;
@@ -118,6 +118,7 @@ export function createComputeTextData(
     ) {
         throw new Error("createComputeTextData: defaultColor must contain four finite RGBA channels in [0, 1]");
     }
+    engine._flushPendingWork?.(engine);
     const device = engine._device;
     const style = createStyleBuffer(device, TEXT_STYLE_BYTES, "compute-text-style");
     const styleWords = new Float32Array(TEXT_STYLE_FLOATS);
@@ -162,7 +163,7 @@ export function createComputeTextData(
     return data;
 }
 
-/** Select, close, install outlines, and submit shape/pack/status copy. Render immediately; observe GPU errors through `completed`. */
+/** Admit shape/pack/status work. Rendering in this task fuses its submission; otherwise a macrotask submits it. Observe GPU errors through `completed`. */
 export async function updateComputeTextData(data: ComputeTextData, texts: readonly string[]): Promise<ComputeTextUpdate> {
     return submitComputeTextData(data, texts);
 }
@@ -181,6 +182,7 @@ export function submitComputeTextData(
     }
 ): Promise<ComputeTextUpdate> {
     assertReady(data);
+    data._engine._flushPendingWork?.(data._engine);
     data._revision++;
     const generation = data._generation;
     const device = data._device;
@@ -459,6 +461,7 @@ function failTerminal(data: ComputeTextData, status: "lost" | "disposed", messag
         setStatus(data, status);
         return;
     }
+    data._engine._flushPendingWork?.(data._engine, status === "lost" ? null : undefined);
     data._released = true;
     data._slotWords = null;
     data._slotFont = null;

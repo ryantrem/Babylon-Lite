@@ -19,6 +19,7 @@ export function clearStorageBuffer(engine: EngineContext, buffer: StorageBuffer,
         return;
     }
     const handle = _getStorageBufferHandle(engine, buffer);
+    engine._flushPendingWork?.(engine);
     if (engine._currentEncoder) {
         engine._currentEncoder.clearBuffer(handle, byteOffset, byteLength);
         const shadow = buffer._data;
@@ -43,6 +44,7 @@ export function updateStorageBufferRange(engine: EngineContext, buffer: StorageB
         return;
     }
     const handle = _getStorageBufferHandle(engine, buffer);
+    engine._flushPendingWork?.(engine);
     const prefix = byteOffset & 3;
     const alignedOffset = byteOffset - prefix;
     const alignedLength = (data.byteLength + prefix + 3) & ~3;
@@ -78,6 +80,7 @@ export function readStorageBufferAfterFrame(buffer: StorageBuffer, byteOffset = 
         return Promise.resolve(new ArrayBuffer(0));
     }
     const source = _getStorageBufferHandle(engine, buffer);
+    engine._flushPendingWork?.(engine);
     const staging = engine._device.createBuffer({
         label: buffer._label ? `${buffer._label}-frame-readback` : "storage-frame-readback",
         size: byteLength,

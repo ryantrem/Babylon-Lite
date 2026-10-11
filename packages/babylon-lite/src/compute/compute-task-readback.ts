@@ -3,6 +3,43 @@ import { _getStorageBufferHandle } from "../resource/storage-buffer.js";
 import type { StorageBuffer } from "../resource/storage-buffer.js";
 import { _recordComputeTasks } from "./compute-task.js";
 import type { ComputeTask } from "./compute-task.js";
+import { _deferCommandBuffer } from "./deferred-submit.js";
+
+/** @internal Resident status copy; mapping starts only after the queued command buffer submits. */
+export function submitDeferredComputeTaskResult<T>(
+    tasks: readonly ComputeTask[],
+    buffer: StorageBuffer,
+    byteLength: number,
+    consume: (bytes: ArrayBuffer) => T,
+    staging: GPUBuffer
+): Promise<T> {
+    const engine = buffer._engine;
+    const encoder = recordResult(tasks, buffer, byteLength, staging);
+    return new Promise<T>((resolve, reject) => {
+        _deferCommandBuffer(
+            engine,
+            encoder.finish(),
+            () => {
+                try {
+                    staging
+                        .mapAsync(GPUMapMode.READ, 0, byteLength)
+                        .then(() => {
+                            try {
+                                return consume(staging.getMappedRange(0, byteLength));
+                            } finally {
+                                staging.unmap();
+                            }
+                        })
+                        .then(resolve, reject);
+                    engine._gpuTaskTimerResolve?.(encoder);
+                } catch (error) {
+                    reject(error instanceof Error ? error : new Error(String(error)));
+                }
+            },
+            reject
+        );
+    });
+}
 
 /** @internal Submit prepared work with a private status copy, without waiting for GPU completion. */
 export function submitComputeTaskResult<T>(
@@ -12,6 +49,20 @@ export function submitComputeTaskResult<T>(
     consume: (bytes: ArrayBuffer) => T,
     staging: GPUBuffer
 ): Promise<T> {
+    const engine = buffer._engine;
+    const encoder = recordResult(tasks, buffer, byteLength, staging);
+    engine._device.queue.submit([encoder.finish()]);
+    engine._gpuTaskTimerResolve?.(encoder);
+    return staging.mapAsync(GPUMapMode.READ, 0, byteLength).then(() => {
+        try {
+            return consume(staging.getMappedRange(0, byteLength));
+        } finally {
+            staging.unmap();
+        }
+    });
+}
+
+function recordResult(tasks: readonly ComputeTask[], buffer: StorageBuffer, byteLength: number, staging: GPUBuffer): GPUCommandEncoder {
     const engine = buffer._engine;
     const source = _getStorageBufferHandle(engine, buffer);
     if (!buffer._writable || engine._currentEncoder || staging.mapState !== "unmapped") {
@@ -23,18 +74,11 @@ export function submitComputeTaskResult<T>(
     if (tasks.length === 0 || tasks.some((task) => task.engine !== engine)) {
         throw new Error("submitComputeTaskResult requires tasks from the output's engine.");
     }
+    engine._flushPendingWork?.(engine);
     const encoder = engine._device.createCommandEncoder({ label: "compute-result" });
     _recordComputeTasks(tasks, encoder);
     encoder.copyBufferToBuffer(source, 0, staging, 0, byteLength);
-    engine._device.queue.submit([encoder.finish()]);
-    engine._gpuTaskTimerResolve?.(encoder);
-    return staging.mapAsync(GPUMapMode.READ, 0, byteLength).then(() => {
-        try {
-            return consume(staging.getMappedRange(0, byteLength));
-        } finally {
-            staging.unmap();
-        }
-    });
+    return encoder;
 }
 
 /** @internal Complete prepared tasks and materialize private, exclusively owned output while mapped. */
@@ -50,6 +94,7 @@ export async function readComputeTaskResult<T>(tasks: readonly ComputeTask[], bu
     if (tasks.length === 0 || tasks.some((task) => task.engine !== engine)) {
         throw new Error("readComputeTaskResult requires tasks from the output's engine.");
     }
+    engine._flushPendingWork?.(engine);
     const device = engine._device;
     if (buffer._readback && (buffer._readbackDevice !== device || buffer._readback.size < byteLength)) {
         buffer._readback.destroy();
