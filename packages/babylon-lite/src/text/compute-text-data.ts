@@ -14,7 +14,7 @@ import { extractComputeGlyphCurves } from "./compute-glyph-extraction.js";
 import { updateGlyphStorage } from "./glyph-storage.js";
 import type { CurveSetId, GlyphCurves, GlyphStorage } from "./glyph-storage.js";
 import { TEXT_INSTANCE_BYTES, TEXT_STYLE_BYTES, TEXT_STYLE_FLOATS } from "./text-buffer-layout.js";
-import { ensureSharedAtlasGpu } from "./_gpu/text-textures.js";
+import { appendSharedAtlasGpu, ensureSharedAtlasGpu } from "./_gpu/text-textures.js";
 import { createStyleBuffer } from "./_gpu/text-style-buffer.js";
 import { COMPUTE_TEXT_HEADER_WORDS, COMPUTE_TEXT_RECORD_WORDS, computeTextShapeCapacity } from "./_gpu/compute-text-shape.js";
 import { executeResidentComputeText, releaseResidentComputeText, residentStatusMessage } from "./_gpu/compute-text-resident.js";
@@ -49,6 +49,8 @@ export interface ComputeTextData {
     _curveSet: CurveSetId;
     /** @internal */
     _generation: number;
+    /** @internal Monotonic submission revision for optional resident consumers. */
+    _revision: number;
     /** @internal */
     _onDeviceLost(): void;
     /** @internal */
@@ -134,6 +136,7 @@ export function createComputeTextData(
         _storage: storage,
         _curveSet: curveSet,
         _generation: 1,
+        _revision: 0,
         _onDeviceLost: () => failTerminal(data, "lost", "updateComputeTextData: device lost"),
         _dead: false,
         _rejectPending: null,
@@ -168,9 +171,17 @@ export async function updateComputeTextData(data: ComputeTextData, texts: readon
 export function submitComputeTextData(
     data: ComputeTextData,
     texts: readonly string[],
-    createStage?: (groups: readonly ResidentShapeGroup[], capacity: number) => ResidentPackStage
+    createStage?: (groups: readonly ResidentShapeGroup[], capacity: number) => ResidentPackStage,
+    options?: {
+        readonly capacity: number;
+        readonly runBase: number;
+        readonly pool: number;
+        /** Request a retry with full input if closure installation cannot be additive. */
+        readonly rebuild?: Error;
+    }
 ): Promise<ComputeTextUpdate> {
     assertReady(data);
+    data._revision++;
     const generation = data._generation;
     const device = data._device;
     clearIndirect(data);
@@ -194,8 +205,9 @@ export function submitComputeTextData(
         const segments = data._disableSegmentation
             ? null
             : segmentComputeTextRuns(groups, device.limits, { headerWords: COMPUTE_TEXT_HEADER_WORDS, recordWords: COMPUTE_TEXT_RECORD_WORDS });
-        const capacity = sharedCapacity(groups);
-        const stage = createStage?.(groups, capacity);
+        const needed = sharedCapacity(groups);
+        const stage = createStage?.(groups, needed);
+        const capacity = options?.capacity ?? needed;
         return (async () => {
             try {
                 let closure;
@@ -209,9 +221,9 @@ export function submitComputeTextData(
                     const message = error instanceof Error ? error.message : String(error);
                     throw new Error(`${message} (witness: ${snapshot.join(" | ") || "<empty>"})`, { cause: error });
                 }
-                installClosure(data, closure.glyphIds);
+                installClosure(data, closure.glyphIds, options?.rebuild);
                 const runCount = prepared.length;
-                growDrawBuffers(data, runCount, capacity);
+                growDrawBuffers(data, options?.pool ?? runCount, capacity);
                 const submitted = await Promise.race([
                     executeResidentComputeText(
                         data,
@@ -231,7 +243,8 @@ export function submitComputeTextData(
                         data._font.glyphCount,
                         () => assertCurrent(data, generation, device),
                         segments,
-                        stage
+                        stage,
+                        options?.runBase
                     ),
                     cancelled,
                 ]);
@@ -287,8 +300,19 @@ export function disposeComputeTextData(data: ComputeTextData): void {
     failTerminal(data, "disposed", "updateComputeTextData: disposed");
 }
 
-function installClosure(data: ComputeTextData, glyphIds: readonly number[]): void {
+function installClosure(data: ComputeTextData, glyphIds: readonly number[], rebuild?: Error): void {
+    if (rebuild) {
+        if (!data._slotWords || data._slotFont !== data._font || data._slotWords.length !== data._font.glyphCount) {
+            throw rebuild;
+        }
+        glyphIds = glyphIds.filter((glyphId) => data._slotWords![glyphId] === MISSING_SLOT);
+        if (glyphIds.length === 0) {
+            return;
+        }
+    }
     const installed = data._storage._curveSets.get(data._curveSet)?._curves;
+    const atlas = data._storage._curveSets.get(data._curveSet)?._atlas;
+    const append = rebuild && atlas ? ([atlas._curveTexelsUsed, atlas._bandTexelsUsed, atlas._slotCount, atlas._version] as const) : undefined;
     const curves = new Map<number, GlyphCurves>();
     try {
         extractComputeGlyphCurves(data._font, new Set(glyphIds.filter((glyphId) => !installed?.has(glyphId))), curves);
@@ -301,19 +325,25 @@ function installClosure(data: ComputeTextData, glyphIds: readonly number[]): voi
     if (!curveSet) {
         throw new Error("updateComputeTextData: curve set is missing");
     }
-    ensureSharedAtlasGpu(data._device, curveSet._atlas);
+    if (rebuild) {
+        if (!append || !appendSharedAtlasGpu(data._device, curveSet._atlas, append)) {
+            throw rebuild;
+        }
+    } else {
+        ensureSharedAtlasGpu(data._device, curveSet._atlas);
+    }
     let slots = data._slotWords;
     if (!slots || data._slotFont !== data._font || slots.length !== data._font.glyphCount) {
         slots = new Uint32Array(data._font.glyphCount);
         slots.fill(MISSING_SLOT);
         data._slotWords = slots;
         data._slotFont = data._font;
-    } else {
+    } else if (!rebuild) {
         for (const glyphId of data._slotGlyphIds) {
             slots[glyphId] = MISSING_SLOT;
         }
     }
-    data._slotGlyphIds = glyphIds;
+    data._slotGlyphIds = rebuild ? [...data._slotGlyphIds, ...glyphIds] : glyphIds;
     for (const glyphId of glyphIds) {
         if (curveSet._curves.has(glyphId)) {
             const slot = curveSet._atlas._glyphSlots.get(glyphId);
@@ -325,7 +355,14 @@ function installClosure(data: ComputeTextData, glyphIds: readonly number[]): voi
             slots[glyphId] = EMPTY_SLOT;
         }
     }
-    updateStorageBuffer(data._engine, data._slots, slots);
+    if (rebuild) {
+        for (const glyphId of glyphIds) {
+            updateStorageBuffer(data._engine, data._slots, slots.subarray(glyphId, glyphId + 1), glyphId * 4);
+        }
+    } else {
+        data._slots = grow(data, data._slots, slots.byteLength, { label: "compute-text-slots" });
+        updateStorageBuffer(data._engine, data._slots, slots);
+    }
 }
 
 function growDrawBuffers(data: ComputeTextData, runCount: number, capacity: number): void {

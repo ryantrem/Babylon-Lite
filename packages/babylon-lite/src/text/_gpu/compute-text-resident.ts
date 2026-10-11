@@ -39,10 +39,10 @@ const HEADER: u32 = ${COMPUTE_TEXT_HEADER_WORDS}u;
 const RECORD: u32 = ${COMPUTE_TEXT_RECORD_WORDS}u;
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) lane: u32) {
-  let run = wg.x;
-  if (run >= params.x) { return; }
-  let first = table[run*2u];
-  let count = table[run*2u+1u];
+  if (wg.x >= params.x) { return; }
+  let run = params.w + wg.x;
+  let first = table[wg.x*2u];
+  let count = table[wg.x*2u+1u];
   let sStride = HEADER + params.z*RECORD;
   let out = run*(HEADER + params.y*RECORD);
   let segBase = params.x*2u;
@@ -462,11 +462,14 @@ export async function executeResidentComputeText(
     glyphCount: number,
     assertLive: () => void,
     segments?: ComputeTextSegments | null,
-    stage?: ResidentPackStage
+    stage?: ResidentPackStage,
+    runBase = 0
 ): Promise<{ readonly status: Promise<number> }> {
     assertLive();
     const shapeCapacity = segments?.capacity ?? capacity;
-    const preparedGroups = groups.map((group) => prepareComputeTextShapeWords(group.plan, group.runs, group.outputRun, shapeCapacity, engine._device.limits));
+    const preparedGroups = groups.map((group) =>
+        prepareComputeTextShapeWords(group.plan, group.runs, group.outputRun + (segments ? 0 : runBase), shapeCapacity, engine._device.limits)
+    );
     for (const prepared of preparedGroups) {
         checkComputeTextShapeBounds(engine._device.limits, prepared);
     }
@@ -480,10 +483,12 @@ export async function executeResidentComputeText(
         runBytes = Math.max(runBytes, prepared.runs.byteLength);
         scratchBytes = Math.max(scratchBytes, prepared.scratchBytes);
     }
-    ensureResidentShaderCapacity(token, engine, scratchBytes, programBytes, tableBytes, runBytes, shapeCapacity);
+    if (preparedGroups.length > 0) {
+        ensureResidentShaderCapacity(token, engine, scratchBytes, programBytes, tableBytes, runBytes, shapeCapacity);
+    }
     const shaders = ensureShaders(token, engine);
     if (segments) {
-        ensureSegmentBuffers(shaders, engine, segments, runCount, capacity);
+        ensureSegmentBuffers(shaders, engine, segments, runCount, capacity, runBase);
     }
     if (!stage && shaders.packOffsets.byteLength < Math.max(8, runCount * 8)) {
         shaders.packTask?.dispose();
@@ -682,7 +687,7 @@ function createPackShader(engine: EngineContext, entryPoint: string): ComputeSha
     });
 }
 
-function ensureSegmentBuffers(shaders: ResidentShaders, engine: EngineContext, segments: ComputeTextSegments, runCount: number, capacity: number): void {
+function ensureSegmentBuffers(shaders: ResidentShaders, engine: EngineContext, segments: ComputeTextSegments, runCount: number, capacity: number, runBase: number): void {
     if (!shaders.stitch) {
         shaders.stitch = createComputeShader(engine, {
             name: "compute-text-stitch",
@@ -705,7 +710,7 @@ function ensureSegmentBuffers(shaders: ResidentShaders, engine: EngineContext, s
     });
     shaders.segmentTable = grow(engine, shaders.segmentTable!, segments.table.byteLength, { label: "compute-text-segment-table" });
     updateStorageBuffer(engine, shaders.segmentTable, segments.table);
-    updateStorageBuffer(engine, shaders.stitchParams!, Uint32Array.of(runCount, capacity, segments.capacity, 0));
+    updateStorageBuffer(engine, shaders.stitchParams!, Uint32Array.of(runCount, capacity, segments.capacity, runBase));
 }
 
 function ensureSchedules(

@@ -129,3 +129,45 @@ export function ensureSharedAtlasGpu(device: GPUDevice, atlas: SharedAtlas): { _
 
     return { _rebuilt: rebuilt, _gpu: gpu };
 }
+
+/** @internal Upload an append-only suffix without growing resources; false requests a full installation. */
+export function appendSharedAtlasGpu(device: GPUDevice, atlas: SharedAtlas, from: readonly [curveTexels: number, bandTexels: number, slots: number, version: number]): boolean {
+    const gpu = atlas._gpu;
+    if (
+        !gpu ||
+        gpu._device !== device ||
+        gpu._uploadedVersion !== from[3] ||
+        rowsForTexels(atlas._curveTexelsUsed) > gpu._curveTexRows ||
+        rowsForTexels(atlas._bandTexelsUsed) > gpu._bandTexRows ||
+        atlas._slotCount > gpu._metaCap
+    ) {
+        return false;
+    }
+    uploadAppend(device, gpu._curveTex, atlas._curveTexData, from[0], atlas._curveTexelsUsed);
+    uploadAppend(device, gpu._bandTex, atlas._bandTexData, from[1], atlas._bandTexelsUsed);
+    if (from[2] < atlas._slotCount) {
+        device.queue.writeBuffer(
+            gpu._metaBuf,
+            from[2] * GLYPH_METADATA_BYTES,
+            atlas._metaData.buffer as ArrayBuffer,
+            atlas._metaData.byteOffset + from[2] * GLYPH_METADATA_BYTES,
+            (atlas._slotCount - from[2]) * GLYPH_METADATA_BYTES
+        );
+    }
+    gpu._uploadedVersion = atlas._version;
+    return true;
+}
+
+function uploadAppend(device: GPUDevice, tex: GPUTexture, data: Float32Array, first: number, end: number): void {
+    while (first < end) {
+        const x = first % TEX_WIDTH;
+        const width = Math.min(TEX_WIDTH - x, end - first);
+        device.queue.writeTexture(
+            { texture: tex, origin: { x, y: Math.floor(first / TEX_WIDTH) } },
+            data.buffer as ArrayBuffer,
+            { offset: data.byteOffset + first * 16, bytesPerRow: width * 16 },
+            { width, height: 1 }
+        );
+        first += width;
+    }
+}

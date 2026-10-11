@@ -8,6 +8,8 @@ import { computeStorageBufferBinding } from "../../compute/compute-storage-buffe
 import { createStorageBuffer, disposeStorageBuffer, updateStorageBuffer } from "../../resource/storage-buffer.js";
 import type { StorageBuffer } from "../../resource/storage-buffer.js";
 import type { ResidentPackStage, ResidentTextBuffers } from "./compute-text-resident.js";
+import type { ComputeFont } from "../compute-font.js";
+import type { SharedAtlas } from "../glyph-storage.js";
 import { COMPUTE_TEXT_HEADER_WORDS, COMPUTE_TEXT_RECORD_WORDS } from "./compute-text-shape.js";
 
 const LAYOUT_KERNEL = `
@@ -28,7 +30,7 @@ fn recordAt(p:u32, i:u32) -> u32 {
   return p * (HEADER + input[1] * RECORD) + HEADER + i * RECORD;
 }
 fn flags(p:u32, c:u32) -> u32 {
-  return (input[input[8u + p] + c / 4u] >> ((c % 4u) * 8u)) & 255u;
+  return (input[16u + input[11] + p * input[12] + c / 4u] >> ((c % 4u) * 8u)) & 255u;
 }
 fn emit(p:u32, line:u32, first:u32, count:u32, width:i32) {
   var cluster = 0u;
@@ -37,8 +39,10 @@ fn emit(p:u32, line:u32, first:u32, count:u32, width:i32) {
 }
 @compute @workgroup_size(64)
 fn measure(@builtin(global_invocation_id) invocation:vec3u) {
-  let p = invocation.x;
-  if (p >= input[0]) { return; }
+  let i = invocation.x;
+  if (i >= input[9]) { return; }
+  var p = input[8] + i;
+  if (input[10] == 1u) { p = input[16u + i]; }
   let head = p * (HEADER + input[1] * RECORD);
   var failed = u32(shaped[head]);
   let count = u32(shaped[head + 1u]);
@@ -116,7 +120,7 @@ fn prefix(@builtin(local_invocation_index) lane:u32) {
   let end = min(begin + span, input[0]);
   var summary = vec3u(0u, 0u, MISSING);
   for (var p = begin; p < end; p++) {
-    let result = info[p];
+    let result = info[input[16u + p]];
     summary.x = min(limit + 1u, summary.x + result.x);
     summary.y += result.z;
     if (result.y != 0u) { summary.z = min(summary.z, p); }
@@ -152,14 +156,14 @@ fn prefix(@builtin(local_invocation_index) lane:u32) {
       if (low > 0u) { total = summaries[low - 1u].x; }
       let stop = min((low + 1u) * span, input[0]);
       for (var p = low * span; p < stop; p++) {
-        let count = info[p].x;
+        let count = info[input[16u + p]].x;
         if (count > limit - total) { overflow = p; break; }
         total += count;
       }
     }
     prefixStatus = 0u;
     if (overflow != MISSING && overflow <= last.z) { prefixStatus = 2u; }
-    else if (last.z != MISSING) { prefixStatus = info[last.z].y; }
+    else if (last.z != MISSING) { prefixStatus = info[input[16u + last.z]].y; }
     status[0] = prefixStatus;
     if (prefixStatus == 0u) { indirect[1] = last.x; }
   }
@@ -167,9 +171,8 @@ fn prefix(@builtin(local_invocation_index) lane:u32) {
   var base = vec2u(0u);
   if (lane > 0u) { base = summaries[lane - 1u].xy; }
   for (var p = begin; p < end; p++) {
-    let result = info[p];
-    info[p].x = base.x;
-    info[p].w = base.y;
+    let result = info[input[16u + p]];
+    info[input[11] + p] = vec4u(base.x, 0u, result.z, base.y);
     base += result.xz;
   }
 }
@@ -177,7 +180,8 @@ fn prefix(@builtin(local_invocation_index) lane:u32) {
 fn place(@builtin(global_invocation_id) invocation:vec3u) {
   let p = invocation.x;
   if (p >= input[0] || status[0] != 0u) { return; }
-  let paragraph = info[p];
+  let slot = input[16u + p];
+  let paragraph = info[input[11] + p];
   let scale = bitcast<f32>(input[2]);
   let maxWidth = bitcast<f32>(input[4]);
   let lineHeight = bitcast<f32>(input[5]);
@@ -186,7 +190,7 @@ fn place(@builtin(global_invocation_id) invocation:vec3u) {
   var penX = 0;
   var penY = 0;
   for (var l = 0u; l < paragraph.z; l++) {
-    let line = lines[p * input[1] + l];
+    let line = lines[slot * input[1] + l];
     let lineX = penX;
     var align = 0.0;
     if (input[7] != 0u) {
@@ -195,7 +199,7 @@ fn place(@builtin(global_invocation_id) invocation:vec3u) {
     }
     let baseline = fma(f32(paragraph.w + l), lineHeight, f32(p) * spacing);
     for (var i = line.x; i < line.x + line.y; i++) {
-      let at = recordAt(p, i);
+      let at = recordAt(slot, i);
       let slot = slots[u32(shaped[at])];
       if (slot != EMPTY) {
         instances[total] = Instance(fma(f32(penX - lineX + shaped[at + 4u]), scale, align), fma(f32(penY + shaped[at + 5u]), scale, -baseline), slot);
@@ -208,6 +212,38 @@ fn place(@builtin(global_invocation_id) invocation:vec3u) {
 }
 `;
 
+/** @internal Last successfully submitted paragraph state. */
+export interface ComputeTextParagraphCache {
+    /** @internal */
+    _paragraphs: readonly string[];
+    /** @internal */
+    _order: Uint32Array;
+    /** @internal */
+    _capacity: number;
+    /** @internal */
+    _pool: number;
+    /** @internal */
+    _width: number;
+    /** @internal */
+    _font: ComputeFont;
+    /** @internal */
+    _fontSize: number;
+    /** @internal */
+    _device: GPUDevice;
+    /** @internal */
+    _generation: number;
+    /** @internal */
+    _revision: number;
+    /** @internal Revision of the full rebuild this state descends from. */
+    _baseRevision: number;
+    /** @internal */
+    _shaped: StorageBuffer;
+    /** @internal Detect external mutation of the caller-owned atlas. */
+    _atlas?: SharedAtlas;
+    /** @internal */
+    _atlasVersion?: number;
+}
+
 /** @internal Per-token layout resources; never part of the public block API. */
 export interface ComputeTextParagraphStage extends ResidentPackStage {
     version: number;
@@ -217,6 +253,12 @@ export interface ComputeTextParagraphStage extends ResidentPackStage {
     _floatWords: Float32Array;
     /** @internal Active upload range, excluding unused high-water capacity. */
     _uploadWords: Uint32Array;
+    /** @internal Word ranges to upload; params, changed order, dirty flags. */
+    _uploadRanges: readonly (readonly [number, number])[];
+    /** @internal */
+    _cache?: ComputeTextParagraphCache;
+    /** @internal Admission invalidation epoch, including busy rejections. */
+    _epoch: number;
     /** @internal The block's immutable font/size default, computed only when needed. */
     _naturalLineHeightPx?: number;
     /** @internal */
@@ -241,7 +283,15 @@ export function getComputeTextParagraphStage(token: object): ComputeTextParagrap
 }
 
 /** @internal Reserve reusable CPU input storage; no GPU allocation or submission. */
-export function reserveComputeTextParagraphStage(token: object, engine: EngineContext, paragraphs: number, capacity: number, wordCount: number): ComputeTextParagraphStage {
+export function reserveComputeTextParagraphStage(
+    token: object,
+    engine: EngineContext,
+    paragraphs: number,
+    capacity: number,
+    pool: number,
+    flagStride: number
+): ComputeTextParagraphStage {
+    const wordCount = 16 + pool + pool * flagStride;
     const maxWords = Math.floor(Math.min(engine._device.limits.maxBufferSize, engine._device.limits.maxStorageBufferBindingSize) / 4);
     if (wordCount > maxWords) {
         throw new Error("updateComputeTextParagraphs: layout input exceeds device storage limits");
@@ -252,6 +302,8 @@ export function reserveComputeTextParagraphStage(token: object, engine: EngineCo
     }
     words[0] = paragraphs;
     words[1] = capacity;
+    words[11] = pool;
+    words[12] = flagStride;
     return createComputeTextParagraphStage(token, engine, words, wordCount);
 }
 
@@ -265,28 +317,42 @@ export function createComputeTextParagraphStage(token: object, engine: EngineCon
             _words: words,
             _floatWords: new Float32Array(words.buffer, words.byteOffset, words.length),
             _uploadWords: wordCount === words.length ? words : words.subarray(0, wordCount),
-            prepare(engine, runCount, capacity) {
-                if (runCount !== created._words[0] || capacity !== created._words[1]) {
+            _uploadRanges: [[0, wordCount]],
+            _epoch: 0,
+            prepare(engine, _runCount, capacity) {
+                if (capacity !== created._words[1]) {
                     throw new Error("updateComputeTextParagraphs: layout and shaped capacities disagree");
                 }
                 checkBounds(engine, created._words);
                 if (created._device !== engine._device) {
-                    releaseResources(created);
+                    if (created._device) {
+                        releaseResources(created);
+                    }
                     created._device = engine._device;
                 }
                 created._shaders ??= ["measure", "prefix", "place"].map((entryPoint) => createLayoutShader(engine, entryPoint));
+                const pool = created._words[11]!;
                 created._input = grow(engine, created, created._input, created._words.byteLength, "input");
-                created._info = grow(engine, created, created._info, Math.max(1, runCount) * 16, "info");
-                created._lines = grow(engine, created, created._lines, Math.max(1, runCount) * capacity * 16, "lines");
-                updateStorageBuffer(engine, created._input, created._uploadWords);
-                created._dispatches?.forEach((dispatch, index) => setComputeDispatchSize(dispatch, { x: index === 1 ? 1 : Math.max(1, Math.ceil(runCount / 64)) }));
+                created._info = grow(engine, created, created._info, Math.max(1, pool * 2) * 16, "info");
+                created._lines = grow(engine, created, created._lines, Math.max(1, pool) * capacity * 16, "lines");
+                for (const [first, end] of created._uploadRanges) {
+                    if (end > first) {
+                        updateStorageBuffer(engine, created._input, created._words.subarray(first, end), first * 4);
+                    }
+                }
+                created._dispatches?.forEach((dispatch, index) => {
+                    const x = dispatchSize(created, index);
+                    setComputeDispatchSize(dispatch, { x });
+                    dispatch.enabled = x > 0;
+                });
                 (stages ??= new WeakMap()).set(token, created);
             },
             dispatches(buffers: ResidentTextBuffers) {
                 const resources = { input: created._input!, ...buffers, info: created._info!, lines: created._lines! };
-                created._dispatches = created._shaders!.map((shader, index) =>
-                    createComputeDispatch(shader, createComputeBindingSet(shader, resources), { size: { x: index === 1 ? 1 : Math.max(1, Math.ceil(created._words[0]! / 64)) } })
-                );
+                created._dispatches = created._shaders!.map((shader, index) => {
+                    const x = dispatchSize(created, index);
+                    return createComputeDispatch(shader, createComputeBindingSet(shader, resources), { size: { x }, enabled: x > 0 });
+                });
                 return created._dispatches;
             },
             release() {
@@ -306,14 +372,16 @@ export function createComputeTextParagraphStage(token: object, engine: EngineCon
         stage._uploadWords = wordCount === words.length ? words : words.subarray(0, wordCount);
     }
     stage._words = words;
+    stage._uploadRanges = [[0, wordCount]];
     return stage;
 }
 
 function checkBounds(engine: EngineContext, words: Uint32Array): void {
     const paragraphs = words[0]!;
+    const pool = words[11]!;
     const capacity = words[1]!;
     const limits = engine._device.limits;
-    for (const bytes of [words.byteLength, Math.max(1, paragraphs) * 16, Math.max(1, paragraphs) * capacity * 16]) {
+    for (const bytes of [words.byteLength, Math.max(1, pool * 2) * 16, Math.max(1, pool) * capacity * 16]) {
         if (!Number.isSafeInteger(bytes) || bytes > limits.maxBufferSize || bytes > limits.maxStorageBufferBindingSize) {
             throw new Error(`updateComputeTextParagraphs: layout buffer of ${bytes} bytes exceeds device storage limits`);
         }
@@ -321,6 +389,10 @@ function checkBounds(engine: EngineContext, words: Uint32Array): void {
     if (Math.ceil(paragraphs / 64) > limits.maxComputeWorkgroupsPerDimension) {
         throw new Error("updateComputeTextParagraphs: paragraph dispatch exceeds device workgroup limits");
     }
+}
+
+function dispatchSize(stage: ComputeTextParagraphStage, index: number): number {
+    return index === 1 ? 1 : Math.ceil(stage._words[index === 0 ? 9 : 0]! / 64);
 }
 
 function createLayoutShader(engine: EngineContext, entryPoint: string): ComputeShader {
@@ -347,6 +419,8 @@ function grow(engine: EngineContext, stage: ComputeTextParagraphStage, buffer: S
 }
 
 function releaseResources(stage: ComputeTextParagraphStage): void {
+    stage._cache = undefined;
+    stage._epoch++;
     stage._shaders?.forEach(disposeComputeShader);
     for (const buffer of [stage._input, stage._info, stage._lines]) {
         if (buffer) {

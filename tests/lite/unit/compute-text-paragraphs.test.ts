@@ -6,7 +6,14 @@ import type { ComputeFont, ComputeTextParagraphLayout } from "../../../packages/
 import type { EngineContext } from "../../../packages/babylon-lite/src/engine/engine";
 import { createComputeTextData, disposeComputeTextData } from "../../../packages/babylon-lite/src/text/compute-text-data";
 import { createGlyphStorage, disposeGlyphStorage } from "../../../packages/babylon-lite/src/text/glyph-storage";
-import { computeTextParagraphFlags } from "../../../packages/babylon-lite/src/text/compute-text-paragraphs";
+import {
+    allocateComputeTextParagraphSlots,
+    computeTextParagraphCacheValid,
+    computeTextParagraphDiff,
+    computeTextParagraphFlags,
+    computeTextParagraphPoolSize,
+} from "../../../packages/babylon-lite/src/text/compute-text-paragraphs";
+import type { ComputeTextParagraphCache } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
 import type { SegmentAnalysis } from "../../../packages/babylon-lite/src/text/compute-text-segment";
 import * as segmentation from "../../../packages/babylon-lite/src/text/compute-text-segment";
 import { compileComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
@@ -52,6 +59,77 @@ function block(file?: string) {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe("paragraph incremental state", () => {
+    it.each([
+        { previous: [], next: [], expected: [0, 0] },
+        { previous: [], next: ["A"], expected: [0, 0] },
+        { previous: ["A"], next: [], expected: [0, 0] },
+        { previous: ["A", "B"], next: ["A", "B"], expected: [2, 0] },
+        { previous: ["A", "B", "C"], next: ["A", "Bx", "C"], expected: [1, 1] },
+        { previous: ["A", "BC", "D"], next: ["A", "B", "C", "D"], expected: [1, 1] },
+        { previous: ["A", "B", "C", "D"], next: ["A", "BC", "D"], expected: [1, 1] },
+        { previous: ["A", "B", "C"], next: ["A", "C"], expected: [1, 1] },
+        { previous: ["A", "A", "A"], next: ["A", "A"], expected: [2, 0] },
+        { previous: ["A", "B", "A"], next: ["A", "A", "B", "A"], expected: [1, 2] },
+        { previous: ["A", "B", "C"], next: ["X", "Y", "Z"], expected: [0, 0] },
+        { previous: ["A", "B", "C", "D"], next: ["Ax", "B", "Cx", "D"], expected: [0, 1] },
+        { previous: ["", "A", ""], next: ["", "", ""], expected: [1, 1] },
+    ])("finds a non-overlapping positional middle: $previous → $next", ({ previous, next, expected }) => {
+        expect(computeTextParagraphDiff(previous, next)).toEqual(expected);
+    });
+
+    it("reuses a freed slot, preserves suffix slots on split/merge, and first-fits earlier holes", () => {
+        const previous = Uint32Array.of(0, 1, 2, 3);
+        expect(allocateComputeTextParagraphSlots(previous, 12, 4, 1, 2)).toEqual({ order: Uint32Array.of(0, 1, 2, 3), runBase: 1 });
+        const split = allocateComputeTextParagraphSlots(previous, 12, 5, 1, 2)!;
+        expect(split).toEqual({ order: Uint32Array.of(0, 4, 5, 2, 3), runBase: 4 });
+        expect(allocateComputeTextParagraphSlots(split.order, 12, 4, 1, 2)).toEqual({ order: Uint32Array.of(0, 1, 2, 3), runBase: 1 });
+        expect(allocateComputeTextParagraphSlots(Uint32Array.of(4, 5, 2), 12, 3, 1, 1)).toEqual({ order: Uint32Array.of(4, 0, 2), runBase: 0 });
+    });
+
+    it("handles deletion and unchanged input without allocating a dirty range", () => {
+        expect(allocateComputeTextParagraphSlots(Uint32Array.of(3, 1, 4), 8, 2, 1, 1)).toEqual({ order: Uint32Array.of(3, 4), runBase: 0 });
+        expect(allocateComputeTextParagraphSlots(Uint32Array.of(3, 1), 8, 2, 2, 0)).toEqual({ order: Uint32Array.of(3, 1), runBase: 0 });
+        expect(allocateComputeTextParagraphSlots(Uint32Array.of(3, 1), 8, 0, 0, 0)).toEqual({ order: new Uint32Array(), runBase: 0 });
+    });
+
+    it("requests compaction on fragmented space or pool exhaustion", () => {
+        expect(allocateComputeTextParagraphSlots(Uint32Array.of(1, 3, 5), 7, 5, 1, 2)).toBeNull();
+        expect(allocateComputeTextParagraphSlots(Uint32Array.of(0, 1), 2, 3, 2, 0)).toBeNull();
+        expect(allocateComputeTextParagraphSlots(Uint32Array.of(1, 3, 5), 7, 5, 0, 0)).toEqual({ order: Uint32Array.of(0, 1, 2, 3, 4), runBase: 0 });
+        expect([0, 4, 32, 33, 100, 500].map(computeTextParagraphPoolSize)).toEqual([8, 12, 40, 42, 125, 625]);
+    });
+
+    it("invalidates stale submission, generation, font, size, device and shaped-buffer state", () => {
+        const test = block();
+        const data = test.data;
+        const cache: ComputeTextParagraphCache = {
+            _paragraphs: ["A"],
+            _order: Uint32Array.of(0),
+            _capacity: 2,
+            _pool: 9,
+            _width: 100,
+            _font: data._font,
+            _fontSize: data.fontSizePx,
+            _device: data._device,
+            _generation: data._generation,
+            _revision: data._revision,
+            _baseRevision: data._revision,
+            _shaped: data._shaped,
+        };
+        try {
+            expect(computeTextParagraphCacheValid(data, cache)).toBe(true);
+            for (const override of [{ _revision: -1 }, { _generation: -1 }, { _font: font() }, { _fontSize: 12 }, { _device: {} as GPUDevice }, { _shaped: data._instances }]) {
+                expect(computeTextParagraphCacheValid(data, { ...cache, ...override })).toBe(false);
+            }
+            test.close();
+            expect(computeTextParagraphCacheValid(data, cache)).toBe(false);
+        } finally {
+            test.close();
+        }
+    });
+});
 
 describe("paragraph scalar flags", () => {
     it("marks only ASCII spaces and only the last space in a followed run as break-after", () => {
@@ -199,7 +277,7 @@ describe("paragraph synchronous admission", () => {
         for (const kind of ["lines", "dispatch"]) {
             const test = block();
             Object.defineProperty(test.data._device.limits, kind === "lines" ? "maxStorageBufferBindingSize" : "maxComputeWorkgroupsPerDimension", {
-                value: kind === "lines" ? 128 : 0,
+                value: kind === "lines" ? 512 : 0,
             });
             try {
                 expect(() => updateComputeTextParagraphs(test.data, ["A".repeat(20)], { maxWidthPx: 100 })).toThrow(

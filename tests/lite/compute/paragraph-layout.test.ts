@@ -5,7 +5,9 @@ import {
     disposeComputeTextData,
     disposeGlyphStorage,
     getComputeFontLineMetrics,
+    updateComputeTextData,
     updateComputeTextParagraphs,
+    updateGlyphStorage,
 } from "../../../packages/babylon-lite/src/index";
 import type { ComputeTextData, ComputeTextParagraphLayout, GlyphStorage } from "../../../packages/babylon-lite/src/index";
 import { createStorageBuffer, disposeStorageBuffer, readStorageBuffer, updateStorageBuffer } from "../../../packages/babylon-lite/src/resource/storage-buffer";
@@ -16,8 +18,14 @@ import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/co
 import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/compute-text-plan";
 import { compileComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import { analyzeComputeTextSegmentation } from "../../../packages/babylon-lite/src/text/compute-text-segment";
+import * as shapePreparation from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape";
+import * as submission from "../../../packages/babylon-lite/src/compute/compute-task-readback";
+import * as nominalMapping from "../../../packages/babylon-lite/src/text/compute-font";
+import * as closure from "../../../packages/babylon-lite/src/text/compute-text-closure";
+import * as glyphExtraction from "../../../packages/babylon-lite/src/text/compute-glyph-extraction";
 import { awaitComputeTextUpdate } from "./await-update";
 import { fixture, oracleFields } from "./fixtures";
+import { syntheticFont } from "./synthetic";
 import type { Fixture } from "./fixtures";
 import { assertNativeClean, nativeHarness } from "./native";
 import type { NativeHarness } from "./native";
@@ -31,6 +39,16 @@ interface Line {
 
 function bits(value: number): number {
     return new Uint32Array(new Float32Array([value]).buffer)[0]!;
+}
+
+function layoutWords(count: number, capacity: number): Uint32Array {
+    const stride = Math.ceil(capacity / 4);
+    const words = new Uint32Array(16 + count + count * stride);
+    words.set([count, capacity, bits(1), 3, bits(Infinity), bits(32), 0, 0, 0, count, 1, count, stride]);
+    for (let p = 0; p < count; p++) {
+        words[16 + p] = p;
+    }
+    return words;
 }
 
 /** WGSL permits non-fused fma. Discover the adapter's mode outside all measured update paths. */
@@ -142,7 +160,8 @@ async function verifyLayout(data: ComputeTextData, face: Fixture, paragraphs: re
     const capacity = stage._words[1]!;
     const stride = 4 + capacity * 6;
     const shape = new Int32Array(await readStorageBuffer(data._shaped));
-    const info = new Uint32Array(await readStorageBuffer(stage._info!, 0, paragraphs.length * 16));
+    const pool = stage._words[11]!;
+    const info = paragraphs.length ? new Uint32Array(await readStorageBuffer(stage._info!, pool * 16, paragraphs.length * 16)) : new Uint32Array();
     const lines = new Uint32Array(await readStorageBuffer(stage._lines!));
     const instances = new DataView(await readStorageBuffer(data._instances));
     const scale = Math.fround(data.fontSizePx / face.font.unitsPerEm);
@@ -153,20 +172,21 @@ async function verifyLayout(data: ComputeTextData, face: Fixture, paragraphs: re
     let visible = 0;
     let globalLine = 0;
     paragraphs.forEach((text, p) => {
+        const slotIndex = stage._words[16 + p]!;
         const records = oracleFields(face, text);
         const flags = sourceFlags(face, text);
         const expected = referenceLines(records, flags, scale, width);
-        expect([...shape.slice(p * stride, p * stride + 2)], `${p}: shaped status/count`).toEqual([0, records.length]);
+        expect([...shape.slice(slotIndex * stride, slotIndex * stride + 2)], `${p}: shaped status/count`).toEqual([0, records.length]);
         records.forEach((record, i) => {
-            expect([...shape.slice(p * stride + 4 + i * 6, p * stride + 10 + i * 6)], `${p}: shaped ${i}`).toEqual(record);
+            expect([...shape.slice(slotIndex * stride + 4 + i * 6, slotIndex * stride + 10 + i * 6)], `${p}: shaped ${i}`).toEqual(record);
         });
         expect([...info.slice(p * 4, p * 4 + 4)], `${p}: paragraph info`).toEqual([visible, 0, expected.length, globalLine]);
-        const flagOffset = stage._words[8 + p]!;
+        const flagOffset = 16 + pool + slotIndex * stage._words[12]!;
         expect([...new Uint8Array(stage._words.buffer, flagOffset * 4, flags.length)], `${p}: input flags`).toEqual(flags);
         let penX = 0;
         let penY = 0;
         expected.forEach((line, l) => {
-            expect([...lines.slice((p * capacity + l) * 4, (p * capacity + l + 1) * 4)], `${p}: line ${l}`).toEqual([
+            expect([...lines.slice((slotIndex * capacity + l) * 4, (slotIndex * capacity + l + 1) * 4)], `${p}: line ${l}`).toEqual([
                 line.first,
                 line.count,
                 bits(line.width),
@@ -203,13 +223,44 @@ async function verifyLayout(data: ComputeTextData, face: Fixture, paragraphs: re
     expect(data._shaped._data).toBeNull();
 }
 
+/** Compare only defined live records; spare slots and record padding intentionally retain old contents. */
+async function residentOutputs(data: ComputeTextData) {
+    const stage = getComputeTextParagraphStage(data)!;
+    const words = stage._words;
+    const stride = 4 + words[1]! * 6;
+    const shaped = new Int32Array(await readStorageBuffer(data._shaped));
+    const info = new Uint32Array(await readStorageBuffer(stage._info!));
+    const lines = new Uint32Array(await readStorageBuffer(stage._lines!));
+    const logicalShape: number[][] = [];
+    const logicalLines: number[][] = [];
+    const logicalInfo: number[][] = [];
+    for (let p = 0; p < words[0]!; p++) {
+        const slot = words[16 + p]!;
+        const start = slot * stride;
+        const count = shaped[start + 1]!;
+        logicalShape.push([...shaped.slice(start, start + 4 + count * 6)]);
+        const result = info.subarray(slot * 4, slot * 4 + 4);
+        logicalInfo.push([...result]);
+        logicalLines.push(result[1] ? [] : [...lines.slice(slot * words[1]! * 4, (slot * words[1]! + result[2]!) * 4)]);
+    }
+    const indirect = new Uint32Array(await readStorageBuffer(data._indirect));
+    return {
+        shaped: logicalShape,
+        lines: logicalLines,
+        info: logicalInfo,
+        instances: indirect[1] ? new Uint8Array(await readStorageBuffer(data._instances, 0, indirect[1]! * 12)) : new Uint8Array(),
+        indirect,
+        status: new Uint32Array(await readStorageBuffer(data._statusBuffer)),
+    };
+}
+
 describe("native GPU paragraph wrapping and placement", () => {
     let native: NativeHarness;
     let storage: GlyphStorage;
     let fused: boolean;
     const live = new Set<ComputeTextData>();
-    function block(face: Fixture): ComputeTextData {
-        const data = createComputeTextData(native.engine, face.font, storage, face.file, { fontSizePx: 31.75 });
+    function block(face: Fixture, curveSet = face.file): ComputeTextData {
+        const data = createComputeTextData(native.engine, face.font, storage, curveSet, { fontSizePx: 31.75 });
         live.add(data);
         return data;
     }
@@ -224,6 +275,19 @@ describe("native GPU paragraph wrapping and placement", () => {
             maps.mockRestore();
         }
         await verifyLayout(data, face, paragraphs, layout, fused);
+    }
+    async function compareFresh(data: ComputeTextData, face: Fixture, paragraphs: readonly string[], layout: ComputeTextParagraphLayout): Promise<void> {
+        const fresh = block(face, data._curveSet);
+        fresh._disableSegmentation = data._disableSegmentation;
+        try {
+            await (
+                await updateComputeTextParagraphs(fresh, paragraphs, layout)
+            ).completed;
+            expect(await residentOutputs(data)).toEqual(await residentOutputs(fresh));
+        } finally {
+            disposeComputeTextData(fresh);
+            live.delete(fresh);
+        }
     }
     beforeAll(async () => {
         native = await nativeHarness();
@@ -240,6 +304,385 @@ describe("native GPU paragraph wrapping and placement", () => {
         }
         disposeGlyphStorage(storage);
         await native?.close();
+    });
+
+    it.each(["Inter.ttf", "Roboto-Regular.ttf"] as const)("is bit-identical to fresh updates through a four-medium-paragraph editing sequence: %s", async (file) => {
+        const face = fixture(file);
+        const data = block(face);
+        const medium = "office affinity AV To A\u0326 ".repeat(40);
+        let paragraphs = [medium, medium + "A", medium + "B", medium + "C"];
+        let layout: ComputeTextParagraphLayout = { maxWidthPx: 620 };
+        const edit = async (next: string[], nextLayout = layout) => {
+            paragraphs = next;
+            layout = nextLayout;
+            await (
+                await updateComputeTextParagraphs(data, paragraphs, layout)
+            ).completed;
+            await compareFresh(data, face, paragraphs, layout);
+        };
+        await edit(paragraphs);
+        await edit([paragraphs[0]!, paragraphs[1]! + "x", paragraphs[2]!, paragraphs[3]!]); // Character insertion.
+        await edit([paragraphs[0]!, paragraphs[1]!.slice(0, -1), paragraphs[2]!, paragraphs[3]!]); // Character deletion.
+        await edit([paragraphs[0]!, paragraphs[1]!.slice(0, 480), paragraphs[1]!.slice(480), ...paragraphs.slice(2)]); // Enter.
+        expect([...getComputeTextParagraphStage(data)!._cache!._order]).not.toEqual(paragraphs.map((_p, i) => i));
+        await edit([paragraphs[0]!, paragraphs[1]! + paragraphs[2]!, ...paragraphs.slice(3)]); // Backspace.
+        await edit([paragraphs[0]!, "pasted office", "", "affinity AV To", ...paragraphs.slice(2)]);
+        await edit([paragraphs[0]!, ...paragraphs.slice(3)]); // Pure paragraph deletion.
+        await edit([...paragraphs, "appended office"]);
+        await edit([paragraphs[0]! + "A", paragraphs[2]!, paragraphs[1]!, ...paragraphs.slice(3)]); // Disjoint/reorder-like edits.
+        await edit(paragraphs, { maxWidthPx: 390.5 });
+        await edit(paragraphs, { maxWidthPx: 390.5, align: "center", lineHeightPx: 38.25, paragraphSpacingPx: 7.5 });
+        await edit(paragraphs, { ...layout, align: "right" });
+        await edit(paragraphs);
+        const oldCapacity = getComputeTextParagraphStage(data)!._cache!._capacity;
+        await edit([paragraphs[0]!, "office ".repeat(oldCapacity), ...paragraphs.slice(2)]);
+        expect(getComputeTextParagraphStage(data)!._cache!._capacity).toBeGreaterThan(oldCapacity);
+        expect([...getComputeTextParagraphStage(data)!._cache!._order]).toEqual(paragraphs.map((_p, i) => i));
+        await edit([]);
+        await edit(["", "A", ""]);
+    });
+
+    it.each([
+        [100, false],
+        [100, true],
+        [500, false],
+    ] as const)("prepares only one dirty paragraph in a %s-paragraph document (whole-run=%s)", async (count, wholeRun) => {
+        const face = fixture("Roboto-Regular.ttf");
+        const data = block(face);
+        data._disableSegmentation = wholeRun;
+        const text = "office affinity AV To A\u0326 ".repeat(12);
+        const paragraphs = Array.from({ length: count }, (_, p) => text + (p % 2 ? "A" : "B"));
+        const layout = { maxWidthPx: 620 };
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        const stage = getComputeTextParagraphStage(data)!;
+        const buffers = [data._shaped, stage._info, stage._lines];
+        const before = await residentOutputs(data);
+        const mapping = vi.spyOn(nominalMapping, "mapComputeFontScalars");
+        const closing = vi.spyOn(closure, "closeComputeTextGlyphs");
+        const outlines = vi.spyOn(glyphExtraction, "extractComputeGlyphCurves");
+        const prepare = vi.spyOn(shapePreparation, "prepareComputeTextShapeWords");
+        const writes = vi.spyOn(native.device.queue, "writeBuffer");
+        const textures = vi.spyOn(native.device.queue, "writeTexture");
+        const submit = vi.spyOn(submission, "submitComputeTaskResult");
+        paragraphs[57] = paragraphs[57]! + "A"; // Existing closure glyph, nonzero physical runBase.
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        expect(mapping).toHaveBeenCalledTimes(1);
+        expect(closing).toHaveBeenCalledTimes(1);
+        expect(outlines).not.toHaveBeenCalled();
+        expect(textures).not.toHaveBeenCalled();
+        expect(writes.mock.calls.some(([buffer]) => buffer === data._slots._buffer)).toBe(false);
+        const inputWrites = writes.mock.calls.filter(([buffer]) => buffer === stage._input!._buffer);
+        expect(inputWrites.map((call) => call[4])).toEqual([64, stage._words[12]! * 4]);
+        expect(writes.mock.calls.reduce((bytes, call) => bytes + (call[4] as number), 0)).toBeLessThan(8 * paragraphs[57]!.length + stage._words[12]! * 4 + 256);
+        expect(prepare).toHaveBeenCalledTimes(1);
+        const tasks = submit.mock.calls.at(-1)![0];
+        const dispatches = tasks.flatMap((task) => task.dispatches);
+        expect(dispatches.find((dispatch) => dispatch.shader.name === "compute-text-shape")?._x).toBe(wholeRun ? 1 : prepare.mock.calls[0]![1].length);
+        const stitch = dispatches.find((dispatch) => dispatch.shader.name === "compute-text-stitch");
+        expect(stitch?._x).toBe(wholeRun ? undefined : 1);
+        expect(prepare.mock.calls[0]![2]).toBe(wholeRun ? 57 : 0);
+        expect([data._shaped, stage._info, stage._lines]).toEqual(buffers);
+        const after = await residentOutputs(data);
+        for (let p = 0; p < paragraphs.length; p++) {
+            if (p !== 57) {
+                expect(after.shaped[p]).toEqual(before.shaped[p]);
+                expect(after.lines[p]).toEqual(before.lines[p]);
+                expect(after.info[p]).toEqual(before.info[p]);
+            }
+        }
+        vi.restoreAllMocks();
+        await compareFresh(data, face, paragraphs, layout);
+    });
+
+    it("shapes/stitches a nonzero-base dirty batch across several script groups", async () => {
+        const face = fixture("Roboto-Regular.ttf");
+        const data = block(face);
+        const layout = { maxWidthPx: 190 };
+        const paragraphs = ["office affinity ".repeat(20), "α βγ ".repeat(40), "Москва Іі ".repeat(30), "A"];
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        paragraphs[1] += "α";
+        paragraphs[2] += "І";
+        const prepare = vi.spyOn(shapePreparation, "prepareComputeTextShapeWords");
+        const submit = vi.spyOn(submission, "submitComputeTaskResult");
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        expect(prepare).toHaveBeenCalledTimes(2);
+        expect(prepare.mock.calls[0]![2]).toBe(0);
+        expect(prepare.mock.calls[1]![2]).toBe(prepare.mock.calls[0]![1].length);
+        expect(submit.mock.calls[0]![0].flatMap((task) => task.dispatches).find((dispatch) => dispatch.shader.name === "compute-text-stitch")?._x).toBe(2);
+        expect(getComputeTextParagraphStage(data)!._words[8]).toBe(1);
+        vi.restoreAllMocks();
+        await compareFresh(data, face, paragraphs, layout);
+        await verifyLayout(data, face, paragraphs, layout, fused);
+    });
+
+    it("does no preparation/shape/stitch work for placement, width, deletion, or unchanged updates", async () => {
+        const face = fixture("Roboto-Regular.ttf");
+        const data = block(face);
+        let paragraphs = ["office affinity ".repeat(25), "AV To ".repeat(30), "A"];
+        let layout: ComputeTextParagraphLayout = { maxWidthPx: 500 };
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        for (const mode of ["unchanged", "width", "placement", "deletion", "empty"] as const) {
+            if (mode === "width") {
+                layout = { maxWidthPx: 240 };
+            } else if (mode === "placement") {
+                layout = { ...layout, align: "right", lineHeightPx: 40, paragraphSpacingPx: 5 };
+            } else if (mode === "deletion") {
+                paragraphs = [paragraphs[0]!, paragraphs[2]!];
+            } else if (mode === "empty") {
+                paragraphs = [];
+            }
+            const mapping = vi.spyOn(nominalMapping, "mapComputeFontScalars");
+            const prepare = vi.spyOn(shapePreparation, "prepareComputeTextShapeWords");
+            const pipelines = vi.spyOn(native.device, "createComputePipelineAsync");
+            const writes = vi.spyOn(native.device.queue, "writeBuffer");
+            const submit = vi.spyOn(submission, "submitComputeTaskResult");
+            await (
+                await updateComputeTextParagraphs(data, paragraphs, layout)
+            ).completed;
+            const stage = getComputeTextParagraphStage(data)!;
+            expect(mapping).not.toHaveBeenCalled();
+            expect(prepare).not.toHaveBeenCalled();
+            expect(pipelines).not.toHaveBeenCalled();
+            expect(stage._words[9]).toBe(mode === "width" ? paragraphs.length : 0);
+            expect(stage._dispatches![0]!.enabled).toBe(mode === "width");
+            expect(submit.mock.calls[0]![0].map((task) => task.name)).toEqual(["compute-text-resident-pack"]);
+            expect(submit.mock.calls[0]![0][0]!.dispatches.some((dispatch) => dispatch.shader.name === "compute-text-stitch")).toBe(false);
+            expect(writes.mock.calls.filter(([buffer]) => buffer === stage._input!._buffer).reduce((bytes, call) => bytes + (call[4] as number), 0)).toBeLessThanOrEqual(72);
+            vi.restoreAllMocks();
+            await compareFresh(data, face, paragraphs, layout);
+        }
+    });
+
+    it("compacts on pool exhaustion and retains scalar flags when a dirty slot shrinks", async () => {
+        const face = fixture("Roboto-Regular.ttf");
+        const data = block(face);
+        let paragraphs = ["A\u0308 A\u0326 ".repeat(16), "B", "C", "D"];
+        const layout = { maxWidthPx: 60 };
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        const pool = getComputeTextParagraphStage(data)!._cache!._pool;
+        paragraphs[0] = "A";
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        const stage = getComputeTextParagraphStage(data)!;
+        const flagStart = 16 + pool + stage._words[16]! * stage._words[12]!;
+        expect([...stage._words.slice(flagStart, flagStart + stage._words[12]!)].every((word) => word === 0)).toBe(true);
+        await compareFresh(data, face, paragraphs, layout);
+        paragraphs = Array.from({ length: pool + 1 }, () => "A");
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        expect(stage._cache!._pool).toBeGreaterThan(pool);
+        expect([...stage._cache!._order]).toEqual(paragraphs.map((_p, i) => i));
+        await compareFresh(data, face, paragraphs, layout);
+    });
+
+    it("plain updates and synchronous errors invalidate reuse, then recover through a full rebuild", async () => {
+        const face = fixture("Roboto-Regular.ttf");
+        const data = block(face);
+        const paragraphs = ["office affinity", "AV To", "A"];
+        const layout = { maxWidthPx: 100 };
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        for (const invalidate of [
+            async () => (await updateComputeTextData(data, ["A"])).completed,
+            () => {
+                expect(() => updateComputeTextParagraphs(data, ["bad\ntext"], layout)).toThrow(/line breaks/);
+            },
+        ]) {
+            await invalidate();
+            const mapping = vi.spyOn(nominalMapping, "mapComputeFontScalars");
+            await (
+                await updateComputeTextParagraphs(data, paragraphs, layout)
+            ).completed;
+            expect(mapping).toHaveBeenCalledTimes(paragraphs.length);
+            mapping.mockRestore();
+            await compareFresh(data, face, paragraphs, layout);
+        }
+    });
+
+    it("adds new glyph outlines/slot entries only and rebuilds on atlas capacity growth", async () => {
+        const face = fixture("Inter.ttf");
+        const data = block(face, "paragraph-additive-closure");
+        const layout = { maxWidthPx: 100 };
+        let paragraphs = ["ABCDE", "A"];
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        const stage = getComputeTextParagraphStage(data)!;
+        const atlas = storage._curveSets.get(data._curveSet)!._atlas;
+        const revision = stage._cache!._baseRevision;
+        const slots = new Map(atlas._glyphSlots);
+        const installedGlyphs = new Set(data._slotGlyphIds);
+        const firstCurveTexel = atlas._curveTexelsUsed;
+        const firstBandTexel = atlas._bandTexelsUsed;
+        const firstSlot = atlas._slotCount;
+        const mapping = vi.spyOn(nominalMapping, "mapComputeFontScalars");
+        const outlines = vi.spyOn(glyphExtraction, "extractComputeGlyphCurves");
+        const writes = vi.spyOn(native.device.queue, "writeBuffer");
+        const textures = vi.spyOn(native.device.queue, "writeTexture");
+        paragraphs = ["ABCDF", "A"];
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        expect(stage._cache!._baseRevision).toBe(revision);
+        expect(mapping).toHaveBeenCalledTimes(1);
+        expect(outlines).toHaveBeenCalledTimes(1);
+        for (const [glyph, slot] of slots) {
+            expect(atlas._glyphSlots.get(glyph)).toBe(slot);
+        }
+        const meta = writes.mock.calls.filter(([buffer]) => buffer === atlas._gpu!._metaBuf);
+        expect(meta.map((call) => [call[1], call[4]])).toEqual([[firstSlot * 48, (atlas._slotCount - firstSlot) * 48]]);
+        const entries = writes.mock.calls.filter(([buffer]) => buffer === data._slots._buffer);
+        expect(entries.map((call) => [call[1], call[4]])).toEqual(data._slotGlyphIds.filter((id) => !installedGlyphs.has(id)).map((id) => [id * 4, 4]));
+        expect(textures.mock.calls.map((call) => call[2].offset)).toEqual([firstCurveTexel * 16, firstBandTexel * 16]);
+        vi.restoreAllMocks();
+        await compareFresh(data, face, paragraphs, layout);
+        // Keep paragraph lengths inside the existing stride; the new repertoire exceeds atlas metadata capacity.
+        const cap = stage._cache!._capacity;
+        const alphabet = "GHIJKLMNOPQRSTUVWXYZ".match(/.{1,5}/gu)!;
+        paragraphs = [paragraphs[0]!, ...alphabet, "A"];
+        const oldMeta = atlas._gpu!._metaBuf;
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        expect(atlas._gpu!._metaBuf).not.toBe(oldMeta);
+        expect(stage._cache!._capacity).toBe(cap);
+        expect(stage._cache!._baseRevision).toBeGreaterThan(revision);
+        expect([...stage._cache!._order]).toEqual(paragraphs.map((_p, i) => i));
+        await compareFresh(data, face, paragraphs, layout);
+    });
+
+    it("keeps logical failure ordering in cached slot info and invalidates after a failed incremental submission", async () => {
+        const face = fixture("Roboto-Regular.ttf");
+        const data = block(face);
+        const layout = { maxWidthPx: 100 };
+        const paragraphs = ["office A", "office B", "office C", "office D"];
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        const stage = getComputeTextParagraphStage(data)!;
+        const original = submission.submitComputeTaskResult;
+        const injected = vi.spyOn(submission, "submitComputeTaskResult").mockImplementationOnce((tasks, buffer, bytes, consume, staging) => {
+            const slot = stage._words[16 + 2]!;
+            const stride = 4 + stage._words[1]! * 6;
+            updateStorageBuffer(native.engine, data._shaped, Int32Array.of(1, 0, 4, 2), slot * stride * 4);
+            // Run the real layout over a rejecting clean slot and the previously shaped dirty slot.
+            stage._words[9] = paragraphs.length;
+            stage._words[10] = 1;
+            updateStorageBuffer(native.engine, stage._input!, stage._words.subarray(0, 16));
+            return original(tasks.slice(-1), buffer, bytes, consume, staging);
+        });
+        paragraphs[1] += "A";
+        const failed = await updateComputeTextParagraphs(data, paragraphs, layout);
+        await expect(failed.completed).rejects.toThrow(/unsupported lookup/);
+        expect(stage._cache).toBeUndefined();
+        expect([...new Uint32Array(await readStorageBuffer(data._indirect))]).toEqual([6, 0, 0, 0]);
+        injected.mockRestore();
+        const mapping = vi.spyOn(nominalMapping, "mapComputeFontScalars");
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        expect(mapping).toHaveBeenCalledTimes(paragraphs.length);
+        mapping.mockRestore();
+        await compareFresh(data, face, paragraphs, layout);
+    });
+
+    it("matches fresh failing paragraphs and their later fixes through real unsupported lookups", async () => {
+        const face = syntheticFont("pair-reject");
+        const data = block(face);
+        const fresh = block(face);
+        const layout = { maxWidthPx: 100, lineHeightPx: 32 };
+        const paragraphs = ["A", "BA", "C"];
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        paragraphs[1] = "BC";
+        await expect((await updateComputeTextParagraphs(data, paragraphs, layout)).completed).rejects.toThrow(/unsupported lookup/);
+        await expect((await updateComputeTextParagraphs(fresh, paragraphs, layout)).completed).rejects.toThrow(/unsupported lookup/);
+        expect(await residentOutputs(data)).toEqual(await residentOutputs(fresh));
+        expect(getComputeTextParagraphStage(data)!._cache).toBeUndefined();
+        paragraphs[1] = "BA";
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        await compareFresh(data, face, paragraphs, layout);
+    });
+
+    it("rebuilds after external atlas mutation, including a formerly empty glyph becoming visible", async () => {
+        const face = fixture("Inter.ttf");
+        const data = block(face, "paragraph-external-mutation");
+        const layout = { maxWidthPx: 100 };
+        const paragraphs = ["A A", "B B"];
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        const cs = storage._curveSets.get(data._curveSet)!;
+        const source = cs._curves.get(face.oracle.glyphId(0x41))!;
+        const space = face.oracle.glyphId(0x20);
+        expect(data._slotWords![space]).toBe(0xfffffffe);
+        updateGlyphStorage(storage, data._curveSet, new Map([[space, { ...source, glyphId: space }]]));
+        const mapping = vi.spyOn(nominalMapping, "mapComputeFontScalars");
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        expect(mapping).toHaveBeenCalledTimes(paragraphs.length);
+        expect(data._slotWords![space]).toBe(cs._atlas._glyphSlots.get(space)!._index);
+        mapping.mockRestore();
+        await compareFresh(data, face, paragraphs, layout);
+    });
+
+    it.each([false, true])("late completion failure invalidates descendants but not a newer full rebuild (rebuild=%s)", async (full) => {
+        const face = fixture("Roboto-Regular.ttf");
+        const data = block(face);
+        const layout = { maxWidthPx: 100 };
+        let paragraphs = ["office A", "office B", "office C"];
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const original = submission.submitComputeTaskResult;
+        const held = vi.spyOn(submission, "submitComputeTaskResult").mockImplementationOnce((...args) => original(...args).then(() => gate.then(() => 1)));
+        paragraphs = ["office AA", ...paragraphs.slice(1)];
+        const previous = await updateComputeTextParagraphs(data, paragraphs, layout);
+        if (full) {
+            await (
+                await updateComputeTextData(data, ["A"])
+            ).completed;
+        }
+        paragraphs = [paragraphs[0]!, paragraphs[1]! + "A", paragraphs[2]!];
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        const stage = getComputeTextParagraphStage(data)!;
+        const latest = stage._cache;
+        release();
+        await expect(previous.completed).rejects.toThrow(/unsupported lookup/);
+        expect(stage._cache).toBe(full ? latest : undefined);
+        held.mockRestore();
+        const mapping = vi.spyOn(nominalMapping, "mapComputeFontScalars");
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        expect(mapping).toHaveBeenCalledTimes(full ? 0 : paragraphs.length);
+        mapping.mockRestore();
+        await compareFresh(data, face, paragraphs, layout);
     });
 
     it.each(["Inter.ttf", "Roboto-Regular.ttf"] as const)("matches oracle records, lines, instances and status-only readback: %s", async (file) => {
@@ -310,7 +753,11 @@ describe("native GPU paragraph wrapping and placement", () => {
         const words = stage._words;
         const floats = stage._floatWords;
         const upload = stage._uploadWords;
-        expect(upload.length).toBeLessThan(words.length);
+        expect(stage._uploadRanges).toEqual([
+            [0, 16],
+            [81, 81],
+            [16 + stage._words[11]!, 16 + stage._words[11]!],
+        ]);
         await update(
             data,
             face,
@@ -349,6 +796,8 @@ describe("native GPU paragraph wrapping and placement", () => {
         await (
             await first
         ).completed;
+        expect(getComputeTextParagraphStage(data)!._cache).toBeUndefined();
+        await update(data, face, ["office"], { maxWidthPx: 100 });
         disposeComputeTextData(data);
         live.delete(data);
         expect(() => updateComputeTextParagraphs(data, ["A"], { maxWidthPx: 100 })).toThrow(/updateComputeTextParagraphs: data is disposed/);
@@ -415,7 +864,7 @@ describe("native GPU paragraph wrapping and placement", () => {
     it("recreates stage resources and bumps its version on a device change", async () => {
         const other = await nativeHarness();
         const token = {};
-        const words = Uint32Array.of(0, 1, bits(1), 1, bits(Infinity), bits(32), 0, 0);
+        const words = layoutWords(0, 1);
         const stage = createComputeTextParagraphStage(token, native.engine, words);
         try {
             stage.prepare(native.engine, 0, 1);
@@ -443,11 +892,7 @@ describe("native GPU paragraph wrapping and placement", () => {
         const token = {};
         const count = 300;
         const capacity = 1;
-        const words = new Uint32Array(8 + count * 2);
-        words.set([count, capacity, bits(1), 3, bits(Infinity), bits(32), 0, 0]);
-        for (let p = 0; p < count; p++) {
-            words[8 + p] = 8 + count + p;
-        }
+        const words = layoutWords(count, capacity);
         const records = new Int32Array(count * 10);
         for (let p = 0; p < count; p++) {
             records[p * 10 + 1] = 1;
@@ -484,11 +929,70 @@ describe("native GPU paragraph wrapping and placement", () => {
         }
     });
 
+    it("preserves cached slot failures and selects the first failing logical paragraph after reordering or deletion", async () => {
+        const token = {};
+        const count = 4;
+        const words = layoutWords(count, 1);
+        words.set([2, 0, 3, 1], 16);
+        const records = new Int32Array(count * 10);
+        for (let p = 0; p < count; p++) {
+            records[p * 10 + 1] = 1;
+            records[p * 10 + 6] = 20;
+        }
+        records[0] = 1;
+        records[20] = 3;
+        const buffers = {
+            shaped: createStorageBuffer(native.engine, records, { writable: true }),
+            slots: createStorageBuffer(native.engine, Uint32Array.of(0)),
+            instances: createStorageBuffer(native.engine, count * 12, { writable: true }),
+            indirect: createStorageBuffer(native.engine, 16, { writable: true }),
+            status: createStorageBuffer(native.engine, 4, { writable: true }),
+        };
+        const stage = createComputeTextParagraphStage(token, native.engine, words);
+        const task = createComputeTask(native.engine, "paragraph-cached-status");
+        try {
+            stage.prepare(native.engine, count, 1);
+            stage.dispatches(buffers).forEach((dispatch) => addComputeDispatch(task, dispatch));
+            task.record();
+            await prepareComputeTask(task);
+            submitComputeTasks([task]);
+            expect([...new Uint32Array(await readStorageBuffer(buffers.status))]).toEqual([3]);
+            const slots = await readStorageBuffer(stage._info!, 0, count * 16);
+            words.set([3, 0, 1, 2], 16);
+            words[8] = 3;
+            words[9] = 1;
+            words[10] = 0;
+            stage.prepare(native.engine, 0, 1);
+            await prepareComputeTask(task);
+            submitComputeTasks([task]);
+            expect([...new Uint32Array(await readStorageBuffer(buffers.status))]).toEqual([1]);
+            expect(await readStorageBuffer(stage._info!, 0, count * 16)).toEqual(slots);
+            words[0] = 2;
+            words[9] = 0;
+            words.set([3, 1], 16);
+            stage.prepare(native.engine, 0, 1);
+            await prepareComputeTask(task);
+            submitComputeTasks([task]);
+            expect([...new Uint32Array(await readStorageBuffer(buffers.status))]).toEqual([0]);
+            expect([...new Uint32Array(await readStorageBuffer(buffers.indirect))]).toEqual([6, 2, 0, 0]);
+            expect(await readStorageBuffer(stage._info!, 0, count * 16)).toEqual(slots);
+        } finally {
+            task.dispose();
+            stage.release();
+            Object.values(buffers).forEach(disposeStorageBuffer);
+        }
+    });
+
     it("counts visible slots and keeps y advances across lines, including visible hanging spaces and protected clusters", async () => {
         const token = {};
         const count = 1;
         const capacity = 5;
-        const words = Uint32Array.of(1, capacity, bits(0.5), 3, bits(6), bits(10), 0, 0, 9, 0x04040400, 1);
+        const words = layoutWords(count, capacity);
+        words[2] = bits(0.5);
+        words[4] = bits(6);
+        words[5] = bits(10);
+        words[17] = 0x04040400;
+        words[18] = 1;
         const records = Int32Array.of(0, 5, 0, 0, 0, 0, 20, 2, 1, 2, 1, 1, 0, 3, -1, 1, 1, 2, 0, 4, -2, 2, 0, 3, 20, 5, 3, 3, 2, 4, 10, 6, 0, 4);
         const buffers = {
             shaped: createStorageBuffer(native.engine, records, { writable: true }),
@@ -505,7 +1009,7 @@ describe("native GPU paragraph wrapping and placement", () => {
             task.record();
             await prepareComputeTask(task);
             submitComputeTasks([task]);
-            const info = new Uint32Array(await readStorageBuffer(stage._info!));
+            const info = new Uint32Array(await readStorageBuffer(stage._info!, count * 16, count * 16));
             expect([...info]).toEqual([0, 0, 1, 0]);
             expect([...new Uint32Array(await readStorageBuffer(stage._lines!, 0, 16))]).toEqual([0, 5, bits(20), 0]);
             const actual = new DataView(await readStorageBuffer(buffers.instances));
@@ -515,21 +1019,21 @@ describe("native GPU paragraph wrapping and placement", () => {
                 [20, 9, 9],
             ]);
             // Protect the marks but allow an emergency break before record 3.
-            words[9] = 0x00040400;
+            words[17] = 0x00040400;
             stage.prepare(native.engine, count, capacity);
             await prepareComputeTask(task);
             submitComputeTasks([task]);
-            expect([...new Uint32Array(await readStorageBuffer(stage._info!))]).toEqual([0, 0, 2, 0]);
+            expect([...new Uint32Array(await readStorageBuffer(stage._info!, count * 16, count * 16))]).toEqual([0, 0, 2, 0]);
             expect([...new Uint32Array(await readStorageBuffer(stage._lines!, 0, 32))]).toEqual([0, 3, bits(10), 0, 3, 2, bits(10), 3]);
             expect(new DataView(await readStorageBuffer(buffers.instances)).getFloat32(16, true)).toBe(-4);
             expect([...new Uint32Array(await readStorageBuffer(buffers.indirect))]).toEqual([6, 3, 0, 0]);
-            words[9] = 0;
+            words[17] = 0;
             records[11] = records[17] = records[23] = 0;
             updateStorageBuffer(native.engine, buffers.shaped, records);
             stage.prepare(native.engine, count, capacity);
             await prepareComputeTask(task);
             submitComputeTasks([task]);
-            expect([...new Uint32Array(await readStorageBuffer(stage._info!))]).toEqual([0, 0, 1, 0]);
+            expect([...new Uint32Array(await readStorageBuffer(stage._info!, count * 16, count * 16))]).toEqual([0, 0, 1, 0]);
             expect([...new Uint32Array(await readStorageBuffer(stage._lines!, 0, 16))]).toEqual([0, 5, bits(20), 0]);
         } finally {
             task.dispose();

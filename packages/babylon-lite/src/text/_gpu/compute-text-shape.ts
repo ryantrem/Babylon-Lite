@@ -273,6 +273,8 @@ fn main(@builtin(workgroup_id) group:vec3u, @builtin(local_invocation_index) lan
   let base = ${localScratch ? "0u" : "local * capacity * GLYPH_WORDS"};
   nominalSource = true;
   if (lane == 0u) {
+    output[out + 2] = 0;
+    output[out + 3] = 0;
     output[out] = 0;
     output[out + 1] = 0;
     length = runs[inputOrigin];
