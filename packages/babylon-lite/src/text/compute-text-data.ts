@@ -367,17 +367,26 @@ function installClosure(data: ComputeTextData, glyphIds: readonly number[], rebu
     }
 }
 
-function growDrawBuffers(data: ComputeTextData, runCount: number, capacity: number): void {
+/** @internal Exact four-byte-aligned resident draw allocations, shared with paragraph admission. */
+export function computeTextDrawBufferSizes(runCount: number, capacity: number): readonly (readonly [string, number])[] {
     const shapedBytes = Math.max(1, runCount) * (COMPUTE_TEXT_HEADER_WORDS + capacity * COMPUTE_TEXT_RECORD_WORDS) * 4;
     const instanceBytes = Math.max(1, runCount * capacity) * TEXT_INSTANCE_BYTES;
-    for (const bytes of [shapedBytes, instanceBytes]) {
+    return [
+        ["shaped", shapedBytes],
+        ["instances", instanceBytes],
+    ];
+}
+
+function growDrawBuffers(data: ComputeTextData, runCount: number, capacity: number): void {
+    const sizes = computeTextDrawBufferSizes(runCount, capacity);
+    for (const [, bytes] of sizes) {
         const limits = data._device.limits;
         if (!Number.isSafeInteger(bytes) || bytes > limits.maxBufferSize || bytes > limits.maxStorageBufferBindingSize) {
             throw new Error(`updateComputeTextData: draw buffer of ${bytes} bytes exceeds device storage limits`);
         }
     }
-    data._shaped = grow(data, data._shaped, shapedBytes, { label: "compute-text-shaped", writable: true });
-    const nextInstances = grow(data, data._instances, instanceBytes, { label: "compute-text-instances", writable: true, vertex: true });
+    data._shaped = grow(data, data._shaped, sizes[0]![1], { label: "compute-text-shaped", writable: true });
+    const nextInstances = grow(data, data._instances, sizes[1]![1], { label: "compute-text-instances", writable: true, vertex: true });
     if (nextInstances !== data._instances) {
         data._instances = nextInstances;
     }

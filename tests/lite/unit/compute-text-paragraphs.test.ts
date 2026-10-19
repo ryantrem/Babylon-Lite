@@ -4,16 +4,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createComputeFontFromBuffer, getComputeFontLineMetrics, updateComputeTextParagraphs } from "../../../packages/babylon-lite/src/index";
 import type { ComputeFont, ComputeTextParagraphLayout } from "../../../packages/babylon-lite/src/index";
 import type { EngineContext } from "../../../packages/babylon-lite/src/engine/engine";
-import { createComputeTextData, disposeComputeTextData } from "../../../packages/babylon-lite/src/text/compute-text-data";
+import { computeTextDrawBufferSizes, createComputeTextData, disposeComputeTextData } from "../../../packages/babylon-lite/src/text/compute-text-data";
 import { createGlyphStorage, disposeGlyphStorage } from "../../../packages/babylon-lite/src/text/glyph-storage";
 import {
     allocateComputeTextParagraphSlots,
     computeTextParagraphCacheValid,
+    computeTextParagraphAllocation,
     computeTextParagraphDiff,
     computeTextParagraphFlags,
     computeTextParagraphPoolSize,
 } from "../../../packages/babylon-lite/src/text/compute-text-paragraphs";
 import { createComputeTextParagraphStage } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
+import * as paragraphStages from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
 import type { ComputeTextParagraphCache } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
 import type { SegmentAnalysis } from "../../../packages/babylon-lite/src/text/compute-text-segment";
 import * as segmentation from "../../../packages/babylon-lite/src/text/compute-text-segment";
@@ -132,6 +134,96 @@ describe("paragraph incremental state", () => {
     });
 });
 
+describe("paragraph allocation budget", () => {
+    it.each([
+        { count: 0, needed: 1, limit: 1 << 20, pool: 8, capacity: 2 },
+        { count: 1, needed: 20, limit: 1 << 20, pool: 9, capacity: 25 },
+        { count: 4, needed: 20, limit: 1 << 20, pool: 12, capacity: 25 },
+        { count: 1, needed: 20, limit: 4096, pool: 3, capacity: 25 },
+        { count: 3, needed: 20, limit: 4096, pool: 3, capacity: 25 },
+        { count: 1, needed: 20, limit: 1200, pool: 1, capacity: 25 },
+        { count: 1, needed: 20, limit: 1199, pool: 1, capacity: 24 },
+        { count: 1, needed: 20, limit: 960, pool: 1, capacity: 20 },
+    ])("plans required storage before optional headroom: $count/$needed/$limit", ({ count, needed, limit, pool, capacity }) => {
+        const limits = { maxBufferSize: limit, maxStorageBufferBindingSize: limit };
+        const planned = computeTextParagraphAllocation(limits, count, needed);
+        expect(planned).toEqual({ pool, capacity });
+        const sizes = [...paragraphStages.computeTextParagraphBufferSizes(pool, capacity), ...computeTextDrawBufferSizes(pool, capacity)];
+        for (const [, bytes] of sizes) {
+            expect(bytes % 4).toBe(0);
+            expect(bytes).toBeLessThanOrEqual(limit);
+        }
+        if (pool < computeTextParagraphPoolSize(count)) {
+            expect(paragraphStages.computeTextParagraphBufferSizes(pool + 1, capacity).some(([, bytes]) => bytes > limit)).toBe(true);
+        }
+        if (capacity < Math.ceil(needed * 1.25)) {
+            expect(paragraphStages.computeTextParagraphBufferSizes(count, capacity + 1).some(([, bytes]) => bytes > limit)).toBe(true);
+        }
+    });
+
+    it("accounts for every affected layout/draw buffer with buffer-specific diagnostics", () => {
+        const pool = 3;
+        const capacity = 25;
+        const sizes = [...paragraphStages.computeTextParagraphBufferSizes(pool, capacity), ...computeTextDrawBufferSizes(pool, capacity)];
+        expect(sizes).toEqual([
+            ["layout input", 160],
+            ["layout info", 96],
+            ["layout lines", 3600],
+            ["shaped", 1848],
+            ["instances", 900],
+        ]);
+        for (const [name, bytes] of sizes) {
+            for (const limit of ["maxBufferSize", "maxStorageBufferBindingSize"] as const) {
+                const limits = { maxBufferSize: 1 << 20, maxStorageBufferBindingSize: 1 << 20, [limit]: bytes - 1 };
+                expect(() => paragraphStages.checkComputeTextParagraphBufferSize(limits, name, bytes, pool, capacity)).toThrow(
+                    `updateComputeTextParagraphs: ${name} buffer of ${bytes} bytes exceeds device storage limits ` +
+                        `(maxBufferSize=${limits.maxBufferSize}, maxStorageBufferBindingSize=${limits.maxStorageBufferBindingSize}, pool=3, capacity=25)`
+                );
+                limits[limit] = bytes;
+                expect(() => paragraphStages.checkComputeTextParagraphBufferSize(limits, name, bytes, pool, capacity)).not.toThrow();
+            }
+        }
+        expect(() =>
+            computeTextParagraphAllocation({ maxBufferSize: Number.MAX_SAFE_INTEGER, maxStorageBufferBindingSize: Number.MAX_SAFE_INTEGER }, 1, Number.MAX_SAFE_INTEGER)
+        ).toThrow(/layout input buffer.*storage limits/);
+    });
+
+    it("preflights each actual layout allocation, including retained/rounded input words", () => {
+        const test = block();
+        const words = new Uint32Array(100);
+        words[1] = 1;
+        words[11] = 1;
+        try {
+            Object.defineProperty(test.data._device.limits, "maxStorageBufferBindingSize", { value: 399, configurable: true });
+            expect(() => createComputeTextParagraphStage({}, test.data._engine, words, 18)).toThrow(/layout input buffer of 400 bytes.*maxStorageBufferBindingSize=399/);
+            words[11] = 30;
+            Object.defineProperty(test.data._device.limits, "maxStorageBufferBindingSize", { value: 959 });
+            expect(() => createComputeTextParagraphStage({}, test.data._engine, words)).toThrow(/layout info buffer of 960 bytes.*pool=30, capacity=1/);
+        } finally {
+            test.close();
+        }
+    });
+
+    it("clamps doubled CPU input reservation to the device budget and checks the actual bound size", () => {
+        const test = block();
+        Object.defineProperty(test.data._device.limits, "maxStorageBufferBindingSize", { value: 4096, configurable: true });
+        const token = {};
+        try {
+            const stage = paragraphStages.reserveComputeTextParagraphStage(token, test.data._engine, 1, 1, 1, 500);
+            expect(stage._words.byteLength).toBe(2068);
+            expect(paragraphStages.reserveComputeTextParagraphStage(token, test.data._engine, 1, 1, 1, 600)).toBe(stage);
+            expect(stage._words.byteLength).toBe(4096);
+            expect(stage._uploadWords.byteLength).toBe(2468);
+            Object.defineProperty(test.data._device.limits, "maxStorageBufferBindingSize", { value: 3000 });
+            paragraphStages.reserveComputeTextParagraphStage(token, test.data._engine, 1, 1, 1, 600);
+            expect(stage._words.byteLength).toBe(3000);
+            stage.release();
+        } finally {
+            test.close();
+        }
+    });
+});
+
 describe("paragraph scalar flags", () => {
     it("marks only ASCII spaces and only the last space in a followed run as break-after", () => {
         const input = scalars("  A   B  \u00a0\u2002");
@@ -208,6 +300,62 @@ describe("paragraph scalar flags", () => {
 });
 
 describe("paragraph synchronous admission", () => {
+    it.each(["maxBufferSize", "maxStorageBufferBindingSize"] as const)("admits required records when preferred slots exceed %s", (limit) => {
+        const test = block();
+        Object.defineProperty(test.data._device.limits, limit, { value: 4096 });
+        const admitted = new Error("test stopped after storage admission");
+        const reserve = paragraphStages.reserveComputeTextParagraphStage;
+        const spy = vi.spyOn(paragraphStages, "reserveComputeTextParagraphStage").mockImplementation((...args) => {
+            const stage = reserve(...args);
+            expect(stage._words[1]).toBe(25);
+            expect(stage._words[11]).toBe(3);
+            throw admitted;
+        });
+        try {
+            expect(() => updateComputeTextParagraphs(test.data, ["A".repeat(20)], { maxWidthPx: 100 })).toThrow(admitted.message);
+            expect(spy).toHaveBeenCalledOnce();
+            expect(test.storage._curveSets.size).toBe(0);
+        } finally {
+            test.close();
+        }
+    });
+
+    it("reduces capacity headroom, but never the conservative required capacity", () => {
+        const test = block();
+        Object.defineProperty(test.data._device.limits, "maxStorageBufferBindingSize", { value: 1000 });
+        const admitted = new Error("test stopped after storage admission");
+        const reserve = paragraphStages.reserveComputeTextParagraphStage;
+        vi.spyOn(paragraphStages, "reserveComputeTextParagraphStage").mockImplementation((...args) => {
+            const stage = reserve(...args);
+            expect(stage._words[1]).toBe(20);
+            expect(stage._words[11]).toBe(1);
+            throw admitted;
+        });
+        try {
+            expect(() => updateComputeTextParagraphs(test.data, ["A".repeat(20)], { maxWidthPx: 100 })).toThrow(admitted.message);
+        } finally {
+            test.close();
+        }
+    });
+
+    it("reports exact required allocation and limits before atlas mutation and clears drawing", () => {
+        const test = block();
+        Object.defineProperty(test.data._device.limits, "maxStorageBufferBindingSize", { value: 959 });
+        try {
+            expect(() => updateComputeTextParagraphs(test.data, ["A".repeat(20)], { maxWidthPx: 100 })).toThrow(
+                "updateComputeTextParagraphs: layout lines buffer of 960 bytes exceeds device storage limits " +
+                    "(maxBufferSize=1048576, maxStorageBufferBindingSize=959, pool=1, capacity=20)"
+            );
+            expect(test.storage._curveSets.size).toBe(0);
+            expect(test.data.status).toBe("ready");
+            const writes = vi.mocked(test.data._device.queue.writeBuffer).mock.calls;
+            const indirect = writes.filter((call) => call[0] === test.data._indirect._buffer).at(-1)!;
+            expect([...new Uint32Array(indirect[2] as ArrayBuffer, indirect[3], 4)]).toEqual([6, 0, 0, 0]);
+        } finally {
+            test.close();
+        }
+    });
+
     it.each(["\n", "\r", "\t", "\u2028", "\u2029"])("rejects paragraph controls synchronously: %j", (control) => {
         expect(() => updateComputeTextParagraphs(undefined!, ["A" + control + "B"], { maxWidthPx: 100 })).toThrow(/updateComputeTextParagraphs:.*line breaks or tabs/);
     });
@@ -283,7 +431,7 @@ describe("paragraph synchronous admission", () => {
 
             try {
                 expect(() => updateComputeTextParagraphs(test.data, ["A".repeat(20)], { maxWidthPx: 100 })).toThrow(
-                    kind === "lines" ? /updateComputeTextParagraphs: layout buffer.*storage limits/ : /updateComputeTextParagraphs:.*workgroup limits/
+                    kind === "lines" ? /updateComputeTextParagraphs: layout lines buffer.*storage limits/ : /updateComputeTextParagraphs:.*workgroup limits/
                 );
                 expect(test.storage._curveSets.size).toBe(0);
                 expect(test.data.status).toBe("ready");
@@ -336,7 +484,7 @@ describe("paragraph per-record storage", () => {
             stage.prepare(test.data._engine, 0, 10);
             expect(stage._lines!.byteLength).toBe(2 * 10 * 48);
             Object.defineProperty(test.data._device.limits, "maxStorageBufferBindingSize", { value: 2 * 10 * 48 - 1 });
-            expect(() => createComputeTextParagraphStage({}, test.data._engine, words)).toThrow(/layout buffer of 960 bytes exceeds device storage limits/);
+            expect(() => createComputeTextParagraphStage({}, test.data._engine, words)).toThrow(/layout lines buffer of 960 bytes exceeds device storage limits/);
         } finally {
             stage.release();
             test.close();

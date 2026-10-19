@@ -160,9 +160,45 @@ Each logical paragraph owns a physical shaped run slot. Release the old
 middle's slots, find the first contiguous free range of `k` slots, and allocate
 the dirty batch there. A one-paragraph edit usually reuses its own slot; queue
 ordering makes immediate reuse safe. If no contiguous range exists, or growth
-is needed, compact with a full rebuild: logical `i` maps to slot `i`, pool =
-`N + max(8, ceil(N/4))`, record capacity = `ceil(maxNeeded * 1.25)`.
-Capacity is at least one. Flag stride is `ceil(scalarCapacity/4)`; the current
+is needed, compact with a full rebuild: logical `i` maps to slot `i`.
+The preferred pool is `N + max(8, ceil(N/4))` and preferred record capacity is
+`ceil(maxNeeded * 1.25)`, but both allowances are optional. Required storage
+(`pool = N`, capacity = `maxNeeded`, at least one) must fit first. A deterministic
+monotone search first selects the largest capacity up to the preferred capacity
+that fits the required live pool, then the largest pool up to the preferred pool
+that fits that capacity. This favors growth headroom over empty insertion slots
+without rejecting content merely because the preferred reservation does not fit.
+There remains exactly one physical slot per logical paragraph and one uniform
+record stride; this is sizing policy, not post-shape chunking.
+
+Preflight every pool/capacity-dependent allocation against both actual device
+limits (`maxBufferSize` and `maxStorageBufferBindingSize`) and safe integer
+arithmetic, before closure/atlas mutation:
+
+| Buffer                          | Bytes                                       |
+| ------------------------------- | ------------------------------------------- |
+| Layout input                    | `(16 + pool + pool * ceil(capacity/4)) * 4` |
+| Layout info                     | `max(1, pool * 2) * 16`                     |
+| Layout lines and scratch tables | `max(1, pool) * capacity * 48`              |
+| Resident shaped records         | `max(1, pool) * (4 + capacity * 6) * 4`     |
+| Resident draw instances         | `max(1, pool * capacity) * 12`              |
+
+Unsegmented shaping scratch uses at most `pool * capacity * 32` bytes, bounded
+by the line/scratch allocation; segmented shaping retains its existing independent
+safe-boundary sizing and bounds checks. The draw allocation formulas are shared
+with ordinary resident updates. All sizes are already four-byte aligned.
+Reusable CPU input words may grow by doubling, clamped to the smaller device
+limit in whole words; admission also checks that actual high-water byte length
+before prepare binds it. GPU draw/layout allocations grow to exactly the checked
+size, or retain an already admitted high-water buffer. Failed required storage
+throws the existing paragraph-prefixed `Error`, naming the buffer, exact bytes,
+both device limits, pool and capacity. A ready block draws nothing after rejection
+(`indirect = [6, 0, 0, 0]`) and its atlas is unchanged.
+
+Reduced optional headroom can cause more capacity-growth rebuilds or earlier
+pool exhaustion/fragmentation compaction; cache stamps and first-fit reuse rules
+are unchanged, and every pool/capacity change still rebuilds all live paragraphs.
+Flag stride is `ceil(scalarCapacity/4)`; the current
 shape expansion bound is at least the scalar count, so record capacity is also
 the scalar high-water bound. Check dirty scalar lengths explicitly; overflow
 rebuilds. All buffer arithmetic and dispatches are checked against device limits.

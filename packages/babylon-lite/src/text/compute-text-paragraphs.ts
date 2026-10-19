@@ -1,10 +1,15 @@
 import type { ComputeTextData, ComputeTextUpdate } from "./compute-text-data.js";
-import { submitComputeTextData } from "./compute-text-data.js";
+import { computeTextDrawBufferSizes, submitComputeTextData } from "./compute-text-data.js";
 import { getComputeFontLineMetrics } from "./compute-font.js";
 import { analyzeComputeTextSegmentation } from "./compute-text-segment.js";
 import type { SegmentAnalysis } from "./compute-text-segment.js";
 import { compileComputeTextProgram } from "./compute-text-program.js";
-import { getComputeTextParagraphStage, reserveComputeTextParagraphStage } from "./_gpu/compute-text-paragraph-layout.js";
+import {
+    checkComputeTextParagraphBufferSize,
+    computeTextParagraphBufferSizes,
+    getComputeTextParagraphStage,
+    reserveComputeTextParagraphStage,
+} from "./_gpu/compute-text-paragraph-layout.js";
 import type { ComputeTextParagraphCache } from "./_gpu/compute-text-paragraph-layout.js";
 import { updateStorageBuffer } from "../resource/storage-buffer.js";
 
@@ -63,7 +68,7 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
             const dirty = full ? snapshot : snapshot.slice(prefix, snapshot.length - suffix);
             const options = {
                 capacity: full ? 0 : cache!._capacity,
-                pool: full ? computeTextParagraphPoolSize(snapshot.length) : cache!._pool,
+                pool: full ? snapshot.length : cache!._pool,
                 runBase: full ? 0 : allocation!.runBase,
                 rebuild: full ? undefined : rebuild,
             };
@@ -76,7 +81,9 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                     if (!full && needed > options.capacity) {
                         throw rebuild;
                     }
-                    options.capacity = full ? Math.ceil(needed * 1.25) : options.capacity;
+                    if (full) {
+                        Object.assign(options, computeTextParagraphAllocation(data._device.limits, snapshot.length, needed));
+                    }
                     const capacity = options.capacity;
                     const flagStride = Math.ceil(capacity / 4);
                     let naturalHeight =
@@ -238,6 +245,41 @@ export function computeTextParagraphDiff(previous: readonly string[], next: read
 /** @internal Compacted pool with insertion headroom. */
 export function computeTextParagraphPoolSize(count: number): number {
     return count + Math.max(8, Math.ceil(count / 4));
+}
+
+/** @internal Required live storage first; prefer growth capacity, then insertion slots within the device budget. */
+export function computeTextParagraphAllocation(
+    limits: Pick<GPUSupportedLimits, "maxBufferSize" | "maxStorageBufferBindingSize">,
+    count: number,
+    needed: number
+): { pool: number; capacity: number } {
+    const sizes = (pool: number, capacity: number) => [...computeTextParagraphBufferSizes(pool, capacity), ...computeTextDrawBufferSizes(pool, capacity)];
+    for (const [name, bytes] of sizes(count, needed)) {
+        checkComputeTextParagraphBufferSize(limits, name, bytes, count, needed);
+    }
+    const limit = Math.min(limits.maxBufferSize, limits.maxStorageBufferBindingSize);
+    const fits = (pool: number, capacity: number) => sizes(pool, capacity).every(([, bytes]) => Number.isSafeInteger(bytes) && bytes <= limit);
+    let capacity = needed;
+    let high = Math.ceil(needed * 1.25);
+    while (capacity < high) {
+        const middle = capacity + Math.ceil((high - capacity) / 2);
+        if (fits(count, middle)) {
+            capacity = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    let pool = count;
+    high = computeTextParagraphPoolSize(count);
+    while (pool < high) {
+        const middle = pool + Math.ceil((high - pool) / 2);
+        if (fits(middle, capacity)) {
+            pool = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    return { pool, capacity };
 }
 
 /** @internal Free the replaced middle and first-fit one contiguous dirty batch; null requests compaction. */

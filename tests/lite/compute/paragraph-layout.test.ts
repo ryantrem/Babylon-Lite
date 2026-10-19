@@ -310,6 +310,116 @@ describe("native GPU paragraph wrapping and placement", () => {
         await native?.close();
     });
 
+    it("budgets optional capacity, counts growth rebuilds, and rejects only required overflow without drawing", async () => {
+        const face = syntheticFont("multiple");
+        const data = block(face);
+        const limits = native.device.limits;
+        vi.spyOn(native.device, "limits", "get").mockReturnValue(
+            new Proxy(limits, {
+                get(target, key) {
+                    return key === "maxStorageBufferBindingSize" ? 3000 : Reflect.get(target, key, target);
+                },
+            })
+        );
+        const layout = { maxWidthPx: 40, lineHeightPx: 32 };
+        const capacities: number[] = [];
+        const revisions = new Set<number>();
+        for (const length of [20, 21, 25, 26, 31]) {
+            const paragraphs = ["A".repeat(length)];
+            await update(data, face, paragraphs, layout);
+            const cache = getComputeTextParagraphStage(data)!._cache!;
+            expect(cache._pool).toBe(1);
+            capacities.push(cache._capacity);
+            revisions.add(cache._baseRevision);
+            await compareFresh(data, face, paragraphs, layout);
+        }
+        expect(capacities).toEqual([50, 50, 50, 62, 62]);
+        expect(revisions.size).toBe(2);
+        const atlas = storage._curveSets.get(data._curveSet)!._atlas;
+        const version = atlas._version;
+        expect(() => updateComputeTextParagraphs(data, ["A".repeat(32)], layout)).toThrow(
+            `updateComputeTextParagraphs: layout lines buffer of 3072 bytes exceeds device storage limits ` +
+                `(maxBufferSize=${limits.maxBufferSize}, maxStorageBufferBindingSize=3000, pool=1, capacity=64)`
+        );
+        expect(data.status).toBe("ready");
+        expect(getComputeTextParagraphStage(data)!._cache).toBeUndefined();
+        expect(storage._curveSets.get(data._curveSet)!._atlas).toBe(atlas);
+        expect(atlas._version).toBe(version);
+        expect([...new Uint32Array(await readStorageBuffer(data._indirect))]).toEqual([6, 0, 0, 0]);
+        await update(data, face, ["A".repeat(20)], layout);
+        expect(getComputeTextParagraphStage(data)!._cache!._capacity).toBe(50);
+    });
+
+    it("retains clean multi-paragraph slots with a budgeted pool and compacts when insertion headroom is exhausted", async () => {
+        const face = syntheticFont("multiple");
+        const data = block(face);
+        const limits = native.device.limits;
+        vi.spyOn(native.device, "limits", "get").mockReturnValue(
+            new Proxy(limits, {
+                get(target, key) {
+                    return key === "maxStorageBufferBindingSize" ? 4800 : Reflect.get(target, key, target);
+                },
+            })
+        );
+        const layout = { maxWidthPx: 40, lineHeightPx: 32 };
+        let paragraphs = ["A".repeat(10), "B".repeat(10), "C".repeat(10)];
+        await update(data, face, paragraphs, layout);
+        const stage = getComputeTextParagraphStage(data)!;
+        expect(stage._cache!._pool).toBe(4);
+        expect(stage._cache!._capacity).toBe(25);
+        const revision = stage._cache!._baseRevision;
+        const mapping = vi.spyOn(nominalMapping, "mapComputeFontScalars");
+        paragraphs = [paragraphs[0]!, "B".repeat(9), paragraphs[2]!];
+        await (
+            await updateComputeTextParagraphs(data, paragraphs, layout)
+        ).completed;
+        expect(mapping.mock.calls.map((call) => call[1].length)).toEqual([9]);
+        mapping.mockRestore();
+        expect(stage._cache!._baseRevision).toBe(revision);
+        expect([...stage._cache!._order]).toEqual([0, 1, 2]);
+        await compareFresh(data, face, paragraphs, layout);
+        paragraphs = [paragraphs[0]!, "B".repeat(10), ...paragraphs.slice(1)];
+        await update(data, face, paragraphs, layout);
+        expect(stage._cache!._baseRevision).toBe(revision);
+        expect([...stage._cache!._order]).toEqual([0, 3, 1, 2]);
+        await compareFresh(data, face, paragraphs, layout);
+        paragraphs.push("C".repeat(10));
+        await update(data, face, paragraphs, layout);
+        expect(stage._cache!._baseRevision).toBeGreaterThan(revision);
+        expect(stage._cache!._pool).toBe(5);
+        expect(stage._cache!._capacity).toBe(20);
+        expect([...stage._cache!._order]).toEqual([0, 1, 2, 3, 4]);
+        await compareFresh(data, face, paragraphs, layout);
+    });
+
+    it("clears a previously visible draw on required budget overflow without installing new glyphs", async () => {
+        const face = fixture("Roboto-Regular.ttf");
+        const data = block(face);
+        const limits = native.device.limits;
+        vi.spyOn(native.device, "limits", "get").mockReturnValue(
+            new Proxy(limits, {
+                get(target, key) {
+                    return key === "maxStorageBufferBindingSize" ? 8 << 20 : Reflect.get(target, key, target);
+                },
+            })
+        );
+        const layout = { maxWidthPx: 600 };
+        await (
+            await updateComputeTextParagraphs(data, ["A".repeat(5000)], layout)
+        ).completed;
+        expect(new Uint32Array(await readStorageBuffer(data._indirect))[1]).toBe(5000);
+        const atlas = storage._curveSets.get(data._curveSet)!._atlas;
+        const version = atlas._version;
+        const extract = vi.spyOn(glyphExtraction, "extractComputeGlyphCurves");
+        expect(() => updateComputeTextParagraphs(data, ["B".repeat(200000)], layout)).toThrow(/layout lines buffer.*maxStorageBufferBindingSize=8388608, pool=1/);
+        expect(extract).not.toHaveBeenCalled();
+        expect(atlas._version).toBe(version);
+        expect(storage._curveSets.get(data._curveSet)!._atlas).toBe(atlas);
+        expect(data.status).toBe("ready");
+        expect(getComputeTextParagraphStage(data)!._cache).toBeUndefined();
+        expect([...new Uint32Array(await readStorageBuffer(data._indirect))]).toEqual([6, 0, 0, 0]);
+    });
+
     it.each(["Inter.ttf", "Roboto-Regular.ttf"] as const)("is bit-identical to fresh updates through a four-medium-paragraph editing sequence: %s", async (file) => {
         const face = fixture(file);
         const data = block(face);

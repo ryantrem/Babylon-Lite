@@ -486,8 +486,8 @@ export function reserveComputeTextParagraphStage(
 ): ComputeTextParagraphStage {
     const wordCount = 16 + pool + pool * flagStride;
     const maxWords = Math.floor(Math.min(engine._device.limits.maxBufferSize, engine._device.limits.maxStorageBufferBindingSize) / 4);
-    if (wordCount > maxWords) {
-        throw new Error("updateComputeTextParagraphs: layout input exceeds device storage limits");
+    for (const [name, bytes] of computeTextParagraphBufferSizes(pool, capacity, wordCount * 4)) {
+        checkComputeTextParagraphBufferSize(engine._device.limits, name, bytes, pool, capacity);
     }
     let words = stages?.get(token)?._words;
     if (!words || words.length < wordCount || words.length > maxWords) {
@@ -569,15 +569,42 @@ export function createComputeTextParagraphStage(token: object, engine: EngineCon
     return stage;
 }
 
+/** @internal Layout allocations; inputBytes includes reusable CPU input growth when present. */
+export function computeTextParagraphBufferSizes(
+    pool: number,
+    capacity: number,
+    inputBytes = (16 + pool + pool * Math.ceil(capacity / 4)) * 4
+): readonly (readonly [string, number])[] {
+    return [
+        ["layout input", inputBytes],
+        ["layout info", Math.max(1, pool * 2) * 16],
+        ["layout lines", Math.max(1, pool) * capacity * 48],
+    ];
+}
+
+/** @internal Report the actual buffer/limits before paragraph resource installation. */
+export function checkComputeTextParagraphBufferSize(
+    limits: Pick<GPUSupportedLimits, "maxBufferSize" | "maxStorageBufferBindingSize">,
+    name: string,
+    bytes: number,
+    pool: number,
+    capacity: number
+): void {
+    if (!Number.isSafeInteger(bytes) || bytes > limits.maxBufferSize || bytes > limits.maxStorageBufferBindingSize) {
+        throw new Error(
+            `updateComputeTextParagraphs: ${name} buffer of ${bytes} bytes exceeds device storage limits ` +
+                `(maxBufferSize=${limits.maxBufferSize}, maxStorageBufferBindingSize=${limits.maxStorageBufferBindingSize}, pool=${pool}, capacity=${capacity})`
+        );
+    }
+}
+
 function checkBounds(engine: EngineContext, words: Uint32Array): void {
     const paragraphs = words[0]!;
     const pool = words[11]!;
     const capacity = words[1]!;
     const limits = engine._device.limits;
-    for (const bytes of [words.byteLength, Math.max(1, pool * 2) * 16, Math.max(1, pool) * capacity * 48]) {
-        if (!Number.isSafeInteger(bytes) || bytes > limits.maxBufferSize || bytes > limits.maxStorageBufferBindingSize) {
-            throw new Error(`updateComputeTextParagraphs: layout buffer of ${bytes} bytes exceeds device storage limits`);
-        }
+    for (const [name, bytes] of computeTextParagraphBufferSizes(pool, capacity, words.byteLength)) {
+        checkComputeTextParagraphBufferSize(limits, name, bytes, pool, capacity);
     }
     if (
         Math.ceil(paragraphs / 64) > limits.maxComputeWorkgroupsPerDimension ||
