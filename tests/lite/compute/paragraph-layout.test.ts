@@ -15,6 +15,7 @@ import { createComputeTextParagraphStage, getComputeTextParagraphStage } from ".
 import { addComputeDispatch, createComputeTask, prepareComputeTask, submitComputeTasks } from "../../../packages/babylon-lite/src/compute/compute-task";
 import { mapComputeFontScalars } from "../../../packages/babylon-lite/src/text/compute-font";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
+import * as sourceSelection from "../../../packages/babylon-lite/src/text/compute-text-selection";
 import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/compute-text-plan";
 import { compileComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import { analyzeComputeTextSegmentation } from "../../../packages/babylon-lite/src/text/compute-text-segment";
@@ -309,6 +310,126 @@ describe("native GPU paragraph wrapping and placement", () => {
         }
         disposeGlyphStorage(storage);
         await native?.close();
+    });
+
+    it.each(["Inter.ttf", "Roboto-Regular.ttf", "NotoSansGothic-Regular.ttf"] as const)(
+        "reuses bounded flag windows while native output and exact backing ownership match fresh layout: %s",
+        async (file) => {
+            const face = fixture(file);
+            const data = block(face);
+            const token = file.includes("Gothic") ? "𐌰 𐌱 𐌲 " : "office affinity AV To A\u0308 ";
+            let paragraphs = [token.repeat(80), token.repeat(40), "  "];
+            const layout = { maxWidthPx: 221.75, align: "right" as const, lineHeightPx: 33.25, paragraphSpacingPx: 3.75 };
+            await update(data, face, paragraphs, layout);
+            const first = getComputeTextParagraphStage(data)!._cache!;
+            expect(first._flags).toHaveLength(3);
+            const clean = first._flags![1];
+            const entries = first._flags!.filter((entry) => entry !== undefined);
+            expect(entries.every((entry) => entry.scalars.buffer !== entry.glyphIds.buffer)).toBe(true);
+            const buffers = new Set(entries.flatMap((entry) => [entry.scalars.buffer, entry.glyphIds.buffer, entry.flags.buffer]));
+            expect([...buffers].reduce((sum, buffer) => sum + buffer.byteLength, 0)).toBe(entries.reduce((sum, entry) => sum + entry.scalars.length * 9, 0));
+            const original = paragraphs[0]!;
+            const at = Math.floor(original.length / 2);
+            const scalarAt = file.includes("Gothic") && original.charCodeAt(at) >= 0xdc00 && original.charCodeAt(at) <= 0xdfff ? at - 1 : at;
+            for (const text of [original.slice(0, scalarAt) + (file.includes("Gothic") ? "𐌰" : "A") + original.slice(scalarAt), original, original + " ", " " + original]) {
+                paragraphs = [text, ...paragraphs.slice(1)];
+                await update(data, face, paragraphs, layout);
+                await compareFresh(data, face, paragraphs, layout);
+                const cache = getComputeTextParagraphStage(data)!._cache!;
+                expect(cache._flags![1]).toBe(clean);
+                expect(cache._flags).toHaveLength(paragraphs.length);
+            }
+            await update(data, face, [paragraphs[0]!, "", ...paragraphs.slice(1)], layout);
+            expect(getComputeTextParagraphStage(data)!._cache!._flags).toHaveLength(4);
+        }
+    );
+
+    it("invalidates flag entries with ready admission errors and never publishes a busy-rejected candidate", async () => {
+        const face = fixture("Inter.ttf");
+        const data = block(face);
+        const text = "office affinity ".repeat(80);
+        const layout = { maxWidthPx: 210 };
+        await (
+            await updateComputeTextParagraphs(data, [text], layout)
+        ).completed;
+        const old = getComputeTextParagraphStage(data)!._cache!._flags![0]!;
+        const pending = updateComputeTextParagraphs(data, ["A" + text], layout);
+        expect(() => updateComputeTextParagraphs(data, ["B" + text], layout)).toThrow(/busy/);
+        await (
+            await pending
+        ).completed;
+        expect(getComputeTextParagraphStage(data)!._cache).toBeUndefined();
+        await (
+            await updateComputeTextParagraphs(data, [text], layout)
+        ).completed;
+        expect(getComputeTextParagraphStage(data)!._cache!._flags![0]).not.toBe(old);
+        expect(() => updateComputeTextParagraphs(data, ["A\nB"], layout)).toThrow(/line breaks/);
+        expect(getComputeTextParagraphStage(data)!._cache).toBeUndefined();
+        await (
+            await updateComputeTextParagraphs(data, [text], layout)
+        ).completed;
+        const stage = getComputeTextParagraphStage(data)!;
+        disposeComputeTextData(data);
+        expect(stage._cache).toBeUndefined();
+    });
+
+    it("performs bounded flag work on eligible edits and fully regenerates every ineligible dirty paragraph", async () => {
+        const face = fixture("Inter.ttf");
+        for (const mode of ["eligible", "plan", "font", "size", "atlas", "generation", "capacity", "insert", "delete", "plain", "cacheless", "failed"] as const) {
+            const data = block(face, `flags-${mode}`);
+            const text = "A ".repeat(500);
+            let paragraphs = [text, "B B", "C C"];
+            const layout = { maxWidthPx: 200 };
+            await (
+                await updateComputeTextParagraphs(data, paragraphs, layout)
+            ).completed;
+            paragraphs[0] = text.slice(0, 500) + "B" + text.slice(501);
+            if (mode === "plan") {
+                paragraphs[0] = "Α ".repeat(500);
+            } else if (mode === "font") {
+                data._font = fixture("Roboto-Regular.ttf").font;
+            } else if (mode === "size") {
+                Object.assign(data, { fontSizePx: 32 });
+            } else if (mode === "atlas") {
+                data._storage._curveSets.get(data._curveSet)!._atlas._version++;
+            } else if (mode === "generation") {
+                data._generation++;
+            } else if (mode === "capacity") {
+                paragraphs[0] = "A ".repeat(800);
+            } else if (mode === "insert") {
+                paragraphs = [paragraphs[0]!, "A A", ...paragraphs.slice(1)];
+            } else if (mode === "delete") {
+                paragraphs = [paragraphs[0]!, paragraphs[2]!];
+            } else if (mode === "plain") {
+                await (
+                    await updateComputeTextData(data, ["A"])
+                ).completed;
+            } else if (mode === "cacheless") {
+                getComputeTextParagraphStage(data)!._cache = undefined;
+            } else if (mode === "failed") {
+                const original = submission.submitDeferredComputeTaskResult;
+                vi.spyOn(submission, "submitDeferredComputeTaskResult").mockImplementationOnce((...args) => original(...args).then(() => 1));
+                await expect((await updateComputeTextParagraphs(data, [text, "B B", "C C"], layout)).completed).rejects.toThrow(/unsupported/);
+            }
+            const classify = vi.spyOn(sourceSelection, "computeTextNoBreakBefore");
+            await (
+                await updateComputeTextParagraphs(data, paragraphs, layout)
+            ).completed;
+            const actual = classify.mock.calls.length;
+            classify.mockRestore();
+            if (mode === "eligible") {
+                expect(actual).toBe(67);
+            } else {
+                const allDirty = ["font", "size", "atlas", "generation", "capacity", "plain", "cacheless", "failed"].includes(mode);
+                const expected = (allDirty ? paragraphs : paragraphs.slice(0, mode === "insert" ? 2 : 1)).reduce(
+                    (sum, value) => sum + Array.from(value).filter((cp) => cp !== " ").length,
+                    0
+                );
+                expect(actual, mode).toBe(expected);
+            }
+            expect(getComputeTextParagraphStage(data)!._cache!._flags).toHaveLength(paragraphs.length);
+            vi.restoreAllMocks();
+        }
     });
 
     it("budgets optional capacity, counts growth rebuilds, and rejects only required overflow without drawing", async () => {

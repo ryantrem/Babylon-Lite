@@ -12,6 +12,7 @@ import {
     computeTextParagraphAllocation,
     computeTextParagraphDiff,
     computeTextParagraphFlags,
+    computeTextParagraphFlagsIncremental,
     computeTextParagraphPoolSize,
 } from "../../../packages/babylon-lite/src/text/compute-text-paragraphs";
 import { createComputeTextParagraphStage } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
@@ -226,6 +227,128 @@ describe("paragraph allocation budget", () => {
 });
 
 describe("paragraph scalar flags", () => {
+    it("matches full bytes and little-endian packed words across 600 fixed-seed scalar edits and proof-exhaustion boundaries", () => {
+        let seed = 0x61c3a9d7;
+        const next = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0);
+        const pack = (flags: Uint8Array) => {
+            const words = new Uint32Array(Math.ceil((flags.length + 3) / 4));
+            for (let i = 0; i < flags.length; i++) {
+                words[i >>> 2]! |= flags[i]! << ((i % 4) * 8);
+            }
+            return words;
+        };
+        for (const file of ["Inter.ttf", "Roboto-Regular.ttf", "NotoSansGothic-Regular.ttf"]) {
+            const face = font(file);
+            const astral = file.includes("Gothic");
+            const base = astral ? "𐌰 𐌱 𐌲 𐌰   " : "office affinity AV To A\u0308 A\u0326   ";
+            const alphabet = astral ? ["𐌰", "𐌱", " ", "   ", "𐌲 "] : ["A", "B", " ", "   ", "\u0308", "\u0326", "To ", "AV"];
+            let text = base.repeat(40) + (astral ? "𐌰   𐌱 " : "A" + "\u0308".repeat(65) + " B ") + base.repeat(20);
+            const decode = (value: string) => {
+                const selected = selectComputeTextRun(value);
+                return {
+                    scalars: selected._scalars,
+                    glyphIds: mapComputeFontScalars(face, selected._scalars, (_i, error) => {
+                        throw error;
+                    }),
+                };
+            };
+            const safety = segmentation.analyzeComputeTextSegmentation(compileComputeTextProgram(createComputeTextPlan(face, selectComputeTextRun(text))));
+            expect(safety).not.toBeNull();
+            let input = decode(text);
+            let flags = computeTextParagraphFlags(input.scalars, input.glyphIds, safety);
+            for (let edit = 0; edit < 200; edit++) {
+                const old = { ...input, flags };
+                const values = Array.from(text);
+                const positions = [0, values.length, Math.floor(values.length / 2), 65, 66, 67, values.length - 66, next() % (values.length + 1)];
+                const at = Math.max(0, Math.min(values.length, positions[edit % positions.length]!));
+                const insert = Array.from(alphabet[next() % alphabet.length]!);
+                if (edit % 3 === 0) {
+                    values.splice(at, 0, ...insert);
+                } else if (edit % 3 === 1) {
+                    values.splice(at, Math.min(1 + (next() % 3), values.length - at));
+                } else {
+                    values.splice(at, Math.min(1, values.length - at), ...insert);
+                }
+                text = values.join("");
+                input = decode(text);
+                flags = computeTextParagraphFlagsIncremental(old, input.scalars, input.glyphIds, () => safety);
+                const full = computeTextParagraphFlags(input.scalars, input.glyphIds, safety);
+                expect(flags, `${file} edit${edit}`).toEqual(full);
+                expect(pack(flags), `${file} packed${edit}`).toEqual(pack(full));
+            }
+        }
+        for (const text of ["", "A", " ", " A ", "A\u0308 "]) {
+            const input = scalars(text);
+            expect(
+                computeTextParagraphFlagsIncremental({ scalars: input, glyphIds: input, flags: computeTextParagraphFlags(input, input, analysis()) }, input, input, () =>
+                    analysis()
+                )
+            ).toEqual(computeTextParagraphFlags(input, input, analysis()));
+        }
+    });
+
+    it("compares glyph IDs as well as scalars and keeps analysis lazy for a non-candidate window", () => {
+        const input = scalars("A".repeat(1000));
+        const old = { scalars: input, glyphIds: input, flags: new Uint8Array(1000) };
+        const ids = input.slice();
+        ids[500] = 99;
+        const read = vi.fn(() => null);
+        const evaluate = vi.fn((_scalars: Uint32Array, glyphs: Uint32Array, i: number) => (glyphs[i] === 99 ? 4 : 0));
+        const flags = computeTextParagraphFlagsIncremental(old, input, ids, read, evaluate);
+        expect(flags[500]).toBe(4);
+        expect(evaluate).toHaveBeenCalledTimes(133);
+        expect(read).not.toHaveBeenCalled();
+        expect(() => computeTextParagraphFlagsIncremental(undefined, scalars("A A"), scalars("A A"), () => null)).toThrow(/analysis is unavailable/);
+    });
+
+    it("retains exact proof-exhaustion dependencies at R-1/R/R+1 and paragraph edges", () => {
+        const face = font("Roboto-Regular.ttf");
+        const original = "office ".repeat(70) + "A" + "\u0308".repeat(65) + " B " + "AV To ".repeat(70);
+        const selected = selectComputeTextRun(original);
+        const ids = mapComputeFontScalars(face, selected._scalars, (_i, error) => {
+            throw error;
+        });
+        const safety = segmentation.analyzeComputeTextSegmentation(compileComputeTextProgram(createComputeTextPlan(face, selected)));
+        const flags = computeTextParagraphFlags(selected._scalars, ids, safety);
+        const space = original.indexOf(" B ");
+        for (const distance of [-67, -66, -65, 65, 66, 67]) {
+            const at = space + distance;
+            const next = original.slice(0, at) + "A" + original.slice(at);
+            const run = selectComputeTextRun(next);
+            const mapped = mapComputeFontScalars(face, run._scalars, (_i, error) => {
+                throw error;
+            });
+            expect(computeTextParagraphFlagsIncremental({ scalars: selected._scalars, glyphIds: ids, flags }, run._scalars, mapped, () => safety)).toEqual(
+                computeTextParagraphFlags(run._scalars, mapped, safety)
+            );
+        }
+    });
+
+    it("avoids actual flag/proof evaluations outside the R66 middle edit window", () => {
+        const before = scalars("A ".repeat(5000));
+        const safe = vi.fn(() => true);
+        const safety = analysis(safe);
+        const initial = computeTextParagraphFlags(before, before, safety);
+        const after = before.slice();
+        after[5000] = 0x42;
+        let evaluations = 0;
+        const evaluate = (input: Uint32Array, ids: Uint32Array, i: number, read: () => SegmentAnalysis | null) => {
+            evaluations++;
+            if (input[i] !== 32) {
+                return 0;
+            }
+            return i + 1 < input.length && input[i + 1] !== 32 && read()!.safeAfter(ids, i) ? 3 : 1;
+        };
+        safe.mockClear();
+        const reused = computeTextParagraphFlagsIncremental({ scalars: before, glyphIds: before, flags: initial }, after, after, () => safety, evaluate);
+        expect(evaluations).toBe(133);
+        expect(safe).toHaveBeenCalledTimes(66);
+        expect(reused).toEqual(computeTextParagraphFlags(after, after, safety));
+        evaluations = 0;
+        computeTextParagraphFlagsIncremental(undefined, after, after, () => safety, evaluate);
+        expect(evaluations).toBe(10000);
+    });
+
     it("marks only ASCII spaces and only the last space in a followed run as break-after", () => {
         const input = scalars("  A   B  \u00a0\u2002");
         const safe = vi.fn((_ids: Uint32Array, _index: number) => true);

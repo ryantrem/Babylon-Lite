@@ -9,6 +9,7 @@ import { createStorageBuffer, disposeStorageBuffer, updateStorageBuffer } from "
 import type { StorageBuffer } from "../../resource/storage-buffer.js";
 import type { ResidentPackStage, ResidentTextBuffers } from "./compute-text-resident.js";
 import type { ComputeFont } from "../compute-font.js";
+import type { ComputeTextPlan } from "../compute-text-plan.js";
 import type { SharedAtlas } from "../glyph-storage.js";
 import { COMPUTE_TEXT_HEADER_WORDS, COMPUTE_TEXT_RECORD_WORDS } from "./compute-text-shape.js";
 
@@ -405,10 +406,20 @@ fn place(@builtin(workgroup_id) group:vec3u, @builtin(num_workgroups) groups:vec
 }
 `;
 
+/** @internal Exact owned inputs and one flag byte per scalar for the current live paragraph. */
+export interface ComputeTextParagraphFlagEntry {
+    plan: ComputeTextPlan;
+    scalars: Uint32Array;
+    glyphIds: Uint32Array;
+    flags: Uint8Array;
+}
+
 /** @internal Last successfully submitted paragraph state. */
 export interface ComputeTextParagraphCache {
     /** @internal */
     _paragraphs: readonly string[];
+    /** @internal Positional live entries, published with this revision/epoch only. */
+    _flags?: readonly (ComputeTextParagraphFlagEntry | undefined)[];
     /** @internal */
     _order: Uint32Array;
     /** @internal */

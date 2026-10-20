@@ -10,7 +10,7 @@ import {
     getComputeTextParagraphStage,
     reserveComputeTextParagraphStage,
 } from "./_gpu/compute-text-paragraph-layout.js";
-import type { ComputeTextParagraphCache } from "./_gpu/compute-text-paragraph-layout.js";
+import type { ComputeTextParagraphCache, ComputeTextParagraphFlagEntry } from "./_gpu/compute-text-paragraph-layout.js";
 import { updateStorageBuffer } from "../resource/storage-buffer.js";
 import { needsComputeTextParagraphChunks, submitChunkedComputeTextParagraphs } from "./compute-text-paragraph-chunks.js";
 import { computeTextNoBreakBefore } from "./compute-text-selection.js";
@@ -167,6 +167,13 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                     const flagStart = 16 + options.pool + options.runBase * flagStride;
                     const flagEnd = flagStart + dirty.length * flagStride;
                     words.fill(0, flagStart, flagEnd);
+                    const flagEntries: (ComputeTextParagraphFlagEntry | undefined)[] = full
+                        ? new Array(snapshot.length)
+                        : (cache!._flags?.slice() ?? new Array(cache!._paragraphs.length));
+                    if (!full) {
+                        flagEntries.splice(prefix, cache!._paragraphs.length - prefix - suffix, ...new Array<undefined>(dirty.length));
+                    }
+                    const reuseFlags = !full && cache!._paragraphs.length === snapshot.length;
                     for (const group of groups) {
                         let analysis: SegmentAnalysis | null | undefined;
                         const readAnalysis = () => {
@@ -177,11 +184,15 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                         };
                         for (let runIndex = 0; runIndex < group.runs.length; runIndex++) {
                             const run = group.runs[runIndex]!;
+                            const paragraph = (full ? 0 : prefix) + group.outputRun + runIndex;
+                            const old = reuseFlags ? cache!._flags?.[paragraph] : undefined;
+                            const flags = computeTextParagraphFlagsIncremental(old?.plan === group.plan ? old : undefined, run.scalars, run.glyphIds, readAnalysis);
+                            flagEntries[paragraph] = { plan: group.plan, scalars: run.scalars.slice(), glyphIds: run.glyphIds.slice(), flags };
                             let at = flagStart + (group.outputRun + runIndex) * flagStride;
                             for (let i = 0; i < run.scalars.length;) {
                                 let word = 0;
                                 for (let shift = 0; shift < 32 && i < run.scalars.length; shift += 8, i++) {
-                                    word |= paragraphFlag(run.scalars, run.glyphIds, i, readAnalysis) << shift;
+                                    word |= flags[i]! << shift;
                                 }
                                 words[at++] = word;
                             }
@@ -196,6 +207,7 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                           ];
                     candidate = {
                         _paragraphs: snapshot,
+                        _flags: flagEntries,
                         _order: order,
                         _capacity: capacity,
                         _pool: options.pool,
@@ -413,6 +425,53 @@ function paragraphFlag(scalars: Uint32Array, glyphIds: Uint32Array, i: number, r
         }
     }
     return 1;
+}
+
+/** @internal Reuse only proven unchanged scalar/glyph neighborhoods; callback injection is for exact untimed tests. */
+export function computeTextParagraphFlagsIncremental(
+    previous: Pick<ComputeTextParagraphFlagEntry, "scalars" | "glyphIds" | "flags"> | undefined,
+    scalars: Uint32Array,
+    glyphIds: Uint32Array,
+    readAnalysis: () => SegmentAnalysis | null,
+    evaluate = paragraphFlag
+): Uint8Array {
+    const flags = new Uint8Array(scalars.length);
+    let lo = 0;
+    let hi = scalars.length;
+    if (previous) {
+        const oldN = previous.scalars.length;
+        const limit = Math.min(oldN, scalars.length);
+        let prefix = 0;
+        while (prefix < limit && previous.scalars[prefix] === scalars[prefix] && previous.glyphIds[prefix] === glyphIds[prefix]) {
+            prefix++;
+        }
+        let suffix = 0;
+        while (
+            suffix < limit - prefix &&
+            previous.scalars[oldN - suffix - 1] === scalars[scalars.length - suffix - 1] &&
+            previous.glyphIds[oldN - suffix - 1] === glyphIds[glyphIds.length - suffix - 1]
+        ) {
+            suffix++;
+        }
+        lo = Math.max(0, prefix - 66);
+        hi = Math.min(scalars.length, scalars.length - suffix + 66);
+        if (lo < 66) {
+            lo = 0;
+        }
+        if (scalars.length - hi < 66) {
+            hi = scalars.length;
+        }
+        if (hi - lo >= scalars.length / 2) {
+            lo = 0;
+            hi = scalars.length;
+        }
+        flags.set(previous.flags.subarray(0, lo));
+        flags.set(previous.flags.subarray(hi - scalars.length + oldN), hi);
+    }
+    for (let i = lo; i < hi; i++) {
+        flags[i] = evaluate(scalars, glyphIds, i, readAnalysis);
+    }
+    return flags;
 }
 
 function positiveFloat(value: number): boolean {

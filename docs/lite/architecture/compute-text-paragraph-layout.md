@@ -399,7 +399,37 @@ the diagnostic header.
 Dirty preparation uses the already decoded scalar/nominal views, without
 decoding clean text, CPU wrapping, measurement, visible-instance counting or
 placement. One scalar pass packs flags directly into the dirty slots' reusable
-word range, including zero padding. No per-paragraph flag arrays are retained.
+word range, including zero padding.
+The fitting path's optional incremental flag cache retains one entry per live
+paragraph: selected plan identity, exact scalar/glyph ID vectors and one flag byte
+per scalar. The current decode uses a fresh shared batch slab (not a reusable
+pool), but retaining a view can pin unrelated old dirty paragraphs and UTF-16
+slack. Cache entries therefore copy scalar/glyph subviews into exact-sized backing
+allocations; flag bytes are also exact-sized. Retained backing bytes are 9 per
+scalar, excluding small objects/arrays and current in-flight candidates. This is
+source flag reuse only: decode, nominal mapping, GPU shaping/layout, full dirty
+flag upload ranges and little-endian u32 packing remain unchanged and linear.
+
+Only a non-full valid legacy candidate with unchanged dirty paragraph count and
+the same selected plan can reuse flags. Compare both scalar and glyph IDs for a
+non-overlapping common prefix `p`/suffix `s`. Recompute `[max(0,p-66),
+min(N,N-s+66))`, extending either boundary to the paragraph edge when within 66
+scalars. If that interval covers at least half the paragraph, recompute all flags.
+Outside it, copy exact previous prefix/shifted suffix bytes. The radius includes
+65 **visited** proof positions (including ignored/free glyphs and walk exhaustion)
+plus the flag's immediate-right-scalar test. Never shorten it to meaningful glyph
+count or UTF-16 distance. Resolve analysis lazily only for recomputed candidate
+spaces. A failed evaluation does not publish a partial entry.
+
+The entry array travels on the existing revision/epoch-bound candidate: preserve
+clean paragraph prefix/suffix entries, replace dirty entries, publish only at the
+existing successful admission epoch. Every normal cache invalidation, failed
+completion/ancestor rule, plain/paged mode switch, terminal loss/disposal and
+capacity rebuild drops or fully regenerates it. Paragraph insertion/deletion/split
+does not reuse dirty-entry correspondence. No old revision history is retained.
+Exact seeded differential tests compare bytes/packed words to full recomputation;
+separate untimed counters demonstrate evaluations avoided rather than cache-ID
+matches. Render/status/upload and Stage 2 resource lifetime behavior are unchanged.
 Analysis is resolved lazily at the first candidate space of each plan group;
 the program/segmentation caches retain the analysis per immutable plan/program.
 ASCII non-spaces bypass Unicode mark tests. Non-ASCII mark classification is
