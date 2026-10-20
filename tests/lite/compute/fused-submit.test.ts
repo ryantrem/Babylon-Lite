@@ -17,6 +17,7 @@ import type { NativeHarness } from "./native";
 import { fixture } from "./fixtures";
 import type { Fixture } from "./fixtures";
 import { syntheticFont } from "./synthetic";
+import * as preparation from "../../../packages/babylon-lite/src/compute/compute-task";
 
 describe("native resident deferred frame submission", () => {
     let native: NativeHarness;
@@ -115,6 +116,33 @@ describe("native resident deferred frame submission", () => {
         expect(native.engine._flushPendingWork).toBeUndefined();
     });
 
+    it("fuses ordered paged layout/publication and every real range into one final frame submission", async () => {
+        const owned = block(fixture("Inter.ttf"));
+        owned._chunkBudgets = { force: true, records: 32, arenaBytes: 4096, bindingBytes: 8192 };
+        const paragraphs = ["office affinity ".repeat(16), "office ".repeat(8)];
+        const first = await updateComputeTextParagraphs(owned, paragraphs, layout);
+        renderFrame(native.engine, 0);
+        await first.completed;
+        const submits = vi.spyOn(native.device.queue, "submit");
+        const maps = vi.spyOn(GPUBuffer.prototype, "mapAsync");
+        const update = await updateComputeTextParagraphs(owned, paragraphs, { ...layout, maxWidthPx: 80 });
+        expect(submits).not.toHaveBeenCalled();
+        expect(maps).not.toHaveBeenCalled();
+        renderFrame(native.engine, 0);
+        expect(submits).toHaveBeenCalledOnce();
+        expect(submits.mock.calls[0]![0]).toHaveLength(2);
+        expect(maps.mock.calls.map((call) => call.slice(0, 3))).toEqual([[GPUMapMode.READ, 0, 4]]);
+        expect(native.engine.drawCallCount).toBe(owned._drawRanges!.length);
+        expect(native.engine.drawCallCount).toBeGreaterThan(2);
+        await update.completed;
+        maps.mockRestore();
+        for (const range of owned._drawRanges!) {
+            const indirect = new Uint32Array(await readStorageBuffer(range.indirect, range.indirectOffset, 16));
+            expect([...indirect].filter((_word, i) => i !== 1)).toEqual([6, 0, 0]);
+            expect(indirect[1]).toBeGreaterThan(0);
+        }
+    });
+
     it.each([2, 3])("preserves all %i updates and costs N submits before one frame", async (count) => {
         const owned = block();
         await warm(owned);
@@ -136,6 +164,113 @@ describe("native resident deferred frame submission", () => {
         expect(submits).toHaveBeenCalledTimes(count);
         await Promise.all(updates.map((update) => update.completed));
         expect(await bytes(owned)).toEqual(expected);
+    });
+
+    it.each(["arenas", "workspace"] as const)("keeps retired paged %s live through a real preparation-gap frame until safe settlement", async (kind) => {
+        const owned = block(fixture("Inter.ttf"));
+        owned._chunkBudgets = { force: true, records: kind === "arenas" ? 32 : 16384, arenaBytes: kind === "arenas" ? 256 : 4096 };
+        const first = await updateComputeTextParagraphs(owned, [kind === "arenas" ? "office ".repeat(60) : "A".repeat(40000)], layout);
+        renderFrame(native.engine, 0);
+        await first.completed;
+        const state = owned._chunkState!;
+        const old =
+            kind === "arenas"
+                ? state.arenas.get("instances")!.map((arena) => arena.buffer)
+                : [...state.buffers].filter(([name]) => name !== "program" && name !== "tables").map(([, buffer]) => buffer);
+        const original = preparation.prepareComputeTask;
+        let resume!: () => void;
+        const gate = new Promise<void>((resolve) => {
+            resume = resolve;
+        });
+        vi.spyOn(preparation, "prepareComputeTask").mockImplementationOnce(async (task) => {
+            await gate;
+            await original(task);
+        });
+        const pending = updateComputeTextParagraphs(owned, ["office"], layout);
+        const retired = old.filter((buffer) =>
+            kind === "arenas" ? !state.arenas.get("instances")!.some((arena) => arena.buffer === buffer) : ![...state.buffers.values()].includes(buffer)
+        );
+        renderFrame(native.engine, 0);
+        const preparationCommands = native.engine.drawCallCount;
+        await native.device.queue.onSubmittedWorkDone();
+        const premature = retired.filter((buffer) => buffer._destroyed);
+        resume();
+        const update = await pending;
+        renderFrame(native.engine, 0);
+        await update.completed;
+        expect(retired.length).toBeGreaterThan(0);
+        expect(preparationCommands).toBe(0);
+        expect(premature).toEqual([]);
+        expect(retired.every((buffer) => buffer._destroyed)).toBe(true);
+    });
+
+    it("quarantines retired windows until their own status settles, without freeing newer ranges", async () => {
+        const owned = block(fixture("Inter.ttf"));
+        owned._chunkBudgets = { force: true, records: 32, arenaBytes: 8192 };
+        const first = await updateComputeTextParagraphs(owned, ["office ".repeat(30)], layout);
+        renderFrame(native.engine, 0);
+        await first.completed;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const original = readback.submitDeferredComputeTaskResult;
+        vi.spyOn(readback, "submitDeferredComputeTaskResult").mockImplementationOnce((...args) => original(...args).then(() => gate.then(() => 0)));
+        const previous = await updateComputeTextParagraphs(owned, ["office"], layout);
+        const state = owned._chunkState!;
+        const batch = [...state.retired.values()][0]!;
+        expect(batch.windows.length).toBeGreaterThan(0);
+        const quarantined = batch.windows.map(({ range }) => range);
+        renderFrame(native.engine, 0);
+        const next = await updateComputeTextParagraphs(owned, ["affinity ".repeat(30)], layout);
+        for (const chunk of state.chunks.flat()) {
+            for (const range of [chunk.shaped, chunk.flags, chunk.instances, chunk.metadata, chunk.params, chunk.indirect]) {
+                expect(quarantined.some((old) => old.buffer === range.buffer && old.offset === range.offset)).toBe(false);
+            }
+        }
+        renderFrame(native.engine, 0);
+        await next.completed;
+        expect(state.retired.size).toBe(1);
+        const live = owned._drawRanges!.flatMap((range) => [range.instances, range.indirect]);
+        release();
+        await previous.completed;
+        expect(state.retired.size).toBe(0);
+        expect(live.every((buffer) => !buffer._destroyed)).toBe(true);
+        renderFrame(native.engine, 0);
+    });
+
+    it.each(["failure", "dispose"] as const)("drains detached retirement once on %s while a newer frame is pending", async (outcome) => {
+        const owned = block(fixture("Inter.ttf"));
+        owned._chunkBudgets = { force: true, records: 32, arenaBytes: 256 };
+        const first = await updateComputeTextParagraphs(owned, ["office ".repeat(30)], layout);
+        renderFrame(native.engine, 0);
+        await first.completed;
+        const state = owned._chunkState!;
+        const original = readback.submitDeferredComputeTaskResult;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        vi.spyOn(readback, "submitDeferredComputeTaskResult").mockImplementationOnce((...args) => original(...args).then(() => gate.then(() => 1)));
+        const update = await updateComputeTextParagraphs(owned, ["office"], layout);
+        const retired = [...state.retired.values()].flatMap((batch) => [...batch.buffers]);
+        expect(retired.length).toBeGreaterThan(0);
+        const destroyed = retired.map((buffer) => vi.spyOn(buffer._buffer!, "destroy"));
+        renderFrame(native.engine, 0);
+        if (outcome === "dispose") {
+            disposeComputeTextData(owned);
+            await expect(update.completed).rejects.toThrow(/disposed/);
+            release();
+            await gate;
+            await Promise.resolve();
+        } else {
+            release();
+            await expect(update.completed).rejects.toThrow(/unsupported/);
+            renderFrame(native.engine, 0);
+        }
+        expect(state.retired.size).toBe(0);
+        expect(retired.every((buffer) => buffer._destroyed)).toBe(true);
+        destroyed.forEach((destroy) => expect(destroy).toHaveBeenCalledOnce());
     });
 
     it.each([1, 2])("preserves fused status failure %i and invalidates dependent paragraph caches", async (status) => {

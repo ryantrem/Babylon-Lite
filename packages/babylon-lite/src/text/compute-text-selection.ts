@@ -7,8 +7,31 @@
 
 import { scriptTagForScalar } from "./unicode-script-data.js";
 import type { ComputeFont, ComputeNominalVector } from "./compute-font.js";
+import { mapComputeFontScalars } from "./compute-font.js";
+import type { ComputeTextPlan } from "./compute-text-plan.js";
 
 let scriptPages: (Uint8Array | undefined)[] | null = null;
+let markPages: (Uint8Array | undefined)[] | null = null;
+
+/** @internal Shared scalar flag classification for both paragraph storage paths. */
+export function computeTextNoBreakBefore(cp: number): number {
+    if (cp < 0x80) {
+        return 0;
+    }
+    if (cp === 0x200d) {
+        return 4;
+    }
+    const pages = (markPages ??= []);
+    const index = cp >>> 8;
+    const page = (pages[index] ??= new Uint8Array(256));
+    const offset = cp & 255;
+    let value = page[offset]!;
+    if (value === 0) {
+        value = /\p{M}/u.test(String.fromCodePoint(cp)) ? 5 : 1;
+        page[offset] = value;
+    }
+    return value - 1;
+}
 
 declare const computeTextRunSelectionBrand: unique symbol;
 
@@ -200,6 +223,83 @@ function classifyScalar(scalar: number): number {
         page[offset] = classification;
     }
     return classification;
+}
+
+/** @internal Paragraph-level admission without a paragraph-sized decode allocation. */
+export function scanComputeTextRun(text: string): Pick<ComputeTextRunSelection, "script" | "direction" | "language" | "scalarCount"> {
+    let strong = 0;
+    let inherited = false;
+    let count = 0;
+    let deferred: Error | undefined;
+    for (let offset = 0; offset < text.length; offset++) {
+        const unit = text.charCodeAt(offset);
+        let scalar = unit;
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+            const next = text.charCodeAt(offset + 1);
+            if (!(next >= 0xdc00 && next <= 0xdfff)) {
+                throw new Error(`selectComputeTextRun: lone surrogate at UTF-16 index ${offset}`);
+            }
+            scalar = (unit - 0xd800) * 0x400 + next - 0xdc00 + 0x10000;
+            offset++;
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+            throw new Error(`selectComputeTextRun: lone surrogate at UTF-16 index ${offset}`);
+        }
+        const index = count++;
+        if (deferred) {
+            continue;
+        }
+        const classification = classifyScalar(scalar);
+        if (classification === 2) {
+            inherited = true;
+        } else if (classification >= 10) {
+            deferred = new Error(`selectComputeTextRun: ${classificationRejection(classification, scalar)} at scalar ${index} ${formatScalar(scalar)}`);
+        } else if (classification >= 3) {
+            if (!strong) {
+                strong = classification;
+            } else if (strong !== classification) {
+                deferred = new Error(`selectComputeTextRun: mixed scripts "${ADMITTED_SCRIPTS[strong - 3]}" and "${ADMITTED_SCRIPTS[classification - 3]}"`);
+            }
+        }
+    }
+    if (deferred) {
+        throw deferred;
+    }
+    if (!strong && inherited) {
+        throw new Error("selectComputeTextRun: inherited mark without an admitted base script");
+    }
+    const script = strong ? ADMITTED_SCRIPTS[strong - 3]! : "DFLT";
+    return { script, direction: directionFor(script), language: null, scalarCount: count };
+}
+
+/** @internal Decode a bounded, previously validated source region. */
+export function decodeComputeTextChunk(text: string): { scalars: Uint32Array; offsets: number[] } {
+    const values: number[] = [];
+    const offsets: number[] = [];
+    for (let i = 0; i < text.length; i++) {
+        offsets.push(i);
+        const cp = text.codePointAt(i)!;
+        values.push(cp);
+        if (cp > 0xffff) {
+            i++;
+        }
+    }
+    offsets.push(text.length);
+    return { scalars: Uint32Array.from(values), offsets };
+}
+
+/** @internal Materialize one bounded region under its paragraph-level selected plan. */
+export function prepareComputeTextChunk(source: { readonly text: string; readonly plan: ComputeTextPlan; readonly segments: readonly number[] }) {
+    const decoded = decodeComputeTextChunk(source.text);
+    const glyphIds = mapComputeFontScalars(source.plan.font, decoded.scalars, (_i, error) => {
+        throw error;
+    });
+    let first = 0;
+    const runs = source.segments.map((end) => {
+        const run = { scalars: decoded.scalars.subarray(first, end), glyphIds: glyphIds.subarray(first, end) };
+        first = end;
+        return run;
+    });
+    return { ...decoded, glyphIds, runs };
 }
 
 /** Direction required by an admitted script. `DFLT` is LTR. */

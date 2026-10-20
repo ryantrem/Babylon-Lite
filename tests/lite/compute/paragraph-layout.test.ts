@@ -265,6 +265,7 @@ describe("native GPU paragraph wrapping and placement", () => {
     const live = new Set<ComputeTextData>();
     function block(face: Fixture, curveSet: string = face.file): ComputeTextData {
         const data = createComputeTextData(native.engine, face.font, storage, curveSet, { fontSizePx: 31.75 });
+        data._chunkBudgets = { monolithic: true };
         live.add(data);
         return data;
     }

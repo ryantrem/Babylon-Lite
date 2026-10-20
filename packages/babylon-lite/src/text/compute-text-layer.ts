@@ -37,6 +37,7 @@ function createResidentDraw(engine: EngineContext, uniform: GPUBuffer, data: Com
     let styles: GPUBuffer | null = null;
     let instance: GPUBuffer | null = null;
     let indirect: GPUBuffer | null = null;
+    let ranges = data._drawRanges;
     const draw: TextLayerDraw = {
         _active: false,
         _version: 0,
@@ -53,6 +54,13 @@ function createResidentDraw(engine: EngineContext, uniform: GPUBuffer, data: Com
             const nextIndirect = data._indirect._buffer;
             if (!nextInstance || !nextIndirect) {
                 throw new Error("createComputeTextLayer: live data has no draw buffers");
+            }
+            if (data._drawRanges) {
+                for (const range of data._drawRanges) {
+                    if (range.instances._destroyed || range.indirect._destroyed || !range.instances._buffer || !range.indirect._buffer) {
+                        throw new Error("createComputeTextLayer: live paragraph range has no draw buffers");
+                    }
+                }
             }
             const curveSet = data._storage._curveSets.get(data._curveSet);
             if (!curveSet && bindGroup) {
@@ -85,9 +93,21 @@ function createResidentDraw(engine: EngineContext, uniform: GPUBuffer, data: Com
                 indirect = nextIndirect;
                 draw._version++;
             }
+            if (ranges !== data._drawRanges) {
+                ranges = data._drawRanges;
+                draw._version++;
+            }
         },
         _record(encoder, quad) {
             encoder.setVertexBuffer(0, quad);
+            if (ranges) {
+                encoder.setBindGroup(0, bindGroup!);
+                for (const range of ranges) {
+                    encoder.setVertexBuffer(1, range.instances._buffer!, range.offset, range.size);
+                    encoder.drawIndirect(range.indirect._buffer!, range.indirectOffset);
+                }
+                return ranges.length;
+            }
             encoder.setVertexBuffer(1, instance!);
             encoder.setBindGroup(0, bindGroup!);
             encoder.drawIndirect(indirect!, 0);
@@ -96,6 +116,7 @@ function createResidentDraw(engine: EngineContext, uniform: GPUBuffer, data: Com
         _dispose() {
             bindGroup = null;
             instance = indirect = null;
+            ranges = undefined;
             curveTexture = bandTexture = null;
             metadata = styles = null;
             draw._active = false;

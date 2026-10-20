@@ -12,6 +12,8 @@ import {
 } from "./_gpu/compute-text-paragraph-layout.js";
 import type { ComputeTextParagraphCache } from "./_gpu/compute-text-paragraph-layout.js";
 import { updateStorageBuffer } from "../resource/storage-buffer.js";
+import { needsComputeTextParagraphChunks, submitChunkedComputeTextParagraphs } from "./compute-text-paragraph-chunks.js";
+import { computeTextNoBreakBefore } from "./compute-text-selection.js";
 
 /** Line box and paragraph placement for {@link updateComputeTextParagraphs}. */
 export interface ComputeTextParagraphLayout {
@@ -27,6 +29,9 @@ export interface ComputeTextParagraphLayout {
 
 /** Shape, wrap and place LTR paragraphs on the GPU. Input and layout admission reject synchronously. */
 export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: readonly string[], layout: ComputeTextParagraphLayout): Promise<ComputeTextUpdate> {
+    let paged: Error | undefined;
+    let admittedSnapshot: readonly string[] = paragraphs;
+    let admittedLayout = layout;
     try {
         data?._engine?._flushPendingWork?.(data._engine);
         if (!Array.isArray(paragraphs)) {
@@ -62,6 +67,13 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
         const maxWidth = layout.maxWidthPx;
         const requestedHeight = layout.lineHeightPx;
         const snapshot = paragraphs.slice();
+        admittedSnapshot = snapshot;
+        if (needsComputeTextParagraphChunks(data, snapshot, !!cache, prefix, snapshot.length - suffix)) {
+            admittedLayout = { maxWidthPx: maxWidth, lineHeightPx: requestedHeight, paragraphSpacingPx: spacing, align };
+            return submitChunkedComputeTextParagraphs(data, snapshot, admittedLayout).catch((error: unknown) => {
+                throw paragraphError(error);
+            });
+        }
         const allocation = cache ? allocateComputeTextParagraphSlots(cache._order, cache._pool, snapshot.length, prefix, suffix) : null;
         const rebuild = new Error("paragraph resident state requires a full rebuild");
         function submit(full: boolean): Promise<ComputeTextUpdate> {
@@ -82,6 +94,24 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                         throw rebuild;
                     }
                     if (full) {
+                        const limit = Math.min(data._device.limits.maxBufferSize, data._device.limits.maxStorageBufferBindingSize);
+                        let independent = 0;
+                        for (const group of groups) {
+                            const expansion = Math.max(1, compileComputeTextProgram(group.plan).maxExpansion);
+                            for (const run of group.runs) {
+                                independent += Math.max(1, run.scalars.length * expansion) * 48;
+                            }
+                        }
+                        if (
+                            !data._chunkBudgets?.monolithic &&
+                            (snapshot.length * needed * 48 > Math.max(4 * 1024 * 1024, independent * 2) ||
+                                [...computeTextParagraphBufferSizes(snapshot.length, needed), ...computeTextDrawBufferSizes(snapshot.length, needed)].some(
+                                    ([, bytes]) => !Number.isSafeInteger(bytes) || bytes > limit
+                                ))
+                        ) {
+                            admittedLayout = { maxWidthPx: maxWidth, lineHeightPx: requestedHeight, paragraphSpacingPx: spacing, align };
+                            throw (paged ??= new Error("paragraph required storage needs paging"));
+                        }
                         Object.assign(options, computeTextParagraphAllocation(data._device.limits, snapshot.length, needed));
                     }
                     const capacity = options.capacity;
@@ -204,7 +234,14 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                 (error: unknown) => {
                     invalidateParagraphs(data);
                     if (error === rebuild && !full) {
-                        return submit(true);
+                        try {
+                            return submit(true);
+                        } catch (retry) {
+                            if (paged && retry === paged) {
+                                return submitChunkedComputeTextParagraphs(data, snapshot, admittedLayout);
+                            }
+                            throw retry;
+                        }
                     }
                     throw paragraphError(error);
                 }
@@ -221,8 +258,17 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
         }
     } catch (error) {
         invalidateParagraphs(data);
+        if (paged && error === paged) {
+            return submitChunkedComputeTextParagraphs(data, admittedSnapshot, admittedLayout).catch((failure: unknown) => {
+                throw paragraphError(failure);
+            });
+        }
         if (data?.status === "ready" && !data._dead && data._device === data._engine._device) {
             updateStorageBuffer(data._engine, data._indirect, Uint32Array.of(6, 0, 0, 0));
+            data._paragraphResources?.clear();
+            if (data._chunkState) {
+                data._chunkState.revision = -1;
+            }
         }
         throw paragraphError(error);
     }
@@ -355,7 +401,7 @@ export function computeTextParagraphFlags(scalars: Uint32Array, glyphIds: Uint32
 function paragraphFlag(scalars: Uint32Array, glyphIds: Uint32Array, i: number, readAnalysis: () => SegmentAnalysis | null): number {
     const cp = scalars[i]!;
     if (cp !== 0x20) {
-        return noBreakBefore(cp);
+        return computeTextNoBreakBefore(cp);
     }
     if (i + 1 < scalars.length && scalars[i + 1] !== 0x20) {
         const analysis = readAnalysis();
@@ -367,27 +413,6 @@ function paragraphFlag(scalars: Uint32Array, glyphIds: Uint32Array, i: number, r
         }
     }
     return 1;
-}
-
-let markPages: (Uint8Array | undefined)[] | null = null;
-
-function noBreakBefore(cp: number): number {
-    if (cp < 0x80) {
-        return 0;
-    }
-    if (cp === 0x200d) {
-        return 4;
-    }
-    const pages = (markPages ??= []);
-    const index = cp >>> 8;
-    const page = (pages[index] ??= new Uint8Array(256));
-    const offset = cp & 255;
-    let value = page[offset]!;
-    if (value === 0) {
-        value = /\p{M}/u.test(String.fromCodePoint(cp)) ? 5 : 1;
-        page[offset] = value;
-    }
-    return value - 1;
 }
 
 function positiveFloat(value: number): boolean {

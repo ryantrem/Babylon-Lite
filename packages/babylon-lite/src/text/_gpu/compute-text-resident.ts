@@ -30,7 +30,8 @@ const COUNT_LANES = 256;
 const WIDE_PACK_LANES = 64;
 const WIDE_PACK_MIN_CAPACITY = 33;
 
-const STITCH_KERNEL = `
+/** @internal Shared local segment stitching; paged paragraphs never stitch across storage chunks. */
+export const COMPUTE_TEXT_STITCH_KERNEL = `
 @group(0) @binding(0) var<storage, read> seg: array<i32>;
 @group(0) @binding(1) var<storage, read_write> shaped: array<i32>;
 @group(0) @binding(2) var<storage, read> table: array<u32>;
@@ -561,7 +562,13 @@ export async function executeResidentComputeText(
         throw error;
     }
     status = status.finally(() => {
-        if (!shaders.released && readback.mapState === "unmapped") {
+        if (shaders.released) {
+            const index = shaders.statusBuffers.indexOf(readback);
+            if (index >= 0) {
+                readback.destroy();
+                shaders.statusBuffers.splice(index, 1);
+            }
+        } else if (readback.mapState === "unmapped") {
             shaders.freeStatusBuffers.push(readback);
         }
     });
@@ -570,7 +577,7 @@ export async function executeResidentComputeText(
 }
 
 /** Drop shaders borrowed by a disposed or lost object. */
-export function releaseResidentComputeText(token: object): void {
+export function releaseResidentComputeText(token: object, keepPendingStatus = false): void {
     const shaders = shadersByToken?.get(token);
     if (!shaders) {
         return;
@@ -578,10 +585,15 @@ export function releaseResidentComputeText(token: object): void {
     shaders.params._engine._flushPendingWork?.(shaders.params._engine);
     shaders.released = true;
     shaders.stage?.release();
+    let retained = 0;
     for (const buffer of shaders.statusBuffers) {
-        buffer.destroy();
+        if (!keepPendingStatus || buffer.mapState === "unmapped") {
+            buffer.destroy();
+        } else {
+            shaders.statusBuffers[retained++] = buffer;
+        }
     }
-    shaders.statusBuffers.length = 0;
+    shaders.statusBuffers.length = retained;
     shaders.freeStatusBuffers.length = 0;
     disposeComputeShader(shaders.shape);
     disposeComputeShader(shaders.pack);
@@ -693,7 +705,7 @@ function ensureSegmentBuffers(shaders: ResidentShaders, engine: EngineContext, s
     if (!shaders.stitch) {
         shaders.stitch = createComputeShader(engine, {
             name: "compute-text-stitch",
-            computeSource: STITCH_KERNEL,
+            computeSource: COMPUTE_TEXT_STITCH_KERNEL,
             entryPoint: "main",
             bindings: [
                 computeStorageBufferBinding("seg", { group: 0, binding: 0 }),

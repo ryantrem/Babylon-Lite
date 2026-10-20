@@ -1024,7 +1024,8 @@ function ensureCache(
     return cache;
 }
 
-function createShapeSchedule(
+/** @internal Shared interpreter schedule for readback and bounded resident shape batches. */
+export function createShapeSchedule(
     engine: EngineContext,
     shader: ReturnType<typeof createComputeShader>,
     buffers: Pick<GpuCache, "params" | "program" | "tables" | "runs" | "scratch" | "output">,

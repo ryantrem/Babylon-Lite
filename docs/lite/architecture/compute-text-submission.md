@@ -14,6 +14,16 @@ codes, fail-closed indirect draws, asynchronous paragraph-cache invalidation,
 and generation/disposal checks are unchanged. No public option or export is
 added; ordinary `submitComputeTaskResult` remains immediate.
 
+Paragraph paging preserves this contract. Bounded shaping batches may submit
+before scratch/parameter reuse, without completion waits. Ordered wrap, reverse
+replay, placement, global publication and the single status copy remain in the
+final deferred sequence. All old/candidate indirect ranges are zero until global
+success; no partial prefix is visible. Per-dispatch immutable parameter windows
+are retained through submission. Range identity/order/window changes version the
+existing layer bundle; counts alone do not. Terminal owner release also releases
+paragraph resources allocated before executor preparation. See
+[paged paragraph storage](compute-text-paragraph-layout.md#paged-paragraph-storage-stage-2).
+
 ## Internal architecture
 
 `compute/deferred-submit.ts` exports the internal function:

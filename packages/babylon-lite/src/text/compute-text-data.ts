@@ -19,6 +19,17 @@ import { createStyleBuffer } from "./_gpu/text-style-buffer.js";
 import { COMPUTE_TEXT_HEADER_WORDS, COMPUTE_TEXT_RECORD_WORDS, computeTextShapeCapacity } from "./_gpu/compute-text-shape.js";
 import { executeResidentComputeText, releaseResidentComputeText, residentStatusMessage } from "./_gpu/compute-text-resident.js";
 import type { ResidentPackStage, ResidentShapeGroup } from "./_gpu/compute-text-resident.js";
+import type { ComputeTextChunkBudgets } from "./compute-text-paragraph-chunks.js";
+import type { ComputeTextChunkState } from "./_gpu/compute-text-paragraph-chunks.js";
+
+/** @internal One ordered local vertex/indirect view; an arena may contain several views. */
+export interface ComputeTextDrawRange {
+    instances: StorageBuffer;
+    offset: number;
+    size: number;
+    indirect: StorageBuffer;
+    indirectOffset: number;
+}
 
 declare const computeTextDataBrand: unique symbol;
 
@@ -81,6 +92,14 @@ export interface ComputeTextData {
     _released: boolean;
     /** @internal Test-only whole-run comparison path. */
     _disableSegmentation?: boolean;
+    /** @internal Ordered paragraph-only draw windows; absent retains the fitting resident path. */
+    _drawRanges?: readonly ComputeTextDrawRange[];
+    /** @internal Paragraph-owned resources, including admission before shader preparation. */
+    _paragraphResources?: { clear(): void; release(): void };
+    /** @internal Test-only bounded paging controls. */
+    _chunkBudgets?: ComputeTextChunkBudgets;
+    /** @internal Persistent paged paragraph state; all runtime semantics remain paragraph-owned. */
+    _chunkState?: ComputeTextChunkState;
 }
 
 /** Create resident buffers for one font and one base style. `storage` is caller-owned and may be shared. Does not shape. */
@@ -181,19 +200,11 @@ export function submitComputeTextData(
         readonly rebuild?: Error;
     }
 ): Promise<ComputeTextUpdate> {
-    assertReady(data);
-    data._engine._flushPendingWork?.(data._engine);
-    data._revision++;
-    const generation = data._generation;
-    const device = data._device;
-    clearIndirect(data);
-    setStatus(data, "busy");
-    let rejectPending: (error: Error) => void = () => undefined;
-    const cancelled = new Promise<never>((_, reject) => {
-        rejectPending = reject;
-    });
-    data._rejectPending = rejectPending;
-    try {
+    return submitComputeTextPrepared(data, (assertLive) => {
+        const device = data._device;
+        data._paragraphResources?.release();
+        data._paragraphResources = undefined;
+        data._drawRanges = undefined;
         const snapshot = texts.map((text, run) => {
             if (typeof text !== "string") {
                 throw new Error(`updateComputeTextData: run ${run} text must be a string`);
@@ -210,46 +221,62 @@ export function submitComputeTextData(
         const needed = sharedCapacity(groups);
         const stage = createStage?.(groups, needed);
         const capacity = options?.capacity ?? needed;
+        return () => {
+            let closure;
+            try {
+                closure = closeComputeTextGlyphs(
+                    data._font,
+                    groups.map((group) => group.plan),
+                    [...seeds]
+                );
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                throw new Error(`${message} (witness: ${snapshot.join(" | ") || "<empty>"})`, { cause: error });
+            }
+            installComputeTextClosure(data, closure.glyphIds, options?.rebuild);
+            const runCount = prepared.length;
+            growDrawBuffers(data, options?.pool ?? runCount, capacity);
+            return executeResidentComputeText(
+                data,
+                data._engine,
+                segments?.groups ?? groups,
+                { shaped: data._shaped, instances: data._instances, indirect: data._indirect, slots: data._slots, status: data._statusBuffer },
+                capacity,
+                runCount,
+                data.fontSizePx,
+                data._font.unitsPerEm,
+                data._font.glyphCount,
+                assertLive,
+                segments,
+                stage,
+                options?.runBase
+            );
+        };
+    });
+}
+
+/** @internal Shared lifecycle for bounded paragraph work without whole-document input slabs. */
+export function submitComputeTextPrepared(
+    data: ComputeTextData,
+    prepare: (assertLive: () => void) => () => Promise<{ readonly status: Promise<number> }>
+): Promise<ComputeTextUpdate> {
+    assertReady(data);
+    data._engine._flushPendingWork?.(data._engine);
+    data._revision++;
+    const generation = data._generation;
+    const device = data._device;
+    clearIndirect(data);
+    setStatus(data, "busy");
+    let rejectPending: (error: Error) => void = () => undefined;
+    const cancelled = new Promise<never>((_, reject) => {
+        rejectPending = reject;
+    });
+    data._rejectPending = rejectPending;
+    try {
+        const execute = prepare(() => assertCurrent(data, generation, device));
         return (async () => {
             try {
-                let closure;
-                try {
-                    closure = closeComputeTextGlyphs(
-                        data._font,
-                        groups.map((group) => group.plan),
-                        [...seeds]
-                    );
-                } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error);
-                    throw new Error(`${message} (witness: ${snapshot.join(" | ") || "<empty>"})`, { cause: error });
-                }
-                installClosure(data, closure.glyphIds, options?.rebuild);
-                const runCount = prepared.length;
-                growDrawBuffers(data, options?.pool ?? runCount, capacity);
-                const submitted = await Promise.race([
-                    executeResidentComputeText(
-                        data,
-                        data._engine,
-                        segments?.groups ?? groups,
-                        {
-                            shaped: data._shaped,
-                            instances: data._instances,
-                            indirect: data._indirect,
-                            slots: data._slots,
-                            status: data._statusBuffer,
-                        },
-                        capacity,
-                        runCount,
-                        data.fontSizePx,
-                        data._font.unitsPerEm,
-                        data._font.glyphCount,
-                        () => assertCurrent(data, generation, device),
-                        segments,
-                        stage,
-                        options?.runBase
-                    ),
-                    cancelled,
-                ]);
+                const submitted = await Promise.race([execute(), cancelled]);
                 assertCurrent(data, generation, device);
                 let rejectCompletion!: (error: Error) => void;
                 const terminal = new Promise<never>((_, reject) => {
@@ -302,7 +329,8 @@ export function disposeComputeTextData(data: ComputeTextData): void {
     failTerminal(data, "disposed", "updateComputeTextData: disposed");
 }
 
-function installClosure(data: ComputeTextData, glyphIds: readonly number[], rebuild?: Error): void {
+/** @internal Install a preflighted closure; paragraph paging owns its admission and sizing. */
+export function installComputeTextClosure(data: ComputeTextData, glyphIds: readonly number[], rebuild?: Error): void {
     if (rebuild) {
         if (!data._slotWords || data._slotFont !== data._font || data._slotWords.length !== data._font.glyphCount) {
             throw rebuild;
@@ -365,6 +393,15 @@ function installClosure(data: ComputeTextData, glyphIds: readonly number[], rebu
         data._slots = grow(data, data._slots, slots.byteLength, { label: "compute-text-slots" });
         updateStorageBuffer(data._engine, data._slots, slots);
     }
+}
+
+/** @internal Retire a submitted single-range layout without retaining its high-water allocations. */
+export function resetComputeTextDrawBuffers(data: ComputeTextData): void {
+    releaseResidentComputeText(data, true);
+    disposeStorageBuffer(data._shaped);
+    disposeStorageBuffer(data._instances);
+    data._shaped = createStorageBuffer(data._engine, 64, { label: "compute-text-shaped", writable: true });
+    data._instances = createStorageBuffer(data._engine, 64, { label: "compute-text-instances", writable: true, vertex: true });
 }
 
 /** @internal Exact four-byte-aligned resident draw allocations, shared with paragraph admission. */
@@ -455,6 +492,7 @@ function prepareRun(font: ComputeFont, text: string, run: number, seeds: Set<num
 
 function clearIndirect(data: ComputeTextData): void {
     updateStorageBuffer(data._engine, data._indirect, new Uint32Array([6, 0, 0, 0]));
+    data._paragraphResources?.clear();
 }
 
 function grow(data: ComputeTextData, buffer: StorageBuffer, bytes: number, options: { label: string; writable?: boolean; vertex?: boolean; indirect?: boolean }): StorageBuffer {
@@ -485,6 +523,9 @@ function failTerminal(data: ComputeTextData, status: "lost" | "disposed", messag
         rejectCompletion(new Error(message));
     }
     data._pendingCompletions.clear();
+    data._paragraphResources?.release();
+    data._paragraphResources = undefined;
+    data._drawRanges = undefined;
     releaseResidentComputeText(data);
     for (const buffer of [data._shaped, data._instances, data._indirect, data._slots, data._statusBuffer]) {
         disposeStorageBuffer(buffer);

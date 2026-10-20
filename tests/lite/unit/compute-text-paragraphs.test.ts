@@ -51,6 +51,7 @@ function block(file?: string) {
     const engine = { _device: device } as unknown as EngineContext;
     const storage = createGlyphStorage();
     const data = createComputeTextData(engine, font(file), storage, "unit");
+    data._chunkBudgets = { monolithic: true };
     return {
         data,
         storage,

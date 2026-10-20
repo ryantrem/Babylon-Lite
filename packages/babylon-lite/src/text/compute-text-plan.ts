@@ -39,13 +39,18 @@ let plansByFont: WeakMap<ComputeFont, Map<string, ComputeTextPlan>> | null = nul
 
 /** Compile the default Script/LangSys/feature lookups for `selection`. Does not shape text. */
 export function createComputeTextPlan(font: ComputeFont, selection: ComputeTextRunSelection): ComputeTextPlan {
+    if (!selection._scalars || selection.scalarCount !== selection._scalars.length) {
+        throw new Error("createComputeTextPlan: selection scalarCount does not match its scalar array");
+    }
+    return createComputeTextPlanForSelection(font, selection);
+}
+
+/** @internal Paragraph scanning validates source without retaining a whole-paragraph scalar vector. */
+export function createComputeTextPlanForSelection(font: ComputeFont, selection: Pick<ComputeTextRunSelection, "script" | "direction" | "language">): ComputeTextPlan {
     const script = selection.script;
     const direction = selection.direction;
     if (!isScript(script) || direction !== directionForComputeTextScript(script) || selection.language !== null) {
         throw new Error("createComputeTextPlan: invalid script, direction, or language");
-    }
-    if (!selection._scalars || selection.scalarCount !== selection._scalars.length) {
-        throw new Error("createComputeTextPlan: selection scalarCount does not match its scalar array");
     }
     const key = `${script}:${direction}`;
     let plans = plansByFont?.get(font);

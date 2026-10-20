@@ -5,6 +5,187 @@
 The production admission, fused submission, status completion and fallback
 contract is specified in [resident text submission](compute-text-submission.md).
 
+## Paged paragraph storage (Stage 2)
+
+The fitting Stage 1 kernels below remain the fast path. Required uniform storage
+that cannot fit, or exceeds both 4 MiB and twice independently sized live storage,
+selects persistent post-shape chunks. Paged owners remain paged until a plain
+resident update. Internal test budgets can force small pages; there is no public
+configuration or device-limit increase.
+
+Chunks group proven-independent shaping segments (target 64 scalars) up to 16,384
+conservatively expanded records. Storage seams are never wrapping or paragraph
+boundaries. A whole-paragraph validation/selection scan preserves Common/Inherited
+resolution and rejection precedence; mapping, proof windows and uploads are bounded.
+The unchanged `safeAfter` proof receives 65 neighbors on either side, the candidate
+and immediate successor, retaining true paragraph ends. Unsafe spans extend to a
+proven seam or the true end. A fitting indivisible span has dedicated storage;
+an over-budget span rejects before atlas installation with its exact resource bytes.
+
+Persistent shaped records retain the existing header/six-i32 ABI with chunk-local
+clusters. Flags, compact instances, metadata/checkpoints and indirect records
+occupy independently sized windows in lazily allocated arenas (normal target
+1 MiB). Offsets align to `minStorageBufferOffsetAlignment`; bound windows fit the
+storage binding limit even when the containing allocation is larger. Arenas fit
+`maxBufferSize`. Optional growth is at most 25%, budget-aware. No longest-paragraph
+stride or empty paragraph pool is allocated. Normal transient shaping/local
+stitch/replay storage is bounded to 8 MiB; dedicated indivisible fallback is checked
+separately. Source snapshot/chunk descriptors are explicitly persistent O(N).
+
+Paged layout is exact ordered streaming serial wrap, not independent chunk wrap.
+Forward dispatches save 128-byte entry/exit checkpoints: glyph/line/start ordinals,
+first cluster, i32 start/pen/content/break positions, last break/cluster and visible
+count, status and validity. Summaries propagate the next nonempty record across
+empty chunks for exact cross-seam break lookahead. Only real paragraph ends close
+the final line. Paragraph line totals prefix in logical document order.
+
+Reverse traversal replays from each saved entry checkpoint into bounded scratch:
+16 bytes per record for integer pen/visible prefixes and 32 bytes per local line
+event (at most records + 2). It merges up to two future line events, places actual
+records into the chunk's instance window and passes backward only events covering
+earlier records. At a forward checkpoint there is one open line and at most one
+remembered break: future input can close through that break and then its remaining
+suffix, after which every line starts in future input. Thus at most two future
+events cover earlier records; exceeding two is an error, never event truncation.
+Empty chunks preserve this carry. Integer wraparound/subtraction, f32 conversion,
+alignment and the original placement `fma` order are retained; there is no rounded
+floating chunk origin. Negative advances use these same serial transitions.
+
+Unchanged chunk shape windows/identities survive edits only with exact source,
+plan and boundary-proof dependencies. Source prefix/suffix reuse does not globally
+retile a shifted suffix. Layout reuse compares complete old/candidate checkpoints;
+reverse placement also compares incoming events and paragraph placement/atlas
+dependencies. A count/hash match alone is not convergence. Worst-case changed
+paragraph selection and GPU reflow remain linear; no constant-time edit guarantee.
+
+Every real instance window has an ordered indirect draw range. Admission zeros
+all old counts; candidate counts stay zero until a final GPU global-success
+publication. An error in any chunk leaves the entire owner invisible. One logical
+owner, one normal four-byte status readback and existing deferred frame fusion
+remain. Immutable dispatch parameter windows prevent queued work observing later
+writes. Intermediate shaping submissions consume bounded scratch before reuse,
+without per-chunk GPU waits. Generation/revision/ancestor-failure rules, busy
+rejection, plain-mode switching, atlas invalidation, disposal and device loss apply
+to all windows. Terminal release covers stages created before executor preparation.
+
+Exact tests force small windows/arenas, compare all six shaped fields and instance
+bits with serial/oracle output, stress reverse carry and empty/deleted records,
+exercise reuse/split/merge/atomic failure/lifecycle, and verify a real default-limit
+paragraph whose required Stage 1 line bytes exceed 128 MiB. Untimed diagnostics
+iterate every actual ordered range and encoded command, not just aggregate counts.
+
+### Paged implementation data and dispatch ABI
+
+`planComputeTextParagraphChunks(font, paragraphs, limits, budgets?, previous?)`
+returns source chunks, per-paragraph plans, closure seeds, maximum local capacity,
+effective binding/arena budgets and peak transient workspace bytes. Each source
+chunk retains exact text, UTF-16/scalar starts and counts, segment end indices,
+plan identity and 66-scalar boundary contexts. Persistent chunk IDs and resource
+windows belong to `ComputeTextData._chunkState`; they are not public exports.
+`submitComputeTextPrepared(data, prepare)` shares the normal owner admission,
+cancellation and completion machinery without allocating a document-sized slab.
+
+The layout shader binds eight windows in this order: immutable params, shaped
+records, scalar flags, shared atlas slots (read-only), local instances, local
+metadata, ordered carry, reusable replay scratch (read-write). Summary, measure,
+replay and placement are distinct ordered dispatches. The final four-binding
+publication kernel reads metadata/carry and writes one local indirect record and
+the owner's status. Parameters are 16 words per chunk:
+
+| Word  | Meaning                                                                                  |
+| ----- | ---------------------------------------------------------------------------------------- |
+| 0–5   | Required capacity, paragraph scalar start/count, paragraph index, first/last chunk flags |
+| 6–9   | Width, line height, spacing and scale f32 bits                                           |
+| 10–13 | Font glyph count, logical chunk index, dirty-shape flag, alignment                       |
+| 14–15 | Reserved zero                                                                            |
+
+Every metadata window is 1,024 bytes. Checkpoints at words 0/32 are the current
+entry/exit; 64/96 retain the previous generation. A checkpoint's words 0–13 are
+glyph ordinal, line ordinal, line start ordinal/cluster, line-start X, pen X/Y,
+content end, remembered break ordinal/X/content end, previous cluster, visible
+count and cluster after the remembered break; 14–31 are zero. Integer positions
+are i32 bit patterns. Metadata words 128–133 hold actual count, visible count,
+next nonempty cluster, its preceding scalar flag, status and document line base.
+Words 134–138 retain width/scale/successor dependencies and validity; 139/140
+report actual measure/placement execution. Words 160–176 retain the complete
+incoming reverse carry and 180–186 retain width/height/spacing/scale/line-base/
+paragraph-index/alignment placement dependencies.
+
+The 512-byte owner carry contains status/first-failing chunk at words 0/1,
+document line base at 4, next nonempty cluster/preceding flag at 6/7, the current
+32-word forward checkpoint at 16 and reverse event count/two complete events
+at 48–64. Replay scratch starts with four words (event count and zero padding),
+then four words per capacity record (integer X/Y, local visible prefix, zero),
+then eight words per event, reserving capacity + 4 events including future carry.
+Event fields are first/end glyph ordinals, line ordinal, start X, final f32 width,
+first source cluster and two zero words.
+For M local records, each ordinary closure consumes a distinct local record;
+one remembered incoming break can add one earlier closure, and true paragraph
+end adds at most one final closure. Local events are therefore at most M + 2,
+including empty chunks; appending the two incoming future events fits capacity + 4.
+This bound does not depend on signs or monotonicity of advances.
+
+Reverse carry includes events ending **entirely before** the current chunk when
+they still close earlier records. Filtering by intersection with the current
+chunk would silently lose a retroactive closure; the adversarial two-event test
+checks this exact case with right alignment. Placement binary-searches ordered
+event intervals without changing any wrapping or floating-point arithmetic.
+Placement grids linearize X/Y and stride over records when a small dispatch
+budget cannot cover a fitting dedicated span in one invocation per record.
+
+Scalar selection is scanned without retaining a paragraph-sized scalar vector.
+Normal source/proof materializations and shape inputs are chunk-bounded. An
+unavailable space-independence analysis or an indivisible required workspace
+failure rejects before closure installation. Required counters reserve the u32
+sentinels and signed scalar-cluster ABI. Normal workspace excludes immutable font
+program/tables, whose independent existing device bounds remain enforced.
+Their uploads retain the resident executor's plan-identity cache rule rather
+than re-uploading the same immutable font program for every chunk.
+The normal 8 MiB reservation allows up to 4 MiB for a legacy admission decode
+probe, 1 MiB for bounded chunk decode/upload views and 3 MiB for reusable GPU
+workspace. A dirty batch larger than the admission probe budget is checked with
+the bounded paragraph scan before any legacy slab, even when an existing fitting
+owner grows into paged mode. Uneven safe segments split into additional storage
+chunks before their shared shaping stride can exceed the workspace reservation;
+optional grouping never rejects required independently fitting segments.
+General JavaScript object/source metadata and immutable font data are not GPU
+workspace. Dedicated indivisible spans retain their explicitly checked exception.
+Arena windows have optional budget-aware growth of at most 25%; freed compatible
+capacity windows are first-fit reused. Extra empty arenas beyond one per class
+are retired after safe detachment and status settlement; an empty dedicated arena is never an ordinary
+spare. Projected retained transient bytes are checked against the current plan,
+not merely new requested sizes. Obsolete dedicated workspaces are retired when
+their high-water allocations would exceed the current normal reservation (or
+25% bounded dedicated headroom). Resource retirement preserves privately mapping
+status buffers until their completion callback, including legacy↔paged switches.
+
+Retirement is revision-owned, not an arbitrary delayed destruction callback.
+Before changing a published chunk list, replace the owner's draw view with an
+empty range list. The renderer always rechecks that list before bundle replay;
+its changed identity invalidates the cached bundle, so a preparation-gap frame
+cannot execute retired views. Already submitted commands remain queue-ordered.
+Removed arenas/workspace buffers are detached from the live allocator immediately,
+but retained in that revision's retirement batch until its private status settles.
+Freed windows are quarantined in the same batch and cannot be zeroed/reused by a
+newer allocation before settlement. Only after detachment and settlement may
+buffers be destroyed and windows enter surviving arenas' free lists. Later
+revisions cannot reuse pending buffers; an ancestor callback settles only its own
+batch. Failed admission detaches all candidate views before terminal resource
+release. Disposal/loss drains every outstanding batch exactly once after the
+existing deferred-work flush/abandon barrier and makes layer replay inactive.
+No additional GPU waits/readbacks are introduced.
+Pending retirement bytes are in-flight generation storage, reported separately
+from the active 3 MiB GPU workspace reservation; delaying their destruction does
+not raise the normal active workspace budget.
+
+Paged shaping resolves program/analysis metadata once per consecutive selected
+plan and decodes/maps each bounded context once. Chunk input/flag preparation
+shares views of that context, including the same complete proof neighbors; it
+does not shape the halo. Both storage paths use one lazy scalar mark classifier.
+Stable seam starts are traversed with an ordered cursor rather than rescanning
+all retained boundaries per segment. Routing retries retain the admitted source
+and layout snapshot, never the caller's later-mutated arrays/options.
+
 Move paragraph wrapping and line placement onto the GPU, after resident
 shaping, so a host such as LineLayoutPad can draw plain-text documents without
 any LLX WASM shaping or layout. The work is **incremental**: each step ships a
@@ -15,15 +196,15 @@ redesigned later.
 
 ### Incremental roadmap
 
-| Step                           | Babylon Lite                                                                                                                                                                                                                                                                     | Pad                                                                                                                                                               | Functionality restored                           |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| **1 (this spec)**              | `updateComputeTextParagraphs`: shape each paragraph once, GPU greedy wrap at shaping-safe spaces, emergency breaks, hanging trailing spaces, left/center/right alignment, paragraph spacing, font line metrics. Per-line records written on the GPU (internal).                  | "Compute Text (GPU layout)" mode: no LLX shaping/layout on the path; plain-text documents drawn from GPU layout. Caret, selection, hit testing, markers disabled. | Wrapped, aligned plain-text drawing with no LLX. |
-| **2 (implemented)**            | Paragraph slots with stable identities; reshape only dirty paragraphs; width/alignment changes re-run layout without reshaping.                                                                                                                                                  | Per-keystroke dirty-paragraph updates.                                                                                                                            | Edit latency independent of document size.       |
-| 3                              | Revision-bound async queries over line/cluster records: line extents, cluster↔x, caret stops, hit test.                                                                                                                                                                          | Caret, click-to-place, arrow keys, selection highlight.                                                                                                           | Editing.                                         |
-| 4                              | GPU caret/selection rendering from cluster records (no per-keystroke readback).                                                                                                                                                                                                  | Remove query round-trip from typing.                                                                                                                              | Latency parity.                                  |
-| **5 (wrap/place implemented)** | Within-paragraph parallel wrap (blocked scans + candidate break search) and parallel placement; negative-advance paragraphs retain serial wrapping. Same-task frame submission fusion is implemented. Dirty safe-break-chunk reshaping and device-level pipeline sharing remain. | Large documents, many panes.                                                                                                                                      | Scale.                                           |
-| 6                              | Multiple styles per paragraph (style runs, per-run fonts/sizes/colors, line metrics from the tallest run).                                                                                                                                                                       | Bold/italic/size/color, decorations.                                                                                                                              | Rich text.                                       |
-| 7                              | Line-local bidi reordering, more scripts, UAX #14 classes beyond spaces, tabs, justification.                                                                                                                                                                                    | Remaining eligibility gates removed.                                                                                                                              | Feature parity with LLX.                         |
+| Step                           | Babylon Lite                                                                                                                                                                                                                                                                     | Pad                                                                                                                                                               | Functionality restored                                                        |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| **1 (this spec)**              | `updateComputeTextParagraphs`: shape each paragraph once, GPU greedy wrap at shaping-safe spaces, emergency breaks, hanging trailing spaces, left/center/right alignment, paragraph spacing, font line metrics. Per-line records written on the GPU (internal).                  | "Compute Text (GPU layout)" mode: no LLX shaping/layout on the path; plain-text documents drawn from GPU layout. Caret, selection, hit testing, markers disabled. | Wrapped, aligned plain-text drawing with no LLX.                              |
+| **2 (implemented)**            | Paragraph slots with stable identities; reshape only dirty paragraphs; width/alignment changes re-run layout without reshaping.                                                                                                                                                  | Per-keystroke dirty-paragraph updates.                                                                                                                            | Clean paragraphs avoid reshaping; dirty preparation/reflow can remain linear. |
+| 3                              | Revision-bound async queries over line/cluster records: line extents, cluster↔x, caret stops, hit test.                                                                                                                                                                          | Caret, click-to-place, arrow keys, selection highlight.                                                                                                           | Editing.                                                                      |
+| 4                              | GPU caret/selection rendering from cluster records (no per-keystroke readback).                                                                                                                                                                                                  | Remove query round-trip from typing.                                                                                                                              | Latency parity.                                                               |
+| **5 (wrap/place implemented)** | Within-paragraph parallel wrap (blocked scans + candidate break search) and parallel placement; negative-advance paragraphs retain serial wrapping. Same-task frame submission fusion is implemented. Dirty safe-break-chunk reshaping and device-level pipeline sharing remain. | Large documents, many panes.                                                                                                                                      | Scale.                                                                        |
+| 6                              | Multiple styles per paragraph (style runs, per-run fonts/sizes/colors, line metrics from the tallest run).                                                                                                                                                                       | Bold/italic/size/color, decorations.                                                                                                                              | Rich text.                                                                    |
+| 7                              | Line-local bidi reordering, more scripts, UAX #14 classes beyond spaces, tabs, justification.                                                                                                                                                                                    | Remaining eligibility gates removed.                                                                                                                              | Feature parity with LLX.                                                      |
 
 LLX remains available as a **test oracle** (line breaks, metrics, positions) and
 as a user-selectable backend; it is never consulted by the GPU layout path.

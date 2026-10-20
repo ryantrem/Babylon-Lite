@@ -1168,6 +1168,15 @@ Shaping matches text-shaper 0.1.28 for the admitted one-direction runs the compi
 
 ## GPU-resident compute text
 
+Paragraph updates retain the fitting uniform-slot fast path and additionally
+support persistent post-shape pages for over-budget or materially wasteful
+uniform storage. Pages use exact shaping-safe seams, bounded streaming wrap/replay
+workspace, chunk-local instance windows and ordered indirect draw ranges in one
+logical layer. Only global success publishes counts. This does not make dirty
+paragraph preparation/reflow constant-time. The complete storage, arithmetic,
+reuse and lifecycle contract is in
+[GPU paragraph layout](compute-text-paragraph-layout.md#paged-paragraph-storage-stage-2).
+
 ### Production ordered-index and immutable-preparation contract (2026-10-06)
 
 The compiler's eight-word lookup descriptor retains every selected root and
