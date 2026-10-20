@@ -1362,6 +1362,131 @@ describe("native GPU paragraph wrapping and placement", () => {
         }
     });
 
+    it("matches the serial oracle for hinted gallop and lane line sweeps through 120001 records (seed 0x6a09e667)", async () => {
+        const capacity = 120001;
+        const words = layoutWords(1, capacity);
+        words[2] = bits(0.02343751);
+        words[5] = bits(31.12345);
+        const records = new Int32Array(4 + capacity * 6);
+        const shared = {
+            shaped: createStorageBuffer(native.engine, records, { writable: true }),
+            slots: createStorageBuffer(native.engine, Uint32Array.of(13, 0xfffffffe, 0xffffffff)),
+        };
+        const stages = [0, 1].map(() => createComputeTextParagraphStage({}, native.engine, words.slice()));
+        const tasks = [0, 1].map((i) => createComputeTask(native.engine, `gallop-sweep-oracle-${i}`));
+        const outputs = [0, 1].map(() => ({
+            instances: createStorageBuffer(native.engine, capacity * 12, { writable: true }),
+            indirect: createStorageBuffer(native.engine, 16, { writable: true }),
+            status: createStorageBuffer(native.engine, 4, { writable: true }),
+        }));
+        const serialShaders: ReturnType<typeof createComputeShader>[] = [];
+        let seed = 0x6a09e667;
+        const random = (limit: number) => {
+            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+            return seed % limit;
+        };
+        try {
+            stages.forEach((stage, index) => {
+                stage.prepare(native.engine, 1, capacity);
+                const dispatches = stage.dispatches({ ...shared, ...outputs[index]! });
+                if (index) {
+                    for (const [i, entryPoint] of [
+                        [0, "serialMeasureTest"],
+                        [2, "serialPlaceTest"],
+                    ] as const) {
+                        const shader = createComputeShader(native.engine, {
+                            computeSource: stage._shaders![i]!._source + serialParagraphLayout,
+                            entryPoint,
+                            bindings: stage._shaders![i]!._decls,
+                        });
+                        serialShaders.push(shader);
+                        dispatches[i] = createComputeDispatch(
+                            shader,
+                            createComputeBindingSet(shader, { input: stage._input!, ...shared, ...outputs[index]!, info: stage._info!, lines: stage._lines! }),
+                            { size: { x: 1 } }
+                        );
+                    }
+                }
+                dispatches.forEach((dispatch) => addComputeDispatch(tasks[index]!, dispatch));
+                tasks[index]!.record();
+            });
+            const cases = [
+                ...[0, 1, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025].map((count) => ({ count, kind: "boundary", width: 0.02343751 * 13 })),
+                { count: 4097, kind: "zero-tail", width: 41.37 },
+                { count: 4097, kind: "spaces", width: 0.0001 },
+                { count: 4097, kind: "guarded", width: 0.0001 },
+                { count: 4097, kind: "clusters", width: 41.37 },
+                { count: 1025, kind: "negative", width: 41.37 },
+                { count: 1025, kind: "overflow", width: 41.37 },
+                { count: capacity, kind: "seeded", width: 600 },
+                { count: capacity, kind: "zero-tail", width: Infinity },
+            ];
+            for (const { count, kind, width } of cases) {
+                records.fill(0);
+                records[1] = count;
+                words.fill(0, 17);
+                let cluster = 0;
+                for (let i = 0; i < count; i++) {
+                    if (i && (kind !== "clusters" || random(3))) {
+                        cluster++;
+                    }
+                    const flag = kind === "spaces" ? 1 : kind === "guarded" ? 4 : kind === "seeded" || kind === "clusters" ? random(8) : 0;
+                    const flagAt = 17 + Math.floor(cluster / 4);
+                    words[flagAt] = (words[flagAt]! & ~(255 << ((cluster % 4) * 8))) | (flag << ((cluster % 4) * 8));
+                    const advance = kind === "boundary" ? 13 : kind === "zero-tail" ? (i === 0 ? 1000000 : 0) : random(90);
+                    records.set([kind === "boundary" ? 0 : random(2), cluster, advance, random(9) - 4, random(17) - 8, random(17) - 8], 4 + i * 6);
+                }
+                if (kind === "negative") {
+                    records[6 + 513 * 6] = -300;
+                } else if (kind === "overflow") {
+                    records[6] = 0x7fffffff;
+                    records[12] = 1;
+                }
+                updateStorageBuffer(native.engine, shared.shaped, records);
+                stages.forEach((stage) => {
+                    stage._words.set(words);
+                    stage._words[4] = bits(width);
+                    updateStorageBuffer(native.engine, stage._input!, stage._words);
+                });
+                for (const task of tasks) {
+                    await prepareComputeTask(task);
+                    submitComputeTasks([task]);
+                }
+                const results = await Promise.all(
+                    stages.map(async (stage, i) => {
+                        const info = new Uint32Array(await readStorageBuffer(stage._info!));
+                        const visible = info[0]!;
+                        return {
+                            info,
+                            lines: new Uint32Array(await readStorageBuffer(stage._lines!, 0, info[2]! * 16)),
+                            instances: new Uint32Array(await readStorageBuffer(outputs[i]!.instances, 0, Math.max(4, visible * 12))),
+                            indirect: new Uint32Array(await readStorageBuffer(outputs[i]!.indirect)),
+                            status: new Uint32Array(await readStorageBuffer(outputs[i]!.status)),
+                        };
+                    })
+                );
+                expect(results[0], `${kind}/${count}/${width}: serial output`).toEqual(results[1]);
+                expect(new Int32Array(await readStorageBuffer(shared.shaped))).toEqual(records);
+                if (count) {
+                    const table = new Uint32Array(await readStorageBuffer(stages[0]!._lines!, capacity * 16, count * 32));
+                    const lines = results[1]!.lines;
+                    let line = 0;
+                    for (let i = 0; i < count; i++) {
+                        while (line + 1 < results[1]!.info[2]! && lines[(line + 1) * 4]! <= i) {
+                            line++;
+                        }
+                        expect(table[i * 8 + 4], `${kind}/${count}: record ${i} line`).toBe(line);
+                    }
+                }
+            }
+        } finally {
+            tasks.forEach((task) => task.dispose());
+            stages.forEach((stage) => stage.release());
+            serialShaders.forEach(disposeComputeShader);
+            [...Object.values(shared), ...outputs.flatMap(Object.values)].forEach(disposeStorageBuffer);
+        }
+    }, 120000);
+
     it("counts visible slots and keeps y advances across lines, including visible hanging spaces and protected clusters", async () => {
         const token = {};
         const count = 1;

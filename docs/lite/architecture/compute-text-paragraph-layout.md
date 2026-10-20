@@ -601,7 +601,7 @@ emergency(s)` can start a line. For each candidate compute:
 
     ```
     i0 = first i in (s, count) with !(f32(end(i) - startX[s]) * scale <= maxWidth)
-         // binary search on non-decreasing end(i)
+         // monotone-hinted gallop, then binary search on non-decreasing end(i)
     if none: next(s) = FINAL
     else i = nextNW[i0]
     if i == NONE: next(s) = FINAL
@@ -615,6 +615,24 @@ emergency(s)` can start a line. For each candidate compute:
       else next(s) = k
     ```
 
+   Each lane visits candidate `s` in ascending order and retains only its prior
+   first-false index `hint`, initially zero. Start at `low = max(s+1, hint)`;
+   `count` is a sentinel and is never passed to the fit predicate. If `low`
+   already fails, keep it. Otherwise bracket the first failure by probing
+   `low+1`, `low+3`, `low+7`, ... clamped to `count`, then use the original
+   first-false binary-search update inside that bracket. Saturate the gallop
+   step at `count-low` to avoid overflow. Preserve the identical predicate:
+   load `startPos = bitcast<i32>(A[s].x)`, compute
+   `endPos = bitcast<i32>(A[i].x) + shapedAdvance[i]`, and evaluate
+   `f32(endPos-startPos)*scale <= maxWidth` in that order.
+   Nonnegative advances and no signed-prefix overflow make this predicate
+   monotone both in `i` and candidate `s`, because admission guarantees positive
+   finite scale. The previous first-false cannot move left for a later candidate.
+   Negative/overflow paths skip this search entirely and retain serialMeasure.
+   The gallop is logarithmically bounded even after a huge advance followed by
+   a long zero-advance run; it is not an unbounded linear two-pointer walk.
+   `+Infinity` eventually reaches the count sentinel without reading it.
+
 5. Lane 0 follows `0 -> next(0) -> ...`, emitting `[s,next)` with width
    `contentEnd[next-1] - startX[s]`, or final `[s,count)` with width
    `contentEnd[count-1] - startX[s]`. Empty paragraphs emit one empty line.
@@ -623,8 +641,15 @@ emergency(s)` can start a line. For each candidate compute:
    after a normal break are either whitespace or non-overflowing and contain no
    later break opportunity. A negative advance (or signed prefix overflow,
    which also invalidates monotonicity) selects the serial fallback instead.
-6. Publish slot info, then lanes binary-search emitted line starts and replace
-   B.x with each record's line index. A and B.x are filled even on fallback.
+6. Publish slot info. Each nonempty lane binary-searches only its first record's
+   containing line. Sweep that lane's ascending records with a cached next line
+   start, advancing while `nextLineFirst <= record`. Emitted line starts are
+   strictly increasing on both chain and serial paths, so the sweep returns
+   the same largest line index whose start is no greater than the record.
+   Empty lanes write nothing; one-line paragraphs use the count sentinel.
+   Replace B.x with each record's line index. A and B.x are filled even on
+   fallback. No other scan, table, line-chain, failure or placement math changes;
+   hints and sweep state are lane-local registers, with no new storage or dispatch.
 
 **prefix:** read `info[order[p]]`; exclusive scans of visible counts (instance bases) and line counts
 (global line bases) using a 256-lane span scan; the lowest failing paragraph's

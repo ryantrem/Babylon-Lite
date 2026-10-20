@@ -114,6 +114,11 @@ fn emergency(p:u32, i:u32) -> bool {
   let c = u32(shaped[recordAt(p, i) + 1u]);
   return nonSpace(p, i) && c != u32(shaped[recordAt(p, i - 1u) + 1u]) && (flags(p, c) & 4u) == 0u;
 }
+// Only the non-serial path is monotone; admission guarantees positive finite scale.
+fn fits(p:u32, i:u32, startPos:i32, scale:f32, maxWidth:f32) -> bool {
+  let endPos = bitcast<i32>(lines[tableAt(p, i)].x) + shaped[recordAt(p, i) + 2u];
+  return f32(endPos - startPos) * scale <= maxWidth;
+}
 fn scanSummary(lane:u32, kind:u32, reverse:bool) {
   workgroupBarrier();
   for (var distance = 1u; distance < 256u; distance *= 2u) {
@@ -247,17 +252,29 @@ fn measure(@builtin(workgroup_id) group:vec3u, @builtin(num_workgroups) groups:v
   if (workgroupUniformLoad(&useSerial) == 0u) {
     let scale = bitcast<f32>(input[2]);
     let maxWidth = bitcast<f32>(input[4]);
+    var hint = 0u;
     for (var s = begin; s < end; s++) {
       if (s != 0u && !breakOpp(p, s - 1u, count) && !emergency(p, s)) { continue; }
       let startPos = bitcast<i32>(lines[tableAt(p, s)].x);
-      var low = s + 1u;
-      var high = count;
-      while (low < high) {
-        let middle = (low + high) / 2u;
-        let endPos = bitcast<i32>(lines[tableAt(p, middle)].x) + shaped[recordAt(p, middle) + 2u];
-        if (f32(endPos - startPos) * scale <= maxWidth) { low = middle + 1u; }
-        else { high = middle; }
+      var low = max(s + 1u, hint);
+      if (low < count && fits(p, low, startPos, scale, maxWidth)) {
+        let first = low;
+        var step = 1u;
+        var high = first + min(step, count - first);
+        low++;
+        loop {
+          if (high == count || !fits(p, high, startPos, scale, maxWidth)) { break; }
+          low = high + 1u;
+          step = min(count - first, step * 2u + 1u);
+          high = first + step;
+        }
+        while (low < high) {
+          let middle = (low + high) / 2u;
+          if (fits(p, middle, startPos, scale, maxWidth)) { low = middle + 1u; }
+          else { high = middle; }
+        }
       }
+      hint = low;
       var next = count;
       if (low < count) {
         let i = lines[tableAt(p, low) + 1u].y;
@@ -301,15 +318,24 @@ fn measure(@builtin(workgroup_id) group:vec3u, @builtin(num_workgroups) groups:v
   }
   storageBarrier();
   let lineCount = workgroupUniformLoad(&measuredLines);
-  for (var i = begin; i < end; i++) {
+  if (begin < end) {
     var low = 0u;
     var high = lineCount;
     while (low + 1u < high) {
       let middle = (low + high) / 2u;
-      if (lines[p * input[1] + middle].x <= i) { low = middle; }
+      if (lines[p * input[1] + middle].x <= begin) { low = middle; }
       else { high = middle; }
     }
-    lines[tableAt(p, i) + 1u].x = low;
+    var nextFirst = count;
+    if (low + 1u < lineCount) { nextFirst = lines[p * input[1] + low + 1u].x; }
+    for (var i = begin; i < end; i++) {
+      while (i >= nextFirst && low + 1u < lineCount) {
+        low++;
+        nextFirst = count;
+        if (low + 1u < lineCount) { nextFirst = lines[p * input[1] + low + 1u].x; }
+      }
+      lines[tableAt(p, i) + 1u].x = low;
+    }
   }
 }
 @compute @workgroup_size(256)
