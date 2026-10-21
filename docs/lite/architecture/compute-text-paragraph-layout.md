@@ -615,23 +615,37 @@ emergency(s)` can start a line. For each candidate compute:
       else next(s) = k
     ```
 
-   Each lane visits candidate `s` in ascending order and retains only its prior
-   first-false index `hint`, initially zero. Start at `low = max(s+1, hint)`;
-   `count` is a sentinel and is never passed to the fit predicate. If `low`
-   already fails, keep it. Otherwise bracket the first failure by probing
-   `low+1`, `low+3`, `low+7`, ... clamped to `count`, then use the original
-   first-false binary-search update inside that bracket. Saturate the gallop
-   step at `count-low` to avoid overflow. Preserve the identical predicate:
-   load `startPos = bitcast<i32>(A[s].x)`, compute
-   `endPos = bitcast<i32>(A[i].x) + shapedAdvance[i]`, and evaluate
-   `f32(endPos-startPos)*scale <= maxWidth` in that order.
-   Nonnegative advances and no signed-prefix overflow make this predicate
-   monotone both in `i` and candidate `s`, because admission guarantees positive
-   finite scale. The previous first-false cannot move left for a later candidate.
-   Negative/overflow paths skip this search entirely and retain serialMeasure.
-   The gallop is logarithmically bounded even after a huge advance followed by
-   a long zero-advance run; it is not an unbounded linear two-pointer walk.
-   `+Infinity` eventually reaches the count sentinel without reading it.
+    Each lane visits candidate `s` in ascending order and retains only its prior
+    first-false index `hint`, initially zero. Start at `low = max(s+1, hint)`;
+    `count` is a sentinel and is never passed to the fit predicate. If `low`
+    already fails, keep it. Otherwise bracket the first failure by probing
+    `low+1`, `low+3`, `low+7`, ... clamped to `count`, then use the original
+    first-false binary-search update inside that bracket. Saturate the gallop
+    step at `count-low` to avoid overflow. Preserve the identical predicate:
+    load `startPos = bitcast<i32>(A[s].x)`. For `i+1 < count`, load
+    `endPos = bitcast<i32>(A[i+1].x)`; for the final record, retain
+    `endPos = bitcast<i32>(A[i].x) + shapedAdvance[i]`. Use a real conditional,
+    not `select`: there is no valid successor at `count`. In both cases evaluate
+    `f32(endPos-startPos)*scale <= maxWidth` in the identical order.
+    This successor-prefix equivalence is valid only on the guarded non-serial
+    P7 path, with `i < count`. The scanned u32 prefixes are congruent to the
+    true prefixes modulo 2^32 even across lane boundaries. When no advance is
+    negative and every signed-overflow check passes, induction in global record
+    order bounds each true prefix, including the final sum, by `0x7fffffff`.
+    Congruence therefore gives exact nonnegative i32 prefixes, so `A[i+1].x`
+    equals the original prefix-plus-advance bits. The preceding storage barriers
+    make cross-lane successor prefixes visible; A.x remains immutable during P7.
+    Counts zero and one make no predicate calls; count two uses the original
+    final-record expression. The non-final probe removes one static storage load
+    but adds a branch; compiler, cache, register, occupancy and latency effects
+    are not guaranteed.
+    Nonnegative advances and no signed-prefix overflow make this predicate
+    monotone both in `i` and candidate `s`, because admission guarantees positive
+    finite scale. The previous first-false cannot move left for a later candidate.
+    Negative/overflow paths skip this search entirely and retain serialMeasure.
+    The gallop is logarithmically bounded even after a huge advance followed by
+    a long zero-advance run; it is not an unbounded linear two-pointer walk.
+    `+Infinity` eventually reaches the count sentinel without reading it.
 
 5. Lane 0 follows `0 -> next(0) -> ...`, emitting `[s,next)` with width
    `contentEnd[next-1] - startX[s]`, or final `[s,count)` with width

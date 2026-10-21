@@ -1487,6 +1487,209 @@ describe("native GPU paragraph wrapping and placement", () => {
         }
     }, 120000);
 
+    describe("successor-prefix fits", () => {
+        interface ParagraphCase {
+            records: number[][];
+            flags: number[];
+            serial?: boolean;
+        }
+
+        const scale = Math.fround(0.37);
+        const paragraph = (advances: readonly number[]): ParagraphCase => ({
+            records: advances.map((advance, i) => [0, i, advance, 0, 0, 0]),
+            flags: advances.map(() => 0),
+        });
+        const widthOf = (advance: number) => Math.fround(Math.fround(advance) * scale);
+        const nextDown = (value: number) => {
+            expect(value).toBeGreaterThan(0);
+            expect(Number.isFinite(value)).toBe(true);
+            return new Float32Array(Uint32Array.of(bits(value) - 1).buffer)[0]!;
+        };
+
+        async function compare(paragraphs: readonly ParagraphCase[], widths: readonly number[], checkPath = false): Promise<void> {
+            const capacity = Math.max(1, ...paragraphs.map((p) => p.records.length));
+            const words = layoutWords(paragraphs.length, capacity);
+            words[2] = bits(scale);
+            words[5] = bits(31.12345);
+            const stride = 4 + capacity * 6;
+            const records = new Int32Array(paragraphs.length * stride);
+            paragraphs.forEach((p, index) => {
+                records[index * stride + 1] = p.records.length;
+                p.records.forEach((record, i) => records.set(record, index * stride + 4 + i * 6));
+                p.flags.forEach((flag, cluster) => {
+                    const at = 16 + paragraphs.length + index * words[12]! + Math.floor(cluster / 4);
+                    words[at] = words[at]! | (flag << ((cluster % 4) * 8));
+                });
+            });
+            const shared = {
+                shaped: createStorageBuffer(native.engine, records, { writable: true }),
+                slots: createStorageBuffer(native.engine, Uint32Array.of(13, 0xfffffffe, 0xffffffff)),
+            };
+            const stages = [0, 1].map(() => createComputeTextParagraphStage({}, native.engine, words.slice()));
+            const tasks = [0, 1].map((i) => createComputeTask(native.engine, `successor-prefix-oracle-${i}`));
+            const outputs = [0, 1].map(() => ({
+                instances: createStorageBuffer(native.engine, Math.max(4, paragraphs.reduce((n, p) => n + p.records.length, 0) * 12), { writable: true }),
+                indirect: createStorageBuffer(native.engine, 16, { writable: true }),
+                status: createStorageBuffer(native.engine, 4, { writable: true }),
+            }));
+            const serialShaders: ReturnType<typeof createComputeShader>[] = [];
+            try {
+                stages.forEach((stage, index) => {
+                    stage.prepare(native.engine, paragraphs.length, capacity);
+                    const dispatches = stage.dispatches({ ...shared, ...outputs[index]! });
+                    if (index) {
+                        for (const [i, entryPoint] of [
+                            [0, "serialMeasureTest"],
+                            [2, "serialPlaceTest"],
+                        ] as const) {
+                            const shader = createComputeShader(native.engine, {
+                                computeSource: stage._shaders![i]!._source + serialParagraphLayout,
+                                entryPoint,
+                                bindings: stage._shaders![i]!._decls,
+                            });
+                            serialShaders.push(shader);
+                            dispatches[i] = createComputeDispatch(
+                                shader,
+                                createComputeBindingSet(shader, { input: stage._input!, ...shared, ...outputs[index]!, info: stage._info!, lines: stage._lines! }),
+                                { size: { x: Math.ceil(paragraphs.length / 64) } }
+                            );
+                        }
+                    }
+                    dispatches.forEach((dispatch) => addComputeDispatch(tasks[index]!, dispatch));
+                    tasks[index]!.record();
+                });
+                for (const width of widths) {
+                    stages.forEach((stage) => {
+                        stage._words[4] = bits(width);
+                        updateStorageBuffer(native.engine, stage._input!, stage._words);
+                    });
+                    for (const task of tasks) {
+                        await prepareComputeTask(task);
+                        submitComputeTasks([task]);
+                    }
+                    const actual = await Promise.all(
+                        stages.map(async (stage, i) => ({
+                            info: new Uint32Array(await readStorageBuffer(stage._info!)),
+                            lines: new Uint32Array(await readStorageBuffer(stage._lines!, 0, paragraphs.length * capacity * 16)),
+                            instances: new Uint32Array(await readStorageBuffer(outputs[i]!.instances)),
+                            indirect: new Uint32Array(await readStorageBuffer(outputs[i]!.indirect)),
+                            status: new Uint32Array(await readStorageBuffer(outputs[i]!.status)),
+                        }))
+                    );
+                    expect(actual[0], `width ${width}: serial WGSL`).toEqual(actual[1]);
+                    const result = actual[0]!;
+                    expect([...result.status]).toEqual([0]);
+                    const table = new Uint32Array(await readStorageBuffer(stages[0]!._lines!, paragraphs.length * capacity * 16, paragraphs.length * capacity * 32));
+                    paragraphs.forEach((p, index) => {
+                        const lineCount = result.info[index * 4 + 2]!;
+                        const lines = result.lines.subarray(index * capacity * 4, (index * capacity + lineCount) * 4);
+                        // The JS reference uses unbounded pen sums; signed-overflow cases use the unchanged serial WGSL oracle.
+                        if (!p.serial) {
+                            const expected = referenceLines(p.records, p.flags, scale, Math.fround(width));
+                            expect([...lines], `${index}/${width}: f32 JS reference`).toEqual(expected.flatMap((line) => [line.first, line.count, bits(line.width), line.cluster]));
+                        }
+                        let line = 0;
+                        for (let i = 0; i < p.records.length; i++) {
+                            while (line + 1 < lineCount && lines[(line + 1) * 4]! <= i) {
+                                line++;
+                            }
+                            expect(table[(index * capacity + i) * 8 + 4], `${index}/${i}: P9 line assignment`).toBe(line);
+                        }
+                        if (checkPath) {
+                            const next = Array.from({ length: p.records.length }, (_n, i) => table[(index * capacity + i) * 8 + 7]!);
+                            if (p.serial) {
+                                expect(
+                                    next.every((value) => value === p.records.length),
+                                    `${index}: serial leaves P7 next values initialized`
+                                ).toBe(true);
+                            } else {
+                                expect(next[0], `${index}: existing P7-only next-value witness`).toBeLessThan(p.records.length);
+                                expect(next[0]).toBe(lines[0]! + lines[1]!);
+                            }
+                        }
+                    });
+                    expect(new Int32Array(await readStorageBuffer(shared.shaped))).toEqual(records);
+                }
+            } finally {
+                tasks.forEach((task) => task.dispose());
+                stages.forEach((stage) => stage.release());
+                serialShaders.forEach(disposeComputeShader);
+                [...Object.values(shared), ...outputs.flatMap(Object.values)].forEach(disposeStorageBuffer);
+            }
+        }
+
+        it("keeps final-record decisions exact at counts 1/2/256/257/512/513 and one f32 step below", async () => {
+            for (const count of [1, 2, 256, 257, 512, 513]) {
+                const p = paragraph(Array.from({ length: count }, () => 13));
+                const width = widthOf(count * 13);
+                await compare([p], [width, nextDown(width)]);
+            }
+        });
+
+        it("preserves rounded boundaries for sampled starts and cross-lane successors", async () => {
+            const p = paragraph(Array.from({ length: 1025 }, (_n, i) => 1 + ((i * 37) % 89)));
+            const prefix = [0];
+            for (const record of p.records) {
+                prefix.push(prefix.at(-1)! + record[2]!);
+            }
+            const widths = [0.0001, Infinity];
+            for (const [s, k] of [
+                [0, 1],
+                [1, 4],
+                [3, 5],
+                [254, 258],
+                [510, 513],
+                [1000, 1025],
+            ]) {
+                const width = widthOf(prefix[k!]! - prefix[s!]!);
+                widths.push(width, nextDown(width));
+            }
+            await compare([p], widths);
+        });
+
+        it("handles equal prefixes across lane/span boundaries and paragraph tails with emergency-only breaks", async () => {
+            const p = paragraph(Array.from({ length: 4097 }, (_n, i) => (i % 17 >= 14 || (i >= 254 && i <= 258) || i >= 4080 ? 0 : 7)));
+            await compare([p], [0.0001, widthOf(7), nextDown(widthOf(7)), widthOf(70), Infinity]);
+        });
+
+        it("keeps the exact signed-prefix limit parallel and overflow or negative advances serial", async () => {
+            const count = 513;
+            const exact = paragraph(Array.from({ length: count }, (_n, i) => (i ? 1 : 0x7fffffff - (count - 1))));
+            const overflow = paragraph(exact.records.map((record) => record[2]!));
+            overflow.records[count - 1]![2]!++;
+            overflow.serial = true;
+            const negative = paragraph(Array.from({ length: count }, () => 13));
+            negative.records[256]![2] = -1;
+            negative.serial = true;
+            await compare([exact, overflow, negative], [0.0001], true);
+        });
+
+        it("matches fixed-seed mixed batches including adjacent final-paragraph bounds", async () => {
+            let seed = 0x75a31f29;
+            const random = (limit: number) => {
+                seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+                return seed % limit;
+            };
+            const paragraphs = [0, 1, 2, 255, 256, 257, 512, 513, 1024, 1025, random(1026), 2, 1, 257].map((count) => {
+                const p = paragraph(Array.from({ length: count }, () => random(90)));
+                let cluster = 0;
+                p.records.forEach((record, i) => {
+                    if (i && random(4)) {
+                        cluster++;
+                    }
+                    record[0] = random(2);
+                    record[1] = cluster;
+                    record[3] = random(9) - 4;
+                    record[4] = random(17) - 8;
+                    record[5] = random(17) - 8;
+                    p.flags[cluster] = random(8);
+                });
+                return p;
+            });
+            await compare(paragraphs, [0.0001, widthOf(13), nextDown(widthOf(13)), 41.37, Infinity]);
+        });
+    });
+
     it("counts visible slots and keeps y advances across lines, including visible hanging spaces and protected clusters", async () => {
         const token = {};
         const count = 1;

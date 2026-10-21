@@ -114,9 +114,11 @@ fn emergency(p:u32, i:u32) -> bool {
   let c = u32(shaped[recordAt(p, i) + 1u]);
   return nonSpace(p, i) && c != u32(shaped[recordAt(p, i - 1u) + 1u]) && (flags(p, c) & 4u) == 0u;
 }
-// Only the non-serial path is monotone; admission guarantees positive finite scale.
-fn fits(p:u32, i:u32, startPos:i32, scale:f32, maxWidth:f32) -> bool {
-  let endPos = bitcast<i32>(lines[tableAt(p, i)].x) + shaped[recordAt(p, i) + 2u];
+// Non-serial P7 only, i < count: guarded nonnegative prefixes make the successor exact.
+fn fits(p:u32, i:u32, count:u32, startPos:i32, scale:f32, maxWidth:f32) -> bool {
+  var endPos:i32;
+  if (i + 1u < count) { endPos = bitcast<i32>(lines[tableAt(p, i + 1u)].x); }
+  else { endPos = bitcast<i32>(lines[tableAt(p, i)].x) + shaped[recordAt(p, i) + 2u]; }
   return f32(endPos - startPos) * scale <= maxWidth;
 }
 fn scanSummary(lane:u32, kind:u32, reverse:bool) {
@@ -257,20 +259,20 @@ fn measure(@builtin(workgroup_id) group:vec3u, @builtin(num_workgroups) groups:v
       if (s != 0u && !breakOpp(p, s - 1u, count) && !emergency(p, s)) { continue; }
       let startPos = bitcast<i32>(lines[tableAt(p, s)].x);
       var low = max(s + 1u, hint);
-      if (low < count && fits(p, low, startPos, scale, maxWidth)) {
+      if (low < count && fits(p, low, count, startPos, scale, maxWidth)) {
         let first = low;
         var step = 1u;
         var high = first + min(step, count - first);
         low++;
         loop {
-          if (high == count || !fits(p, high, startPos, scale, maxWidth)) { break; }
+          if (high == count || !fits(p, high, count, startPos, scale, maxWidth)) { break; }
           low = high + 1u;
           step = min(count - first, step * 2u + 1u);
           high = first + step;
         }
         while (low < high) {
           let middle = (low + high) / 2u;
-          if (fits(p, middle, startPos, scale, maxWidth)) { low = middle + 1u; }
+          if (fits(p, middle, count, startPos, scale, maxWidth)) { low = middle + 1u; }
           else { high = middle; }
         }
       }
