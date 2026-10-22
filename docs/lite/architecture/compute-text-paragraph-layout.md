@@ -386,11 +386,37 @@ rebuilds. All buffer arithmetic and dispatches are checked against device limits
 
 Only the dirty strings enter selection, mapping, grouping, segmentation and
 closure. Unsegmented group output indices are `runBase + relative`; segmented
-groups and their table remain batch-relative. Stitch dispatches `k` workgroups,
-checks `wg.x < params.x` (`params.x = k`) and writes absolute
+groups and their table remain batch-relative. Stitch dispatches x=`k` and
+y=`max(1, max ceil(segmentCount/64))`, checks `wg.x < params.x`
+(`params.x = k`) and writes absolute
 `run = params.w + wg.x`, with `params.w = runBase`. Draw buffer sizing uses the
 pool, not `k` or logical N. Unsegmented shaping uses the pool record stride,
 including its scratch-capacity shader bucket; headroom reduces recompilations.
+Resident execution computes this y value once per batch. When y=1, it selects
+the exact baseline stitch shader and explicitly dispatches `{x: k, y: 1}`.
+When y>1, it selects the unchanged tiled shader. These are separate shader
+objects/pipelines with separate binding sets over the same buffers, never a
+uniform branch inside one shader. Both pipelines are explicitly prepared on
+first segmented admission, before the existing warm draws complete; a cached
+per-device resident-ready flag is set only after both preparations succeed.
+Later admissions do not repeat that preparation or add an await for it.
+The selected route is part of the pack schedule rebuild key, so 1-to-2-to-1
+row transitions re-record exactly one stitch dispatch in its original position
+without compiling a previously unused pipeline. Release disposes both variants.
+For the tiled route, each row reduces all run headers across its 64 lanes, then copies only
+its consecutive 64-segment tile using the unchanged ordered record-copy loop.
+The separate paged executor is unchanged: it still imports the tiled
+`COMPUTE_TEXT_STITCH_KERNEL`, caches its own shader, and dispatches x=1/y=1.
+The final tiled row consumes any remainder, so even a high-segment-count paged
+chunk retains the whole-run loop; it does not use the resident route predicate.
+All tiled rows use the same run-global failure/capacity decision;
+only row zero lane zero publishes the original header. Added shared memory is
+24 bytes, with no new storage buffers/bindings or status/lifetime changes.
+Global-y ragged over-dispatch and repeated header reads are costs, not proven
+neutral. See `33-text.md` for the existing u32-addressing contract/proof scope.
+The one-row baseline route is a conservative fused-pipeline control, not proof
+that the tiled one-row kernel is pure overhead: that kernel still parallelizes
+header reduction and removes the old serial per-lane header scan.
 Zero dirty runs omit both shape and stitch work entirely.
 Both shape paths initialize all four header words before processing each run,
 so successful slot reuse cannot retain old failure witnesses or record data in

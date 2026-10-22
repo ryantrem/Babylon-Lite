@@ -8,6 +8,8 @@ import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/c
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 import { computeTextShapeCapacity } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape";
 import * as shapeWords from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape";
+import * as dispatchSizes from "../../../packages/babylon-lite/src/compute/compute-dispatch";
+import * as resident from "../../../packages/babylon-lite/src/text/_gpu/compute-text-resident";
 import { fixture, oracleFields } from "./fixtures";
 import type { Fixture } from "./fixtures";
 import { assertNativeClean, nativeHarness } from "./native";
@@ -113,6 +115,38 @@ describe("native bit-exact segment shape and stitch", () => {
         await update(candidate, texts);
         await update(baseline, texts);
         await exact(font, candidate, baseline, texts);
+    });
+
+    it("tiles actual non-stage segmented callers above 64 segments through overlapping varying-size updates", async () => {
+        const font = fixture("Roboto-Regular.ttf");
+        const candidate = block(font);
+        const baseline = block(font, true);
+        const execute = vi.spyOn(resident, "executeResidentComputeText");
+        const sizes = vi.spyOn(dispatchSizes, "setComputeDispatchSize");
+        const long = english.repeat(32);
+        for (const texts of [
+            [long, "HH"],
+            [long + " A", english.repeat(24)],
+            [english.repeat(25), long],
+            ["HH", long],
+        ]) {
+            execute.mockClear();
+            sizes.mockClear();
+            const first = await updateComputeTextData(candidate, texts);
+            const second = await updateComputeTextData(candidate, texts);
+            await Promise.all([first.completed, second.completed]);
+            const segments = execute.mock.calls.map((call) => call[10]).filter((value) => value != null);
+            expect(segments.length).toBeGreaterThan(0);
+            const stitch = sizes.mock.calls.filter(([dispatch]) => dispatch.shader.name === "compute-text-stitch");
+            expect(stitch.length).toBeGreaterThan(0);
+            expect(stitch.some(([, size]) => (size.y ?? 1) > 1)).toBe(true);
+            stitch.forEach(([, size], i) => {
+                const call = execute.mock.calls.filter((call) => call[10] != null)[i]!;
+                expect(size.y).toBe(resident.stitchTileRows(segments[i]!.table, call[5]));
+            });
+            await update(baseline, texts);
+            await exact(font, candidate, baseline, texts);
+        }
     });
 
     it("propagates a rejecting segment to logical status 1 and suppresses all instances", async () => {

@@ -2499,16 +2499,17 @@ Instances keep `f32(pen + off) * scale` and `... - f32(run) * lineAdvance`.
 Zero status proves validation/capacity; base plus visible rank preserves serial order; rank≤capacity≤`(maxStorageBufferBindingSize / 4 - 4) / 6`<2³¹.
 
 Paired HEAD−candidate ms [95% bootstrap interval], 40 same-session real-draw pairs:
-| Cell | Inter | Roboto |
-|---|---|---|
-| english480×1 | +0.6950 [0.5900,0.7400] | +0.3225 [0.2600,0.3500] |
-| english480×4 | +0.5150 [0.3450,0.5725] | +0.5925 [0.4925,0.7950] |
-| english480×16 | +0.4975 [0.4725,0.5350] | +0.4300 [0.3225,0.5075] |
-| natural50×16 | +0.0800 [0.0600,0.1075] | +0.0875 [0.0275,0.1425] |
-| two2×256 confirmation | +0.0125 [-0.0800,0.1025] | +0.0575 [-0.0050,0.1475] |
-| two2×256 HEAD A/A | +0.0400 [-0.0350,0.1100] | +0.0275 [-0.0175,0.0900] |
-Two2 uses the unchanged capacity-2 path; confirmation passes the revised interval gate.
-Timing stops at the real-draw queue fence, never status; all measured output bytes match.
+
+| Cell                                                                                      | Inter                    | Roboto                   |
+| ----------------------------------------------------------------------------------------- | ------------------------ | ------------------------ |
+| english480×1                                                                              | +0.6950 [0.5900,0.7400]  | +0.3225 [0.2600,0.3500]  |
+| english480×4                                                                              | +0.5150 [0.3450,0.5725]  | +0.5925 [0.4925,0.7950]  |
+| english480×16                                                                             | +0.4975 [0.4725,0.5350]  | +0.4300 [0.3225,0.5075]  |
+| natural50×16                                                                              | +0.0800 [0.0600,0.1075]  | +0.0875 [0.0275,0.1425]  |
+| two2×256 confirmation                                                                     | +0.0125 [-0.0800,0.1025] | +0.0575 [-0.0050,0.1475] |
+| two2×256 HEAD A/A                                                                         | +0.0400 [-0.0350,0.1100] | +0.0275 [-0.0175,0.0900] |
+| Two2 uses the unchanged capacity-2 path; confirmation passes the revised interval gate.   |
+| Timing stops at the real-draw queue fence, never status; all measured output bytes match. |
 
 ### 2026-10-10 — Step 8: safe segmentation of long runs
 
@@ -2585,13 +2586,63 @@ Shape binds segment output and selects the segment-capacity scratch tier. Output
 identity invalidates shape bindings; segmentation mode and all stitch buffer
 identities invalidate pack schedules. Release disposes all new buffers/shaders.
 
-A 64-lane stitch dispatch, one workgroup per logical run, precedes existing pack
-dispatches. Every lane sums segment counts and selects the first failure. Lane 0
-writes failure status/count zero and copies failing diagnostics (overflow uses
-zero diagnostics), or success/count/zero diagnostics. Lanes copy segment records
-in order, adding scalarStart only to the cluster word. Total above logical
-capacity yields status 2. Async status aggregation/readback remains unchanged and
-untimed; measurement ends at a queue fence after a real draw.
+Resident execution retains two explicit-layout stitch shaders:
+`compute-text-stitch-baseline` is the exact original serial-header-scan body;
+`compute-text-stitch` retains the tiled body and its existing exported
+`COMPUTE_TEXT_STITCH_KERNEL` name/text. It computes `stitchTileRows` once per
+segmented batch. One row selects the baseline pipeline with explicit y=1;
+more than one row selects the tiled pipeline with that same computed y.
+Each shader has its own binding set over the same segment/output/table/params
+buffers. Exactly one selected stitch dispatch remains first in the pack task.
+The route joins the existing resource/mode/stage schedule rebuild key.
+
+Shader-object creation is lazy, so first segmented resident admission explicitly
+awaits preparation of both pipelines before setting a per-device/per-resident
+ready flag. No extra GPU dispatch, buffer, or warm draw is added. Subsequent
+calls skip both preparation and its await once ready, including 1-to-2-to-1
+route flips. Compilation failures propagate without publishing readiness.
+Resident release/device replacement disposes both variants and their tasks.
+The separate paged executor, shader map, fixed x=1/y=1 dispatch, bindings and
+release are unchanged; it continues using the exported tiled kernel even when
+its local segment count exceeds 64.
+
+A 64-lane tiled stitch dispatch precedes existing pack dispatches on the tiled
+route. Its x dimension is
+the logical run count; y is `stitchTileRows(table, runCount)`, the maximum over
+the batch of `ceil(segmentCount / STITCH_TILE)`, at least one, with
+`STITCH_TILE = 64`. Each row owns 64 consecutive segments, except the final
+dispatched row consumes the remainder. Default y=1 callers therefore retain the
+whole-run copy loop. Over-provisioned rows outside a run return uniformly; row
+zero still publishes empty-run headers.
+
+Every row's 64 lanes independently stride all segment headers, reducing total
+records, the prefix before its tile and the first failing segment into three
+workgroup atomics. Two workgroup barriers order initialization and reduction;
+lane zero publishes three u32 values, consumed through `workgroupUniformLoad`.
+Only row zero lane zero writes the original success/failure header. Every row
+uses the same run-global failure/capacity decision and returns before copying on
+failure; diagnostic words retain the first failing segment's bits, or zero for
+capacity overflow (status 2). On success every lane executes the original
+sequential segment loop over its tile, starting from the reduced prefix, with
+the unchanged strided six-word copy and scalarStart addition to the cluster
+word. No output-slot atomic allocation or per-lane segment reordering occurs.
+
+This adds 24 bytes of workgroup memory, no storage buffers/bindings/tasks.
+Header reads repeat per y row, and a global y dimension over-dispatches short
+runs in ragged batches; atomics, barriers, the host O(runCount) scan, compiler
+and occupancy costs are nonzero and their performance effects are unknown.
+Selecting the baseline for resident one-row batches is a conservative
+fused-pipeline control, not a claim of proven tiled-kernel overhead. One tiled
+row still parallelizes header reduction instead of each lane's serial header
+walk; only cross-row parallelism is absent. The threshold is the fixed
+64-segment tile geometry, not a timing-, fixture-, or word-count heuristic.
+Successful-copy disjointness assumes well-formed shape headers and the old
+kernel's u32 word-addressing contract, segment-output words <= 2^32. Device
+binding limits alone do not enforce this contract; no new guard or larger
+binding guarantee is introduced. Outside it the old copy already wrapped
+indices and no output equivalence is claimed. Flagged malformed headers retain
+exact status/diagnostics without copying. Async status ownership/readback and
+buffer retirement remain unchanged.
 
 Tests cover probe-equivalent boundaries, eligibility/fallback/lazy caching,
 search order/limits, native exact shaped records and oracle comparisons at 480
@@ -2622,13 +2673,13 @@ Full results below are 31 same-session interleaved baseline/candidate pairs per
 cell, COOP/COEP-isolated 5 µs timers, update through the real-draw queue fence,
 with ordinary status validation outside timing. Baseline is pinned c3ac8eba.
 
-| Cell | Inter baseline → candidate ms (% change) | Roboto baseline → candidate ms (% change) |
-|---|---|---|
-| 1×english480 | 1.655 → 1.040 (−37.16%) | 1.840 → 0.945 (−48.64%) |
-| 4×english480 | 1.555 → 1.125 (−27.65%) | 1.955 → 1.060 (−45.78%) |
-| 16×english480 | 1.655 → 1.495 (−9.67%) | 2.260 → 1.400 (−38.05%) |
-| 16×natural50 | 1.230 → 1.190 (−3.25%) | 1.415 → 1.415 (0.00%, tie) |
-| 256×two2 | 0.720 → 0.730 (+1.39%, tie) | 0.705 → 0.700 (−0.71%, tie) |
+| Cell          | Inter baseline → candidate ms (% change) | Roboto baseline → candidate ms (% change) |
+| ------------- | ---------------------------------------- | ----------------------------------------- |
+| 1×english480  | 1.655 → 1.040 (−37.16%)                  | 1.840 → 0.945 (−48.64%)                   |
+| 4×english480  | 1.555 → 1.125 (−27.65%)                  | 1.955 → 1.060 (−45.78%)                   |
+| 16×english480 | 1.655 → 1.495 (−9.67%)                   | 2.260 → 1.400 (−38.05%)                   |
+| 16×natural50  | 1.230 → 1.190 (−3.25%)                   | 1.415 → 1.415 (0.00%, tie)                |
+| 256×two2      | 0.720 → 0.730 (+1.39%, tie)              | 0.705 → 0.700 (−0.71%, tie)               |
 
 Tie means absolute median difference below 0.02 ms. Full preflight/final checks
 verified 782,166 shaped records and 661,510 GPU instances, with no GPU/browser
@@ -2653,6 +2704,7 @@ timings of Inter 9.8 + 15.9 = 25.5 ms and Roboto 8.0 + 0.6 = 8.6 ms (analysis +
 first segmentation = total); the implementation run's own base is in the table.
 
 Four output-identical changes reduce this cost:
+
 - Lazy per-(glyph,slot) tri-state memo replaces eager all-slot bitsets.
 - A u16 B* membership mask avoids per-rule window allocation until a crossing is found.
 - `markBaseHit` is lazy, evaluated only when the first right glyph can become a mark
@@ -2664,10 +2716,10 @@ Anchors and counts only order proof work; the `markBaseHit` boolean is unchanged
 Parsed coverage is strictly ascending, so coverage counting visits each glyph once.
 Cold headless Chrome 155 medians (ms; nine fresh contexts per cell, first dropped):
 
-| Font | Base analyze / first / total | New analyze / first / total |
-|---|---|---|
-| Inter | 9.2 / 14.8 / 24.0 | 7.3 / 2.5 / 9.9 |
-| Roboto | 7.7 / 0.6 / 8.3 | 2.2 / 0.6 / 2.8 |
+| Font   | Base analyze / first / total | New analyze / first / total |
+| ------ | ---------------------------- | --------------------------- |
+| Inter  | 9.2 / 14.8 / 24.0            | 7.3 / 2.5 / 9.9             |
+| Roboto | 7.7 / 0.6 / 8.3              | 2.2 / 0.6 / 2.8             |
 
 Equivalence passed 18,720 `safeAfter` positions each for Inter, Roboto,
 NotoSansHebrew and NotoSansGothic (74,880 total), plus all metadata comparisons.
@@ -2689,6 +2741,7 @@ Profiled base costs: on Inter the main costs were per-rule class-glyph filtering
 were the per-mark copying and packing of the shared mark-base base triples.
 
 Output-identical changes:
+
 - `packProgram` writes into a growable `Uint32Array`. The append order is the same
   as before, and the result is returned as one tight slice (no `number[]` and no
   `Uint32Array.from`).
@@ -2710,11 +2763,11 @@ the tight buffer and shared per-class base lists.
 Cold headless Chrome 155 medians (ms; nine fresh contexts per cell, first dropped).
 "Rest" is the remainder of first-use immutable preparation:
 
-| Font | Base compile / rest / total | New compile / rest / total |
-|---|---|---|
-| Inter | 73.1 / 5.9 / 79.0 | 36.4 / 8.5 / 44.9 (−43%) |
-| Roboto | 63.7 / 3.2 / 66.9 | 15.2 / 4.0 / 19.2 (−71%) |
-| NotoSansArabic | 29.0 / 1.6 / 30.6 | 9.9 / 1.9 / 11.8 (−61%) |
+| Font           | Base compile / rest / total | New compile / rest / total |
+| -------------- | --------------------------- | -------------------------- |
+| Inter          | 73.1 / 5.9 / 79.0           | 36.4 / 8.5 / 44.9 (−43%)   |
+| Roboto         | 63.7 / 3.2 / 66.9           | 15.2 / 4.0 / 19.2 (−71%)   |
+| NotoSansArabic | 29.0 / 1.6 / 30.6           | 9.9 / 1.9 / 11.8 (−61%)    |
 
 The rest phase does no new work; its inputs are byte-identical. Its small increase
 comes from V8 heap state. The base compile's garbage grew the young generation,

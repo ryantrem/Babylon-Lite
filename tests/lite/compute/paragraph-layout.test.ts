@@ -20,6 +20,8 @@ import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/c
 import { compileComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import { analyzeComputeTextSegmentation } from "../../../packages/babylon-lite/src/text/compute-text-segment";
 import * as shapePreparation from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape";
+import * as residentExecution from "../../../packages/babylon-lite/src/text/_gpu/compute-text-resident";
+import * as dispatchSizing from "../../../packages/babylon-lite/src/compute/compute-dispatch";
 import * as submission from "../../../packages/babylon-lite/src/compute/compute-task-readback";
 import * as nominalMapping from "../../../packages/babylon-lite/src/text/compute-font";
 import * as closure from "../../../packages/babylon-lite/src/text/compute-text-closure";
@@ -618,7 +620,7 @@ describe("native GPU paragraph wrapping and placement", () => {
         const tasks = submit.mock.calls.at(-1)![0];
         const dispatches = tasks.flatMap((task) => task.dispatches);
         expect(dispatches.find((dispatch) => dispatch.shader.name === "compute-text-shape")?._x).toBe(wholeRun ? 1 : prepare.mock.calls[0]![1].length);
-        const stitch = dispatches.find((dispatch) => dispatch.shader.name === "compute-text-stitch");
+        const stitch = dispatches.find((dispatch) => dispatch.shader.name === "compute-text-stitch" || dispatch.shader.name === "compute-text-stitch-baseline");
         expect(stitch?._x).toBe(wholeRun ? undefined : 1);
         expect(prepare.mock.calls[0]![2]).toBe(wholeRun ? 57 : 0);
         expect([data._shaped, stage._info, stage._lines]).toEqual(buffers);
@@ -652,7 +654,11 @@ describe("native GPU paragraph wrapping and placement", () => {
         expect(prepare).toHaveBeenCalledTimes(2);
         expect(prepare.mock.calls[0]![2]).toBe(0);
         expect(prepare.mock.calls[1]![2]).toBe(prepare.mock.calls[0]![1].length);
-        expect(submit.mock.calls[0]![0].flatMap((task) => task.dispatches).find((dispatch) => dispatch.shader.name === "compute-text-stitch")?._x).toBe(2);
+        expect(
+            submit.mock.calls[0]![0].flatMap((task) => task.dispatches).find(
+                (dispatch) => dispatch.shader.name === "compute-text-stitch" || dispatch.shader.name === "compute-text-stitch-baseline"
+            )?._x
+        ).toBe(2);
         expect(getComputeTextParagraphStage(data)!._words[8]).toBe(1);
         vi.restoreAllMocks();
         await compareFresh(data, face, paragraphs, layout);
@@ -692,7 +698,11 @@ describe("native GPU paragraph wrapping and placement", () => {
             expect(stage._words[9]).toBe(mode === "width" ? paragraphs.length : 0);
             expect(stage._dispatches![0]!.enabled).toBe(mode === "width");
             expect(submit.mock.calls[0]![0].map((task) => task.name)).toEqual(["compute-text-resident-pack"]);
-            expect(submit.mock.calls[0]![0][0]!.dispatches.some((dispatch) => dispatch.shader.name === "compute-text-stitch")).toBe(false);
+            expect(
+                submit.mock.calls[0]![0][0]!.dispatches.some(
+                    (dispatch) => dispatch.shader.name === "compute-text-stitch" || dispatch.shader.name === "compute-text-stitch-baseline"
+                )
+            ).toBe(false);
             expect(writes.mock.calls.filter(([buffer]) => buffer === stage._input!._buffer).reduce((bytes, call) => bytes + (call[4] as number), 0)).toBeLessThanOrEqual(72);
             vi.restoreAllMocks();
             await compareFresh(data, face, paragraphs, layout);
@@ -940,6 +950,21 @@ describe("native GPU paragraph wrapping and placement", () => {
         const paragraphs = ["office  affinity To A\u0326 ".repeat(12), "  ABC ".repeat(20), ""];
         await update(data, face, paragraphs, { maxWidthPx: 99.25, lineHeightPx: 37.75, paragraphSpacingPx: 5.5 });
         expect(modules.mock.calls.some(([descriptor]) => descriptor.label === "compute-text-stitch" || descriptor.code.includes("fn main(@builtin(workgroup_id) wg"))).toBe(true);
+    });
+
+    it("uses actual tiled stitch Y for long paragraph stages while shaped/layout/placement stay exact", async () => {
+        const face = fixture("Roboto-Regular.ttf");
+        const data = block(face);
+        const execute = vi.spyOn(residentExecution, "executeResidentComputeText");
+        const sizes = vi.spyOn(dispatchSizing, "setComputeDispatchSize");
+        const paragraphs = ["The office reviews a clear paragraph with ordinary spaces. ".repeat(100), "Hello world"];
+        await update(data, face, paragraphs, { maxWidthPx: 600 });
+        const call = execute.mock.calls.find((call) => call[10] != null)!;
+        expect(call).toBeDefined();
+        const expectedY = residentExecution.stitchTileRows(call[10]!.table, call[5]);
+        expect(expectedY).toBeGreaterThan(1);
+        const stitch = sizes.mock.calls.filter(([dispatch]) => dispatch.shader.name === "compute-text-stitch");
+        expect(stitch.some(([, size]) => size.x === call[5] && size.y === expectedY)).toBe(true);
     });
 
     it.each(["Inter.ttf", "Roboto-Regular.ttf"] as const)("aligns hanging and overflowing lines, with custom height and paragraph spacing: %s", async (file) => {

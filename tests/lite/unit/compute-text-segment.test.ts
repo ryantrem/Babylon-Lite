@@ -22,6 +22,18 @@ import {
 import type { SegmentGroup } from "../../../packages/babylon-lite/src/text/compute-text-segment";
 import * as fontMapping from "../../../packages/babylon-lite/src/text/compute-font";
 import { syntheticFont } from "../compute/synthetic";
+import { STITCH_TILE, stitchTileRows } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-resident";
+
+describe("stitch tile row sizing", () => {
+    it("uses the maximum local run segment count, not segment offsets or runBase", () => {
+        expect(STITCH_TILE).toBe(64);
+        expect(stitchTileRows(new Uint32Array(), 0)).toBe(1);
+        expect(stitchTileRows(Uint32Array.of(9000, 0, 10000, 1), 2)).toBe(1);
+        expect(stitchTileRows(Uint32Array.of(0, 64, 64, 65, 129, 129), 3)).toBe(3);
+        expect(stitchTileRows(Uint32Array.of(0, 1961, 1961, 3, 0xffffffff, 0xffffffff), 2)).toBe(31);
+        expect(stitchTileRows(Uint32Array.of(0, 65535), 1)).toBe(1024);
+    });
+});
 
 const limits = { maxComputeWorkgroupsPerDimension: 65535, maxStorageBufferBindingSize: 128 * 1024 * 1024, maxBufferSize: 256 * 1024 * 1024 };
 const layout = { headerWords: 4, recordWords: 6 };

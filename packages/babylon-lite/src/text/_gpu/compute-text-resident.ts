@@ -5,7 +5,7 @@ import { BU } from "../../engine/gpu-flags.js";
 import { createComputeBindingSet } from "../../compute/compute-bindings.js";
 import { createComputeDispatch, setComputeDispatchSize } from "../../compute/compute-dispatch.js";
 import type { ComputeDispatch } from "../../compute/compute-dispatch.js";
-import { createComputeShader, disposeComputeShader } from "../../compute/compute-shader.js";
+import { createComputeShader, disposeComputeShader, prepareComputeShader } from "../../compute/compute-shader.js";
 import type { ComputeShader } from "../../compute/compute-shader.js";
 import { addComputeDispatch, createComputeTask, prepareComputeTask, submitComputeTasks } from "../../compute/compute-task.js";
 import type { ComputeTask } from "../../compute/compute-task.js";
@@ -30,8 +30,110 @@ const COUNT_LANES = 256;
 const WIDE_PACK_LANES = 64;
 const WIDE_PACK_MIN_CAPACITY = 33;
 
+/** @internal Number of consecutive segments copied by each stitch row. */
+export const STITCH_TILE = 64;
+
+/** @internal Global row count for the current batch-relative segment table. */
+export function stitchTileRows(table: Uint32Array, runCount: number): number {
+    let rows = 1;
+    for (let run = 0; run < runCount; run++) {
+        rows = Math.max(rows, Math.ceil(table[run * 2 + 1]! / STITCH_TILE));
+    }
+    return rows;
+}
+
 /** @internal Shared local segment stitching; paged paragraphs never stitch across storage chunks. */
 export const COMPUTE_TEXT_STITCH_KERNEL = `
+@group(0) @binding(0) var<storage, read> seg: array<i32>;
+@group(0) @binding(1) var<storage, read_write> shaped: array<i32>;
+@group(0) @binding(2) var<storage, read> table: array<u32>;
+@group(0) @binding(3) var<storage, read> params: vec4u;
+const HEADER: u32 = ${COMPUTE_TEXT_HEADER_WORDS}u;
+const RECORD: u32 = ${COMPUTE_TEXT_RECORD_WORDS}u;
+var<workgroup> aTotal: atomic<u32>;
+var<workgroup> aPrefix: atomic<u32>;
+var<workgroup> aFail: atomic<u32>;
+var<workgroup> uTotal: u32;
+var<workgroup> uPrefix: u32;
+var<workgroup> uFail: u32;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u, @builtin(local_invocation_index) lane: u32) {
+  if (wg.x >= params.x) { return; }
+  let run = params.w + wg.x;
+  let first = table[wg.x*2u];
+  let count = table[wg.x*2u+1u];
+  let sStride = HEADER + params.z*RECORD;
+  let out = run*(HEADER + params.y*RECORD);
+  let segBase = params.x*2u;
+  let tileStart = wg.y*${STITCH_TILE}u;
+  if (wg.y != 0u && tileStart >= count) { return; }
+  let tileEnd = select(min(count, tileStart+${STITCH_TILE}u), count, wg.y == nwg.y-1u);
+  if (lane == 0u) {
+    atomicStore(&aTotal, 0u);
+    atomicStore(&aPrefix, 0u);
+    atomicStore(&aFail, 0xffffffffu);
+  }
+  workgroupBarrier();
+  var lt = 0u;
+  var lp = 0u;
+  var lf = 0xffffffffu;
+  for (var i = lane; i < count; i += 64u) {
+    let h = (first+i)*sStride;
+    let n = u32(seg[h+1u]);
+    lt += n;
+    if (i < tileStart) { lp += n; }
+    if (lf == 0xffffffffu && seg[h] != 0) { lf = i; }
+  }
+  atomicAdd(&aTotal, lt);
+  atomicAdd(&aPrefix, lp);
+  atomicMin(&aFail, lf);
+  workgroupBarrier();
+  if (lane == 0u) {
+    uTotal = atomicLoad(&aTotal);
+    uPrefix = atomicLoad(&aPrefix);
+    uFail = atomicLoad(&aFail);
+  }
+  let total = workgroupUniformLoad(&uTotal);
+  let prefix = workgroupUniformLoad(&uPrefix);
+  let failI = workgroupUniformLoad(&uFail);
+  var status: i32 = 0;
+  var failed = 0u;
+  if (failI != 0xffffffffu) { failed = first+failI; status = seg[failed*sStride]; }
+  if (status == 0 && total > params.y) { status = 2; failed = 0xffffffffu; }
+  if (status != 0) {
+    if (wg.y == 0u && lane == 0u) {
+      shaped[out] = status;
+      shaped[out+1u] = 0;
+      if (failed != 0xffffffffu) {
+        shaped[out+2u] = seg[failed*sStride+2u];
+        shaped[out+3u] = seg[failed*sStride+3u];
+      } else { shaped[out+2u] = 0; shaped[out+3u] = 0; }
+    }
+    return;
+  }
+  if (wg.y == 0u && lane == 0u) { shaped[out] = 0; shaped[out+1u] = i32(total); shaped[out+2u] = 0; shaped[out+3u] = 0; }
+  var base = prefix;
+  for (var i = tileStart; i < tileEnd; i++) {
+    let h = (first+i)*sStride;
+    let n = u32(seg[h+1u]);
+    let start = i32(table[segBase + first + i]);
+    for (var k = lane; k < n; k += 64u) {
+      let src = h + HEADER + k*RECORD;
+      let dst = out + HEADER + (base+k)*RECORD;
+      shaped[dst] = seg[src];
+      shaped[dst+1u] = seg[src+1u] + start;
+      shaped[dst+2u] = seg[src+2u];
+      shaped[dst+3u] = seg[src+3u];
+      shaped[dst+4u] = seg[src+4u];
+      shaped[dst+5u] = seg[src+5u];
+    }
+    base += n;
+  }
+}
+`;
+
+/** @internal Original resident stitch for batches requiring only one row. */
+export const COMPUTE_TEXT_STITCH_BASELINE_KERNEL = `
 @group(0) @binding(0) var<storage, read> seg: array<i32>;
 @group(0) @binding(1) var<storage, read_write> shaped: array<i32>;
 @group(0) @binding(2) var<storage, read> table: array<u32>;
@@ -425,6 +527,9 @@ interface ResidentShaders {
     packParams: StorageBuffer;
     packOffsets: StorageBuffer;
     stitch?: ComputeShader;
+    stitchBaseline?: ComputeShader;
+    stitchVariantsReady?: boolean;
+    stitchRoute?: "baseline" | "tiled";
     segmentOutput?: StorageBuffer;
     segmentTable?: StorageBuffer;
     stitchParams?: StorageBuffer;
@@ -491,6 +596,10 @@ export async function executeResidentComputeText(
     const shaders = ensureShaders(token, engine);
     if (segments) {
         ensureSegmentBuffers(shaders, engine, segments, runCount, capacity, runBase);
+        if (!shaders.stitchVariantsReady) {
+            await Promise.all([prepareComputeShader(shaders.stitch!), prepareComputeShader(shaders.stitchBaseline!)]);
+            shaders.stitchVariantsReady = true;
+        }
     }
     if (!stage && shaders.packOffsets.byteLength < Math.max(8, runCount * 8)) {
         shaders.packTask?.dispose();
@@ -504,9 +613,11 @@ export async function executeResidentComputeText(
         shaders.stage = stage;
         stage.prepare(engine, runCount, capacity);
     }
-    ensureSchedules(shaders, engine, buffers, runCount, capacity, !!segments, stage);
+    const stitchRows = segments ? stitchTileRows(segments.table, runCount) : 1;
+    const stitchRoute = segments ? (stitchRows === 1 ? "baseline" : "tiled") : undefined;
+    ensureSchedules(shaders, engine, buffers, runCount, capacity, !!segments, stage, stitchRoute);
     if (segments) {
-        setComputeDispatchSize(shaders.stitchDispatch!, { x: runCount });
+        setComputeDispatchSize(shaders.stitchDispatch!, stitchRoute === "baseline" ? { x: runCount, y: 1 } : { x: runCount, y: stitchRows });
     }
     if (!stage) {
         const packGroups = shaders.packMode === "wide" ? runCount : Math.max(1, Math.ceil(runCount / 64));
@@ -604,6 +715,9 @@ export function releaseResidentComputeText(token: object, keepPendingStatus = fa
     disposeComputeShader(shaders.placeWide);
     if (shaders.stitch) {
         disposeComputeShader(shaders.stitch);
+    }
+    if (shaders.stitchBaseline) {
+        disposeComputeShader(shaders.stitchBaseline);
     }
     shaders.shapeTask?.dispose();
     shaders.packTask?.dispose();
@@ -703,16 +817,23 @@ function createPackShader(engine: EngineContext, entryPoint: string): ComputeSha
 
 function ensureSegmentBuffers(shaders: ResidentShaders, engine: EngineContext, segments: ComputeTextSegments, runCount: number, capacity: number, runBase: number): void {
     if (!shaders.stitch) {
+        const bindings = [
+            computeStorageBufferBinding("seg", { group: 0, binding: 0 }),
+            computeStorageBufferBinding("shaped", { group: 0, binding: 1, access: "read-write" }),
+            computeStorageBufferBinding("table", { group: 0, binding: 2 }),
+            computeStorageBufferBinding("params", { group: 0, binding: 3 }),
+        ];
         shaders.stitch = createComputeShader(engine, {
             name: "compute-text-stitch",
             computeSource: COMPUTE_TEXT_STITCH_KERNEL,
             entryPoint: "main",
-            bindings: [
-                computeStorageBufferBinding("seg", { group: 0, binding: 0 }),
-                computeStorageBufferBinding("shaped", { group: 0, binding: 1, access: "read-write" }),
-                computeStorageBufferBinding("table", { group: 0, binding: 2 }),
-                computeStorageBufferBinding("params", { group: 0, binding: 3 }),
-            ],
+            bindings,
+        });
+        shaders.stitchBaseline = createComputeShader(engine, {
+            name: "compute-text-stitch-baseline",
+            computeSource: COMPUTE_TEXT_STITCH_BASELINE_KERNEL,
+            entryPoint: "main",
+            bindings,
         });
         shaders.segmentOutput = createStorageBuffer(engine, 64, { label: "compute-text-segment-output", writable: true });
         shaders.segmentTable = createStorageBuffer(engine, 16, { label: "compute-text-segment-table" });
@@ -734,7 +855,8 @@ function ensureSchedules(
     runCount: number,
     capacity: number,
     segmented: boolean,
-    stage?: ResidentPackStage
+    stage?: ResidentPackStage,
+    stitchRoute?: "baseline" | "tiled"
 ): void {
     const previous = shaders.buffers;
     const mode = stage
@@ -767,6 +889,7 @@ function ensureSchedules(
         shaders.boundStage !== stage ||
         shaders.boundStageVersion !== stage?.version ||
         shaders.segmented !== segmented ||
+        shaders.stitchRoute !== stitchRoute ||
         (segmented &&
             (shaders.boundSegmentOutput !== shaders.segmentOutput || shaders.boundSegmentTable !== shaders.segmentTable || shaders.boundStitchParams !== shaders.stitchParams)) ||
         previous?.shaped !== buffers.shaped ||
@@ -779,7 +902,7 @@ function ensureSchedules(
         shaders.packTask = createComputeTask(engine, "compute-text-resident-pack");
         shaders.stitchDispatch = undefined;
         if (segmented) {
-            const stitch = shaders.stitch!;
+            const stitch = (stitchRoute === "baseline" ? shaders.stitchBaseline : shaders.stitch)!;
             shaders.stitchDispatch = createComputeDispatch(
                 stitch,
                 createComputeBindingSet(stitch, { seg: shaders.segmentOutput!, shaped: buffers.shaped, table: shaders.segmentTable!, params: shaders.stitchParams! }),
@@ -809,6 +932,7 @@ function ensureSchedules(
         }
         shaders.packTask.record();
         shaders.segmented = segmented;
+        shaders.stitchRoute = stitchRoute;
         shaders.boundSegmentOutput = shaders.segmentOutput;
         shaders.boundSegmentTable = shaders.segmentTable;
         shaders.boundStitchParams = shaders.stitchParams;
