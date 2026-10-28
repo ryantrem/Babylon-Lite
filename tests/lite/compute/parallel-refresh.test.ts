@@ -11,7 +11,7 @@ import { addComputeDispatch, createComputeTask, prepareComputeTask, submitComput
 import { createStorageBuffer, disposeStorageBuffer, readStorageBuffer } from "../../../packages/babylon-lite/src/resource/storage-buffer";
 import { assertNativeClean, nativeHarness } from "./native";
 import type { NativeHarness } from "./native";
-import { fixture, oracleFields } from "./fixtures";
+import { fixture, expectedFields } from "./fixtures";
 import type { Fixture } from "./fixtures";
 import { syntheticFont } from "./synthetic";
 
@@ -26,7 +26,7 @@ describe("parallel post-GSUB refresh", () => {
     const forceSerial = (source: string) => source.replace("let parallelRefresh = ", "let parallelRefresh = false && ");
 
     async function check(font: Fixture, text: string, capacity?: number): Promise<void> {
-        const expected = oracleFields(font, text).flat();
+        const expected = expectedFields(font, text).flat();
         const parallel = await raw(font, text, undefined, 6, capacity);
         const serial = await raw(font, text, forceSerial, 6, capacity);
         expect(parallel.slice(0, 4)).toEqual([0, expected.length / 6, 0, 0]);
@@ -64,7 +64,7 @@ workgroupBarrier();
 ${refresh}
 ${source.includes("var<storage, read_write> scratch") ? "storageBarrier();" : ""}
 let count = workgroupUniformLoad(&length);
-let presence = workgroupUniformLoad(&rootPresence);
+let presence = workgroupUniformLoad(&rootPresence[0u]);
 if (lane == 0u) { output[0] = 0; output[1] = i32(count); output[2] = i32(presence); output[3] = 0; }
 for (var index = lane; index < count; index += 32u) {
 for (var word = 0u; word < 8u; word++) { output[4u + index * 8u + word] = scratch[glyphAt(base, index) + word]; }
@@ -132,7 +132,9 @@ for (var word = 0u; word < 8u; word++) { output[4u + index * 8u + word] = scratc
             const text = "C".repeat(index) + "ABA";
             const parallel = await raw(font, text);
             const serial = await raw(font, text, forceSerial);
-            expect(parallel.slice(0, 4)).toEqual([1, 0, 0, index + 1]);
+            // Parent 0 is now executable. Its sequence-1 record invokes the
+            // genuinely unsupported child lookup 1 at the following A.
+            expect(parallel.slice(0, 4)).toEqual([1, 0, 1, index + 2]);
             expect(serial.slice(0, 4)).toEqual(parallel.slice(0, 4));
         }
     });
@@ -164,6 +166,9 @@ for (var word = 0u; word < 8u; word++) { output[4u + index * 8u + word] = scratc
             scratch: prepared.scratchBytes,
             output: (4 + prepared.capacity * recordWords) * 4,
         };
+        // This diagnostic header holds the first presence word. Every fixture
+        // here has <=32 roots; fail rather than silently truncate a wider plan.
+        expect(prepared.program.words[13]).toBe(1);
         const buffers = Object.fromEntries(
             Object.entries(inputs).map(([name, source]) => [name, createStorageBuffer(native.engine, source, { writable: name === "scratch" || name === "output" })])
         );

@@ -13,7 +13,7 @@ import {
 import type { ComputeTextParagraphCache, ComputeTextParagraphFlagEntry } from "./_gpu/compute-text-paragraph-layout.js";
 import { updateStorageBuffer } from "../resource/storage-buffer.js";
 import { needsComputeTextParagraphChunks, submitChunkedComputeTextParagraphs } from "./compute-text-paragraph-chunks.js";
-import { computeTextNoBreakBefore } from "./compute-text-selection.js";
+import { computeTextNoBreakBefore, computeTextHasDevanagari } from "./compute-text-selection.js";
 
 /** Line box and paragraph placement for {@link updateComputeTextParagraphs}. */
 export interface ComputeTextParagraphLayout {
@@ -45,8 +45,13 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
             if (typeof text !== "string") {
                 throw new Error(`paragraph ${p} text must be a string`);
             }
-            if (p >= prefix && p < paragraphs.length - suffix && /[\n\r\t\u2028\u2029]/u.test(text)) {
-                throw new Error(`paragraph ${p} must not contain line breaks or tabs`);
+            if (p >= prefix && p < paragraphs.length - suffix) {
+                if (/[\n\r\t\u2028\u2029]/u.test(text)) {
+                    throw new Error(`paragraph ${p} must not contain line breaks or tabs`);
+                }
+                if (computeTextHasDevanagari(text)) {
+                    throw new Error(`paragraph ${p} Devanagari paragraph layout is unsupported`);
+                }
             }
         }
         if (!layout || !(layout.maxWidthPx > 0) || (layout.maxWidthPx !== Infinity && !positiveFloat(layout.maxWidthPx))) {

@@ -5,7 +5,7 @@ import { registerManagedResourceDisposer } from "../resource/managed-resource-ho
 import type { ComputeFont } from "./compute-font.js";
 import { mapComputeFontScalars } from "./compute-font.js";
 import type { ComputeTextPlan } from "./compute-text-plan.js";
-import { createComputeTextPlan } from "./compute-text-plan.js";
+import { createComputeTextPlan, ensureComputeTextProfile, profileSupport, requiredComputeTextProfiles, validateComputeTextPlanFont } from "./compute-text-plan.js";
 import type { ComputeTextDirection, ComputeTextInputSlab, ComputeTextRunSelection, ComputeTextScript } from "./compute-text-selection.js";
 import { createComputeTextInputSlab, selectComputeTextRun } from "./compute-text-selection.js";
 
@@ -108,16 +108,7 @@ async function shapeRuns(
     sourceIndexes?: readonly number[],
     selections?: readonly ComputeTextRunSelection[]
 ): Promise<readonly ComputeShapedTextRun[]> {
-    assertShaper(shaper);
-    if (shaper.status === "disposed") {
-        throw new Error("shapeComputeText: shaper is disposed");
-    }
-    if (shaper.status === "lost" || shaper._device !== shaper._engine._device) {
-        failTerminal(shaper, "lost", "shapeComputeText: device lost");
-    }
-    if (shaper.status === "busy") {
-        throw new Error("shapeComputeText: shaper is busy");
-    }
+    assertShaperReady(shaper);
     if (!plan?.font || plan.language !== null) {
         throw new Error("shapeComputeText: plan is invalid");
     }
@@ -137,6 +128,13 @@ async function shapeRuns(
     }
     const generation = shaper._generation;
     const device = shaper._device;
+    for (const id of requiredComputeTextProfiles([plan.script])) {
+        if (!profileSupport(id)) {
+            await ensureComputeTextProfile(id);
+            assertCurrent(shaper, generation, device);
+            assertShaperReady(shaper);
+        }
+    }
     setStatus(shaper, "busy");
     let rejectPending: (error: Error) => void = () => undefined;
     const cancelled = new Promise<never>((_, reject) => {
@@ -232,8 +230,37 @@ export async function shapeComputeText(
     });
     const output: (readonly ComputeTextGlyph[])[] = texts.map(() => []);
     const shaper = shaperFor(engine);
+    if ([...groups.values()].some((group) => group.selections[0]?.script === "deva") && !profileSupport("indic")) {
+        assertShaperReady(shaper);
+        const generation = shaper._generation,
+            device = shaper._device;
+        await ensureComputeTextProfile("indic");
+        assertCurrent(shaper, generation, device);
+        assertShaperReady(shaper);
+    }
     for (const group of groups.values()) {
-        const shaped = await shapeRuns(shaper, createComputeTextPlan(font, group.selections[0]!), group.items, group.indexes, group.selections);
+        if (group.selections[0]?.script !== "deva") {
+            continue;
+        }
+        group.selections.forEach((selection, at) => {
+            try {
+                profileSupport("indic")!.validateRun!(selection);
+            } catch (error) {
+                throw new Error(`shapeComputeText: run ${group.indexes[at]} ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+            }
+        });
+    }
+    for (const group of groups.values()) {
+        let plan: ComputeTextPlan;
+        try {
+            plan = createComputeTextPlan(font, group.selections[0]!);
+        } catch (error) {
+            if (group.selections[0]!.script !== "deva") {
+                throw error;
+            }
+            throw new Error(`shapeComputeText: run ${group.indexes[0]} ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+        }
+        const shaped = await shapeRuns(shaper, plan, group.items, group.indexes, group.selections);
         group.indexes.forEach((index, at) => {
             output[index] = shaped[at]?.glyphs ?? [];
         });
@@ -261,6 +288,12 @@ function prepareRun(plan: ComputeTextPlan, text: string, run: number, checked?: 
     let selection: ComputeTextRunSelection;
     try {
         selection = checked ?? selectComputeTextRun(text, plan.font, undefined, slab);
+        if (plan._profile === "indic") {
+            profileSupport("indic")!.validateRun!(selection);
+            if (profileSupport("indic")?.available === false) {
+                throw new Error("Indic kernel variant not available");
+            }
+        }
     } catch (error) {
         const message = error instanceof Error ? error.message.replace(/^selectComputeTextRun:\s*/, "") : "invalid text";
         throw new Error(`shapeComputeText: run ${run} ${message}`, { cause: error });
@@ -277,6 +310,9 @@ function prepareRun(plan: ComputeTextPlan, text: string, run: number, checked?: 
         },
         selection._nominal
     );
+    if (selection.scalarCount !== 0) {
+        validateComputeTextPlanFont(plan);
+    }
     return { text, sourceRun: run, scalars: selection._scalars, glyphIds };
 }
 
@@ -326,6 +362,18 @@ function assertShaper(shaper: ComputeTextShaper): void {
     }
 }
 
+function assertShaperReady(shaper: ComputeTextShaper): void {
+    assertShaper(shaper);
+    if (shaper.status === "disposed") {
+        throw new Error("shapeComputeText: shaper is disposed");
+    }
+    if (shaper.status === "lost" || shaper._device !== shaper._engine._device) {
+        failTerminal(shaper, "lost", "shapeComputeText: device lost");
+    }
+    if (shaper.status === "busy") {
+        throw new Error("shapeComputeText: shaper is busy");
+    }
+}
 function failTerminal(shaper: ComputeTextShaper, status: "lost" | "disposed", message: string): never {
     markTerminal(shaper, status, message);
     throw new Error(message);

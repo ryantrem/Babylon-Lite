@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { deepStrictEqual } from "node:assert";
 import { createComputeTextData, createGlyphStorage, disposeComputeTextData, disposeGlyphStorage, shapeComputeText } from "../../../packages/babylon-lite/src/index";
 import { awaitComputeTextUpdate as updateComputeTextData } from "./await-update";
 import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/compute-text-plan";
@@ -12,7 +13,7 @@ import { addComputeDispatch, createComputeTask, prepareComputeTask, submitComput
 import { createStorageBuffer, disposeStorageBuffer, readStorageBuffer } from "../../../packages/babylon-lite/src/resource/storage-buffer";
 import { assertNativeClean, nativeHarness } from "./native";
 import type { NativeHarness } from "./native";
-import { compare, CYRILLIC, fixture, GREEK, oracleFields } from "./fixtures";
+import { compare, CYRILLIC, fields, fixture, GREEK, oracleFields, expectedFields } from "./fixtures";
 import { syntheticFont } from "./synthetic";
 
 describe("length-independent production shaping", () => {
@@ -25,6 +26,16 @@ describe("length-independent production shaping", () => {
         await assertNativeClean(native);
     });
     afterAll(async () => native?.close());
+
+    it("public readback admits 70002 scalars without a 16-bit capacity ceiling", async () => {
+        const font = fixture("Roboto-Regular.ttf");
+        const text = "HH ".repeat(23334);
+        expect([...text]).toHaveLength(70002);
+        const actual = await shapeComputeText(native.engine, font.font, text);
+        const expected = oracleFields(font, text);
+        expect(actual).toHaveLength(expected.length);
+        deepStrictEqual(actual.map(fields), expected);
+    });
 
     it.each(["Inter.ttf", "Roboto-Regular.ttf"] as const)("finishes proven long nominal runs without scratch fallback: %s", async (file) => {
         const font = fixture(file);
@@ -180,7 +191,7 @@ describe("length-independent production shaping", () => {
                 const scale = Math.fround(32 / font.font.unitsPerEm);
                 let visible = 0;
                 texts.forEach((text, run) => {
-                    const expected = oracleFields(font, text);
+                    const expected = expectedFields(font, text);
                     expect([...records.slice(run * stride, run * stride + 2)]).toEqual([0, expected.length]);
                     let penX = 0;
                     let penY = 0;

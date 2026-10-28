@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <title>Compute text — user/CI workload only</title>
+    </head>
+    <body>
+        <p>User/CI-only: 100 Hindi blocks or one ~2000-scalar run. No baseline ratio against unsupported shaping.</p>
+        <button id="run">Run bounded workload</button>
+        <pre id="result"></pre>
+        <canvas id="renderCanvas" style="width: 1600px; height: 800px"></canvas>
+        <script type="module" src="/lite/src/demos/compute-text-devanagari-bench.ts"></script>
+    </body>
+</html>

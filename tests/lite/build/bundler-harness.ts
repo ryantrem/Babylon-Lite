@@ -326,7 +326,7 @@ export async function runRollup(opts: RollupOpts): Promise<BundleResult> {
 
 /** Bundle the shipped root with Vite's actual package resolver and vendor code included.
  *  Complements first-party Rollup measurements: no external-vendor side-effect assumptions. */
-export async function runVite(entrySource: string): Promise<BundleResult> {
+export async function runVite(entrySource: string, reachableOnly = false): Promise<BundleResult> {
     const entry = makeTempEntry(entrySource);
     const result: BundleResult = { errors: [], warnings: [], significantWarnings: [], code: "", chunks: [], modules: [], imports: [] };
     try {
@@ -346,8 +346,30 @@ export async function runVite(entrySource: string): Promise<BundleResult> {
             if (!("output" in output)) {
                 throw new Error("Vite consumer build unexpectedly returned a watcher");
             }
+            // Rolldown can emit orphan dynamic chunks after eliminating their
+            // import expressions. An opt-in consumer graph follows every static
+            // AND dynamic edge from every entry; it does not drop lazy features
+            // that the consumer can actually request.
+            const chunks = output.output.filter((chunk) => chunk.type === "chunk");
+            const byName = new Map(chunks.map((chunk) => [chunk.fileName, chunk]));
+            const reachable = new Set<string>();
+            const queue = chunks.filter((chunk) => chunk.isEntry).map((chunk) => chunk.fileName);
+            while (queue.length) {
+                const name = queue.pop()!;
+                if (reachable.has(name)) {
+                    continue;
+                }
+                reachable.add(name);
+                const chunk = byName.get(name);
+                if (chunk) {
+                    queue.push(...chunk.imports, ...chunk.dynamicImports);
+                }
+            }
             for (const chunk of output.output) {
                 if (chunk.type !== "chunk") {
+                    continue;
+                }
+                if (reachableOnly && !reachable.has(chunk.fileName)) {
                     continue;
                 }
                 result.code += chunk.code + "\n";

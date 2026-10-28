@@ -1,0 +1,153 @@
+/** USER/CI ONLY. Agents typecheck this module but do not load/run its workload. */
+import {
+    createEngine,
+    disposeEngine,
+    createComputeFontFromBuffer,
+    createGlyphStorage,
+    disposeGlyphStorage,
+    createComputeTextData,
+    updateComputeTextData,
+    createComputeTextLayer,
+    disposeComputeTextData,
+    createTextRenderer,
+    registerTextRenderer,
+    disposeTextRenderer,
+    startEngine,
+    setRenderTaskGpuTimingEnabled,
+    getRenderTaskGpuTimings,
+    readStorageBuffer,
+} from "babylon-lite";
+
+const quantile = (values: number[], q: number) => [...values].sort((a, b) => a - b)[Math.floor((values.length - 1) * q)]!;
+const statistics = (values: number[]) => ({ median: quantile(values, 0.5), p10: quantile(values, 0.1), p90: quantile(values, 0.9) });
+
+export async function runComputeTextWorkload() {
+    const query = new URLSearchParams(location.search);
+    const arabic = query.get("script") === "arab",
+        single = query.get("workload") === "single";
+    if (arabic && single) {
+        throw new Error("The single-run qualification workload is Hindi; Arabic is the optional block mode.");
+    }
+    const fontFile = arabic ? "NotoSansArabic-Regular.ttf" : "NotoSansDevanagari-Regular.ttf";
+    const a = arabic ? "كتب ج بَّ كتب ج بَّ كتب ج بَّ كتب ج بَّ كتب ج بَّ كتب ج بَّ" : "नमस्ते दुनिया। हिन्दी में लिखा हुआ पाठ नमस्ते दुनिया नमस्ते दुनिया।";
+    const b = arabic ? a.replace("كتب", "ج") : a.replace("दुनिया", "हिन्दी");
+    const long = (text: string) => {
+        const scalars = [...text.repeat(Math.ceil(2000 / [...text].length) + 1)].slice(0, 2000);
+        const boundary = scalars.lastIndexOf(" ");
+        return scalars
+            .slice(0, boundary + 1)
+            .join("")
+            .padEnd(2000, " ");
+    };
+    const variants = single ? [long(a), long(b)] : [a, b];
+    const canvas = document.getElementById("renderCanvas") as HTMLCanvasElement;
+    const fontStarted = performance.now();
+    const response = await fetch(`/fonts/${fontFile}`);
+    if (!response.ok) {
+        throw new Error(`Font request failed: ${response.status} ${fontFile}`);
+    }
+    const fontBytes = await response.arrayBuffer();
+    const fontIdentity = [...new Uint8Array(await crypto.subtle.digest("SHA-256", fontBytes))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const expectedIdentity = arabic ? "7ed3fe069312aceac454f17cf613a30f95271d6ed7ce58005ed4d016bd3823d7" : "9c7d935139ea6a1e6ad9dbac4f6d27ece1e04bca8123c8888d00a0f9df4724cd";
+    if (fontIdentity !== expectedIdentity) {
+        throw new Error(`Unexpected workload font identity: ${fontIdentity}`);
+    }
+    const font = createComputeFontFromBuffer(fontBytes),
+        fontLoadMs = performance.now() - fontStarted;
+    const engine = await createEngine(canvas),
+        storage = createGlyphStorage();
+    const blocks = Array.from({ length: single ? 1 : 100 }, () => createComputeTextData(engine, font, storage, `bench-${fontFile}`, { fontSizePx: 32 }));
+    const layers = blocks.map((data, i) => createComputeTextLayer(data, { positionPx: { x: 20 + (i % 10) * 155, y: 60 + Math.floor(i / 10) * 70 } }));
+    const renderer = createTextRenderer(engine.surfaces[0], { layers });
+    registerTextRenderer(renderer);
+    let running = true;
+    try {
+        await startEngine(engine);
+        const timing = await setRenderTaskGpuTimingEnabled(engine, true);
+        const firstStarted = performance.now();
+        await Promise.all(blocks.map(async (data) => (await updateComputeTextData(data, [variants[0]!])).completed));
+        const firstUseMs = performance.now() - firstStarted;
+        let resolution = Infinity,
+            previous = performance.now();
+        for (let i = 0; i < 1000; i++) {
+            const now = performance.now();
+            if (now > previous) {
+                resolution = Math.min(resolution, now - previous);
+            }
+            previous = now;
+        }
+        const synchronousAdmissionMs: number[] = [],
+            completionLatencyMs: number[] = [],
+            gpu: ReturnType<typeof getRenderTaskGpuTimings>[] = [];
+        for (let frame = 0; frame < 150 && running; frame++) {
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            let active = 0;
+            const began = performance.now();
+            const admitted = blocks.map((data, i) => {
+                const start = performance.now();
+                const promise = updateComputeTextData(data, [variants[(frame + i) % 2]!]);
+                active += performance.now() - start;
+                return promise;
+            });
+            const updates = await Promise.all(admitted);
+            await Promise.all(updates.map((update) => update.completed));
+            if (frame >= 30) {
+                synchronousAdmissionMs.push(active);
+                completionLatencyMs.push(performance.now() - began);
+                gpu.push(getRenderTaskGpuTimings(engine));
+            }
+        }
+        // Diagnostic validation occurs outside all measured intervals.
+        const indirect = await Promise.all(blocks.map(async (data) => [...new Uint32Array(await readStorageBuffer(data._indirect))]));
+        if (indirect.some((words) => words[0] !== 6 || words[1]! <= 0) || blocks.some((data) => data.status !== "ready")) {
+            throw new Error("Workload produced invalid status or no resident instances; do not publish timings.");
+        }
+        const result = {
+            script: arabic ? "arab" : "deva",
+            workload: single ? "single-2000-scalars" : "100-independent-blocks",
+            fontFile,
+            fontIdentity,
+            blocks: blocks.length,
+            scalarsPerVariant: variants.map((text) => [...text].length),
+            texts: variants,
+            warmupFrames: 30,
+            sampleFrames: synchronousAdmissionMs.length,
+            fontLoadMs,
+            firstUseMs,
+            synchronousAdmissionMs: statistics(synchronousAdmissionMs),
+            completionLatencyMs: statistics(completionLatencyMs),
+            mainThreadEndpoint: "Sum of synchronous updateComputeTextData call segments; excludes awaited continuations, not total async self CPU time.",
+            completionEndpoint: "From first admission call until every submitted update.completed resolves.",
+            clock: { crossOriginIsolated, observedResolutionMs: Number.isFinite(resolution) ? resolution : null, coarseClockWarning: !crossOriginIsolated },
+            gpuTimingSupported: timing.supported,
+            gpuSnapshots: gpu,
+            gpuEndpoint: "Existing opt-in per-task timing snapshots. Report pending/unsupported as unavailable, never as zero shape/pack time. Snapshots carry frameIndex.",
+            validStatuses: true,
+            visibleInstances: indirect.map((words) => words[1]),
+            comparison: arabic
+                ? "Absolute optional C9 block workload; RTL segmentation is not claimed."
+                : "Candidate absolute workload only: baseline 27c6ecb3 does not support Devanagari; no B/A ratio.",
+            segmentation: arabic ? "CTF-14 whole RTL run" : "CTF-16 whole run; independent blocks are parallel",
+        };
+        (document.getElementById("result") as HTMLElement).textContent = JSON.stringify(result, null, 2);
+        return result;
+    } finally {
+        running = false;
+        disposeTextRenderer(renderer);
+        blocks.forEach(disposeComputeTextData);
+        disposeGlyphStorage(storage);
+        disposeEngine(engine);
+    }
+}
+
+declare global {
+    interface Window {
+        runComputeTextWorkload: typeof runComputeTextWorkload;
+    }
+}
+window.runComputeTextWorkload = runComputeTextWorkload;
+document.getElementById("run")!.addEventListener("click", () => {
+    void runComputeTextWorkload().catch((error: unknown) => {
+        document.getElementById("result")!.textContent = String(error);
+    });
+});

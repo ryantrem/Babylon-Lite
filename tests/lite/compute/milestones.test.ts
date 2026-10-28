@@ -3,6 +3,7 @@ import { shapeComputeText } from "../../../packages/babylon-lite/src/index";
 import { assertNativeClean, nativeHarness } from "./native";
 import type { NativeHarness } from "./native";
 import { compare, CYRILLIC, fixture, GREEK, mapped, seededStrings } from "./fixtures";
+import { syntheticFont } from "./synthetic";
 
 describe("native M1–3 production shaping", () => {
     let native: NativeHarness;
@@ -144,10 +145,15 @@ describe("native M1–3 production shaping", () => {
     it("fail-closed corpus", async () => {
         const font = fixture("Inter.ttf");
         for (const text of ["A\u20de", "A\u20dd", "<-"]) {
-            await expect(shapeComputeText(native.engine, font.font, text), JSON.stringify(text)).rejects.toThrow(/unsupported/);
-            await expect(shapeComputeText(native.engine, font.font, ["A", text]), `${JSON.stringify(text)}: batch rejects atomically`).rejects.toThrow(/unsupported/);
+            compare(font, text, await shapeComputeText(native.engine, font.font, text));
         }
-        await expect(shapeComputeText(native.engine, font.font, ["", "Α", "A\u20de"])).rejects.toThrow(/run 2 unsupported GSUB 6/);
+        for (const kind of ["alternate", "reverse-chain", "nested-context"] as const) {
+            const negative = syntheticFont(kind);
+            await expect(shapeComputeText(native.engine, negative.font, "AB")).rejects.toThrow(/unsupported GSUB 0/);
+            await expect(shapeComputeText(native.engine, negative.font, ["", "C", "AB"])).rejects.toThrow(/run 2 unsupported GSUB 0/);
+        }
+        const contour = syntheticFont("contour-anchor");
+        await expect(shapeComputeText(native.engine, contour.font, ["", "B", "ABC"])).rejects.toThrow(/run 2 unsupported GPOS 0/);
         for (const text of ["\ud800", "\udc00", "A\ud800B", "ΑЯ", "Aא", "अ", "한", "\n", "\r", "\t", "\u0000", "\u2028", "\u202e", "\u200d", "A\ufe0f", "A\u{e0100}"]) {
             await expect(shapeComputeText(native.engine, font.font, ["A", text])).rejects.toThrow(/run 1/);
         }

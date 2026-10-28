@@ -173,11 +173,25 @@ describe("compileComputeTextProgram", () => {
             const base = (lookup.table === "GSUB" ? program.gsubDescriptorOffset : program.gposDescriptorOffset) + lookup.lookupIndex * COMPUTE_PROGRAM_LOOKUP_WORDS;
             const independent = lookup.rules.every((rule) => rule.backtrack.length === 0 && rule.lookahead.length === 0);
             const single = lookup.table === "GSUB" && independent && lookup.rules.every((rule) => rule.input.length === 1 && (rule.mode === 1 || rule.mode === 5));
-            const pair = lookup.table === "GPOS" && independent && lookup.rules.every((rule) => rule.input.length === 2 && [3, 4, 5].includes(rule.mode));
+            const pair =
+                lookup.table === "GPOS" &&
+                independent &&
+                lookup.rules.every(
+                    (rule) =>
+                        rule.input.length === 2 &&
+                        [3, 4, 5].includes(rule.mode) &&
+                        (rule.action.kind === "reject" || ((rule.action.kind === "pair" || rule.action.kind === "class-pair") && !rule.action.format2Nonzero))
+                );
             const firstOnly = lookup.rules.every(
                 (rule) =>
                     rule.action.kind === "reject" ||
-                    ((rule.action.kind === "pair" || rule.action.kind === "class-pair") && (!rule.action.applySecond || rule.action.secondXAdvance === 0))
+                    ((rule.action.kind === "pair" || rule.action.kind === "class-pair") &&
+                        !rule.action.format2Nonzero &&
+                        rule.action.first.xPlacement === 0 &&
+                        rule.action.first.yPlacement === 0 &&
+                        rule.action.second.xPlacement === 0 &&
+                        rule.action.second.yPlacement === 0 &&
+                        rule.action.second.xAdvance === 0)
             );
             expect(program.words[base + COMPUTE_LOOKUP_MEMBERSHIP], `${lookup.table}/${lookup.lookupIndex}`).toBe(single ? 1 : pair ? (firstOnly ? 3 : 2) : 0);
             singles += Number(single);
@@ -192,8 +206,8 @@ describe("compileComputeTextProgram", () => {
         const program = compileComputeTextProgram(createComputeTextPlan(font, selectComputeTextRun("A")));
         for (const lookup of program.lookups) {
             const base = (lookup.table === "GSUB" ? program.gsubDescriptorOffset : program.gposDescriptorOffset) + lookup.lookupIndex * COMPUTE_PROGRAM_LOOKUP_WORDS;
-            const modes = lookup.table === "GSUB" ? [1, 2, 5, 9, 11] : [3, 4, 5, 7, 8, 10, 12];
-            const eligibility = lookup.rules.every((rule) => modes.includes(rule.mode)) ? (lookup.rules.some((rule) => rule.mode === 11) ? 2 : 1) : 0;
+            const modes = lookup.table === "GSUB" ? [1, 2, 5, 9, 11] : [2, 3, 4, 5, 7, 8, 10, 12];
+            const eligibility = lookup.rules.every((rule) => modes.includes(rule.mode)) ? (lookup.expansion > 1 ? 2 : 1) : 0;
             const forward = eligibility && lookup.table === "GSUB" && lookup.rules.every((rule) => rule.backtrack.length === 0) ? 4 : 0;
             expect(program.words[base + COMPUTE_LOOKUP_ORDERED], `${lookup.table}/${lookup.lookupIndex}`).toBe(eligibility | forward);
         }
@@ -209,17 +223,13 @@ describe("compileComputeTextProgram", () => {
             program.lookups.filter((lookup) => lookup.table === "GSUB" && lookup.lookupType === 6).every((lookup) => lookup.rules.every((rule) => rule.action.kind === "context"))
         ).toBe(true);
         const pairs = program.lookups.find((lookup) => lookup.table === "GPOS" && lookup.lookupIndex === 13);
-        expect(pairs?.rules.every((rule) => (rule.action.kind === "pair" || rule.action.kind === "class-pair") && rule.action.applySecond)).toBe(true);
-        expect(
-            program.lookups.some(
-                (lookup) => lookup.lookupType === 4 && lookup.table === "GPOS" && lookup.rules.some((rule) => rule.action.kind === "mark-base" && rule.action.clearAdvance)
-            )
-        ).toBe(true);
+        expect(pairs?.rules.every((rule) => (rule.action.kind === "pair" || rule.action.kind === "class-pair") && !rule.action.format2Nonzero)).toBe(true);
+        expect(program.lookups.some((lookup) => lookup.lookupType === 4 && lookup.table === "GPOS" && lookup.rules.some((rule) => rule.action.kind === "mark-base"))).toBe(true);
         expect(modesOf(program)).not.toContain(6);
         expect(program.words[0]).toBe(0x43545031);
     });
 
-    it("admits Inter design values for zero default device deltas and keeps nested ligatures fail-closed", () => {
+    it("admits Inter design values for zero default device deltas and compiles nested ligatures", () => {
         expect(TEXT_SHAPER_VERSION).toBe("0.1.28");
         const implementation = [
             "packages/babylon-lite/src/text/compute-text-program.ts",
@@ -232,12 +242,12 @@ describe("compileComputeTextProgram", () => {
         const bytes = fontBytes("Inter.ttf");
         const font = createComputeFontFromBuffer(bytes);
         const program = compileComputeTextProgram(createComputeTextPlan(font, selectComputeTextRun("A")));
-        expect(program.fullyExecutable).toBe(false);
+        expect(program.fullyExecutable).toBe(true);
         const reason = (table: "GSUB" | "GPOS", lookupIndex: number): string =>
             program.rejections.find((rejection) => rejection.table === table && rejection.lookupIndex === lookupIndex)?.reason ?? "";
-        expect(reason("GSUB", 6)).toMatch(/nested GSUB lookup 7 type 4/);
-        expect(reason("GSUB", 9)).toMatch(/nested GSUB lookup 10 type 4/);
-        expect(reason("GSUB", 48)).toMatch(/nested GSUB lookup 49 type 4/);
+        expect(reason("GSUB", 6)).toBe("");
+        expect(reason("GSUB", 9)).toBe("");
+        expect(reason("GSUB", 48)).toBe("");
         for (const index of [1, 2, 4, 5, 6, 7, 8, 9]) {
             expect(reason("GPOS", index), `GPOS ${index}`).toBe("");
         }
@@ -246,10 +256,11 @@ describe("compileComputeTextProgram", () => {
         expect(
             program.lookups
                 .find((lookup) => lookup.table === "GPOS" && lookup.lookupIndex === 3)
-                ?.rules.every((rule) => rule.action.kind === "pair" && rule.action.applySecond === false)
+                ?.rules.every((rule) => rule.action.kind === "pair" && rule.action.format2Nonzero === false)
         ).toBe(true);
         const filtered = program.lookups.find((lookup) => lookup.table === "GPOS" && lookup.lookupIndex === 1);
-        expect(filtered?.markFilteringSetIgnored).toBe(true);
+        expect((filtered?.lookupFlag ?? 0) & 0x10).toBe(0x10);
+        expect(filtered?.markFilteringSet).toBeGreaterThanOrEqual(0);
         expect(filtered?.rules.every((rule) => rule.action.kind === "pair" || rule.action.kind === "class-pair")).toBe(true);
         expect(modesOf(program)).not.toContain(6);
 
@@ -267,8 +278,8 @@ describe("compileComputeTextProgram", () => {
         expect(classPair.rows[class1]?.[class2]?.value1.deviceKind).toBe("variation");
         expect(classPair.rows[class1]?.[class2]?.value1.xAdvance).toBe(-70);
         const compiledClass = filtered?.rules.find((rule) => rule.action.kind === "class-pair" && rule.action.class1 === class1 && rule.action.class2 === class2);
-        expect(compiledClass?.action).toMatchObject({ kind: "class-pair", firstXAdvance: -70 });
-        expect(readComputeFontAdvance(font, 2) + (compiledClass?.action.kind === "class-pair" ? compiledClass.action.firstXAdvance : 0)).toBe(1343);
+        expect(compiledClass?.action).toMatchObject({ kind: "class-pair", first: { xAdvance: -70 } });
+        expect(readComputeFontAdvance(font, 2) + (compiledClass?.action.kind === "class-pair" ? compiledClass.action.first.xAdvance : 0)).toBe(1343);
 
         expect(shaped("5,")).toEqual([
             [1347, 0, 1160, 0, 0, 0],
@@ -276,8 +287,8 @@ describe("compileComputeTextProgram", () => {
         ]);
         const pairLookup = program.lookups.find((lookup) => lookup.table === "GPOS" && lookup.lookupIndex === 2);
         const compiledPair = pairLookup?.rules.find((rule) => rule.action.kind === "pair" && rule.input[0]?.ids[0] === 1347 && rule.action.secondGlyph === 1501);
-        expect(compiledPair?.action).toMatchObject({ kind: "pair", firstXAdvance: -55 });
-        expect(readComputeFontAdvance(font, 1347) + (compiledPair?.action.kind === "pair" ? compiledPair.action.firstXAdvance : 0)).toBe(1160);
+        expect(compiledPair?.action).toMatchObject({ kind: "pair", first: { xAdvance: -55 } });
+        expect(readComputeFontAdvance(font, 1347) + (compiledPair?.action.kind === "pair" ? compiledPair.action.first.xAdvance : 0)).toBe(1160);
 
         expect(shaped("A\u0326")).toEqual([
             [2, 0, 1413, 0, 0, 0],
@@ -291,7 +302,7 @@ describe("compileComputeTextProgram", () => {
             expect(base).toBeDefined();
             expect((base?.x ?? 0) - comma.action.markX).toBe(1309);
             expect((base?.y ?? 0) - comma.action.markY).toBe(0);
-            expect(comma.action.clearAdvance).toBe(true);
+            expect(comma.action).not.toHaveProperty("clearAdvance");
         }
 
         expect(shaped("\u0301\u0300")).toEqual([
@@ -305,7 +316,7 @@ describe("compileComputeTextProgram", () => {
             const base = grave.action.bases.find((anchor) => anchor.glyphId === 1770);
             expect((base?.x ?? 0) - grave.action.markX).toBe(-167);
             expect((base?.y ?? 0) - grave.action.markY).toBe(440);
-            expect(grave.action.clearAdvance).toBe(false);
+            expect(grave.action).not.toHaveProperty("clearAdvance");
         }
 
         expect(shaped("i\u0301")).toEqual([[699, 0, 496, 0, 0, 0]]);
@@ -335,20 +346,18 @@ describe("compileComputeTextProgram", () => {
         expect(() => compileComputeTextProgram(createComputeTextPlan(font, selectComputeTextRun("A")))).toThrow(/unknown GSUB lookup type 9/);
     });
 
-    it("keeps Arabic Context-3 roots oracle-inert without weakening Inter rejection predicates", () => {
+    it("executes Arabic Context-3 roots and nested Inter ligature contexts", () => {
         const bytes = fontBytes("NotoSansArabic-Regular.ttf");
         const font = createComputeFontFromBuffer(bytes);
         const program = compileComputeTextProgram(createComputeTextPlan(font, selectComputeTextRun("سلام")));
         const parsed = parseLookupActions(font, "GSUB", 35);
         expect(parsed.subtables.every((entry) => entry.kind === "context" && !entry.chaining && entry.format === 3)).toBe(true);
-        expect(program.lookups.find((lookup) => lookup.table === "GSUB" && lookup.lookupIndex === 35)?.rules).toEqual([]);
+        expect(program.lookups.find((lookup) => lookup.table === "GSUB" && lookup.lookupIndex === 35)?.rules.some((rule) => rule.mode === 2)).toBe(true);
         expect(Font.load(bytes).gsub?.lookups[35]?.digest.mayHave(72)).toBe(false);
         const inter = createComputeFontFromBuffer(fontBytes("Inter.ttf"));
         const rejected = compileComputeTextProgram(createComputeTextPlan(inter, selectComputeTextRun("A")));
         for (const lookupIndex of [6, 9, 48]) {
-            expect(
-                rejected.lookups.find((lookup) => lookup.table === "GSUB" && lookup.lookupIndex === lookupIndex)?.rules.some((rule) => rule.mode === COMPUTE_RULE_MODE_REJECT)
-            ).toBe(true);
+            expect(rejected.lookups.find((lookup) => lookup.table === "GSUB" && lookup.lookupIndex === lookupIndex)?.rules.some((rule) => rule.mode === 2)).toBe(true);
         }
     });
 

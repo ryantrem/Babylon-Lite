@@ -15,7 +15,7 @@ export function prepareSimplePairWords(program: ComputeTextProgram, origin: numb
         if (mode !== 3 && mode !== 4) {
             throw new Error("compute-text: non-pair action in a proven first-only lookup");
         }
-        return [source[source[rule + 6]! + (mode === 4 ? 2 : 1)]!, 1];
+        return [source[source[rule + 6]! + (mode === 4 ? 4 : 3)]!, 1];
     };
     const rows = new Map<number, number>();
     for (let root = 0; root < program.rootOrder.length; root++) {

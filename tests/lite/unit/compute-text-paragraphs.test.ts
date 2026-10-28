@@ -5,6 +5,7 @@ import { createComputeFontFromBuffer, getComputeFontLineMetrics, updateComputeTe
 import type { ComputeFont, ComputeTextParagraphLayout } from "../../../packages/babylon-lite/src/index";
 import type { EngineContext } from "../../../packages/babylon-lite/src/engine/engine";
 import { computeTextDrawBufferSizes, createComputeTextData, disposeComputeTextData } from "../../../packages/babylon-lite/src/text/compute-text-data";
+import type { ComputeTextData } from "../../../packages/babylon-lite/src/text/compute-text-data";
 import { createGlyphStorage, disposeGlyphStorage } from "../../../packages/babylon-lite/src/text/glyph-storage";
 import {
     allocateComputeTextParagraphSlots,
@@ -22,8 +23,10 @@ import type { SegmentAnalysis } from "../../../packages/babylon-lite/src/text/co
 import * as segmentation from "../../../packages/babylon-lite/src/text/compute-text-segment";
 import { compileComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/compute-text-plan";
+import * as profiles from "../../../packages/babylon-lite/src/text/compute-text-plan";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 import { mapComputeFontScalars } from "../../../packages/babylon-lite/src/text/compute-font";
+import { computeTextHasDevanagari } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 
 function font(file = "Inter.ttf"): ComputeFont {
     const bytes = readFileSync(join(process.cwd(), "lab/public/fonts", file));
@@ -35,7 +38,7 @@ function scalars(text: string): Uint32Array {
 }
 
 function analysis(safeAfter: SegmentAnalysis["safeAfter"] = () => true): SegmentAnalysis {
-    return { space: 0x20, span: 1, crossings: 0, markBaseHit: false, safeAfter };
+    return { space: 0x20, span: 1, maxD: 1, crossings: 0, markBaseHit: false, safeAfter };
 }
 
 function block(file?: string) {
@@ -480,8 +483,71 @@ describe("paragraph synchronous admission", () => {
         }
     });
 
+    it("rejects Devanagari paragraphs before allocation or profile loading", () => {
+        const { data, close } = block("NotoSansDevanagari-Regular.ttf");
+        const loader = vi.spyOn(profiles, "ensureComputeTextProfile");
+        const allocations = vi.spyOn(data._device, "createBuffer");
+        allocations.mockClear();
+        const version = data._revision;
+        try {
+            expect(() => updateComputeTextParagraphs(data, ["क"], { maxWidthPx: 200 })).toThrow("paragraph 0 Devanagari paragraph layout is unsupported");
+            expect(loader).not.toHaveBeenCalled();
+            expect(allocations).not.toHaveBeenCalled();
+            expect(data._revision).toBe(version);
+            expect(data.status).toBe("ready");
+        } finally {
+            loader.mockRestore();
+            allocations.mockRestore();
+            close();
+        }
+    });
+
     it.each(["\n", "\r", "\t", "\u2028", "\u2029"])("rejects paragraph controls synchronously: %j", (control) => {
         expect(() => updateComputeTextParagraphs(undefined!, ["A" + control + "B"], { maxWidthPx: 100 })).toThrow(/updateComputeTextParagraphs:.*line breaks or tabs/);
+    });
+
+    it.each(["plain ASCII 123 !", "é", "🙂"])("admits text through the paragraph scan before layout validation: %j", (text) => {
+        expect(() => updateComputeTextParagraphs(undefined!, [text], { maxWidthPx: 0 })).toThrow("maxWidthPx must be positive");
+    });
+
+    it.each([
+        { paragraphs: ["A\tक"], message: "paragraph 0 must not contain line breaks or tabs" },
+        { paragraphs: ["A", "क", "B\t"], message: "paragraph 1 Devanagari paragraph layout is unsupported" },
+        { paragraphs: ["A", "B\t", "क"], message: "paragraph 1 must not contain line breaks or tabs" },
+    ])("preserves control priority and the first offending paragraph: $paragraphs", ({ paragraphs, message }) => {
+        expect(() => updateComputeTextParagraphs(undefined!, paragraphs, { maxWidthPx: 100 })).toThrow(message);
+    });
+
+    it("does not recheck Devanagari in the unchanged prefix or suffix", () => {
+        const test = block();
+        const data = test.data;
+        const cache: ComputeTextParagraphCache = {
+            _paragraphs: ["क", "old", "क"],
+            _order: Uint32Array.of(0, 1, 2),
+            _capacity: 4,
+            _pool: 9,
+            _width: 100,
+            _font: data._font,
+            _fontSize: data.fontSizePx,
+            _device: data._device,
+            _generation: data._generation,
+            _revision: data._revision,
+            _baseRevision: data._revision,
+            _shaped: data._shaped,
+        };
+        const words = new Uint32Array(12);
+        words[1] = cache._capacity;
+        words[11] = cache._pool;
+        const spy = vi
+            .spyOn(paragraphStages, "getComputeTextParagraphStage")
+            .mockReturnValue({ _cache: cache, _words: words } as ReturnType<typeof paragraphStages.getComputeTextParagraphStage>);
+        try {
+            expect(computeTextParagraphCacheValid(data, cache)).toBe(true);
+            expect(() => updateComputeTextParagraphs(data, ["क", "new", "क"], { maxWidthPx: 0 })).toThrow("maxWidthPx must be positive");
+        } finally {
+            spy.mockRestore();
+            test.close();
+        }
     });
 
     it.each([null, "A", ["A", 1], Array(1)])("requires a dense array of strings: %j", (input) => {
@@ -564,6 +630,143 @@ describe("paragraph synchronous admission", () => {
             }
         }
     });
+});
+
+describe("RM-1 exact paragraph admission", () => {
+    const sentinel = new Error("RM1_ADMISSION_PASSED");
+    const admissionData = {
+        get _chunkBudgets(): never {
+            throw sentinel;
+        },
+    } as unknown as ComputeTextData;
+    function outcome(action: () => unknown): string {
+        try {
+            action();
+            throw new Error("admission fixture unexpectedly reached submission");
+        } catch (error) {
+            if (!(error instanceof Error)) {
+                throw error;
+            }
+            return error.message.replace(/^updateComputeTextParagraphs:\s*/u, "");
+        }
+    }
+    function production(paragraphs: readonly string[], layout: ComputeTextParagraphLayout = { maxWidthPx: 100 }): string {
+        return outcome(() => updateComputeTextParagraphs(admissionData, paragraphs, layout));
+    }
+    function c129(paragraphs: readonly string[]): string {
+        const prefix = 0,
+            suffix = 0;
+        return outcome(() => {
+            // Verbatim C129 admission loop; only the surrounding fixture supplies
+            // an empty prior cache and a sentinel after successful admission.
+            for (let p = 0; p < paragraphs.length; p++) {
+                const text = paragraphs[p];
+                if (typeof text !== "string") {
+                    throw new Error(`paragraph ${p} text must be a string`);
+                }
+                if (p >= prefix && p < paragraphs.length - suffix && /[\t\n\r\u0080-\u{10ffff}]/u.test(text)) {
+                    if (/[\n\r\t\u2028\u2029]/u.test(text)) {
+                        throw new Error(`paragraph ${p} must not contain line breaks or tabs`);
+                    }
+                    if (computeTextHasDevanagari(text)) {
+                        throw new Error(`paragraph ${p} Devanagari paragraph layout is unsupported`);
+                    }
+                }
+            }
+            throw sentinel;
+        });
+    }
+    it.each([
+        { paragraphs: [123, "क"], message: "paragraph 0 text must be a string" },
+        { paragraphs: ["A", "B\t", "क"], message: "paragraph 1 must not contain line breaks or tabs" },
+        { paragraphs: ["A", "क", "B\t"], message: "paragraph 1 Devanagari paragraph layout is unsupported" },
+        { paragraphs: ["\u2028"], message: "paragraph 0 must not contain line breaks or tabs" },
+        { paragraphs: ["\u2029"], message: "paragraph 0 must not contain line breaks or tabs" },
+        { paragraphs: ["\u0900"], message: "paragraph 0 Devanagari paragraph layout is unsupported" },
+        ...["é", "😀", "\ud800", "\udc00", ""].map((text) => ({ paragraphs: [text], message: sentinel.message })),
+    ])("preserves exact first-offender admission: $paragraphs", ({ paragraphs, message }) => {
+        expect(production(paragraphs as readonly string[])).toBe(message);
+    });
+    it("reports Devanagari before invalid layout width", () => {
+        expect(production(["क"], { maxWidthPx: 0 })).toBe("paragraph 0 Devanagari paragraph layout is unsupported");
+    });
+    it("does not scan a tab in a cached clean prefix on the next positional update", () => {
+        const test = block();
+        const data = test.data;
+        const cache: ComputeTextParagraphCache = {
+            _paragraphs: ["A\t", "old"],
+            _order: Uint32Array.of(0, 1),
+            _capacity: 4,
+            _pool: 9,
+            _width: 100,
+            _font: data._font,
+            _fontSize: data.fontSizePx,
+            _device: data._device,
+            _generation: data._generation,
+            _revision: data._revision,
+            _baseRevision: data._revision,
+            _shaped: data._shaped,
+        };
+        const words = new Uint32Array(12);
+        words[1] = cache._capacity;
+        words[11] = cache._pool;
+        vi.spyOn(paragraphStages, "getComputeTextParagraphStage").mockReturnValue({ _cache: cache, _words: words } as ReturnType<
+            typeof paragraphStages.getComputeTextParagraphStage
+        >);
+        try {
+            expect(computeTextParagraphCacheValid(data, cache)).toBe(true);
+            expect(outcome(() => updateComputeTextParagraphs(data, ["A\t", "new"], { maxWidthPx: 0 }))).toBe("maxWidthPx must be positive or Infinity and representable as f32");
+        } finally {
+            test.close();
+        }
+    });
+    it("matches verbatim C129 over all code points, lone surrogates and 100k seeded mixed strings", () => {
+        let checked = 0;
+        function equal(text: string): void {
+            const actual = production([text]);
+            const expected = c129([text]);
+            if (actual !== expected) {
+                throw new Error(`RM1 admission mismatch ${JSON.stringify(text)}: ${actual} !== ${expected}`);
+            }
+            checked++;
+        }
+        for (let cp = 0; cp <= 0x10ffff; cp++) {
+            equal(String.fromCodePoint(cp));
+        }
+        for (let unit = 0xd800; unit <= 0xdfff; unit++) {
+            equal(String.fromCharCode(unit));
+        }
+        let state = 0xa11ce;
+        function next(): number {
+            state ^= state << 13;
+            state ^= state >>> 17;
+            state ^= state << 5;
+            return (state >>> 0) / 4294967296;
+        }
+        for (let sample = 0; sample < 100000; sample++) {
+            const length = Math.floor(next() * 33);
+            let text = "";
+            while (text.length < length) {
+                const category = Math.floor(next() * 6);
+                const cp =
+                    category === 0
+                        ? Math.floor(next() * 128)
+                        : category === 1
+                          ? [9, 10, 13][Math.floor(next() * 3)]!
+                          : category === 2
+                            ? 128 + Math.floor(next() * 128)
+                            : category === 3
+                              ? Math.floor(next() * 65536)
+                              : category === 4
+                                ? 0x10000 + Math.floor(next() * 0x100000)
+                                : 0xd800 + Math.floor(next() * 2048);
+                const piece = String.fromCodePoint(cp);
+                text += piece.length > length - text.length ? piece[0]! : piece;
+            }
+            equal(text);
+        }
+        expect(checked).toBe(1216160);
+    }, 120_000);
 });
 
 describe("paragraph per-record storage", () => {

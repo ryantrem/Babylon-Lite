@@ -58,6 +58,7 @@ export interface GdefTable {
     readonly glyphClassDef: GlyphClassDef | null;
     readonly markAttachClassDef: GlyphClassDef | null;
     readonly markGlyphSetCount: number;
+    readonly markGlyphSets: readonly (GlyphCoverage | null)[];
     readonly itemVariationStoreOffset: number;
 }
 
@@ -85,12 +86,14 @@ export function parseGdef(bytes: Uint8Array, tableOffset: number, tableLength: n
     if (itemVariationStoreOffset !== 0 && itemVariationStoreOffset >= tableLength) {
         throw new Error("GDEF: item variation store offset is outside the table");
     }
+    const markGlyphSets = markSetsOffset === 0 ? [] : parseMarkGlyphSets(bytes, tableOffset, tableLength, markSetsOffset);
     return {
         versionMajor,
         versionMinor,
         glyphClassDef: glyphClassOffset === 0 ? null : parseClassDef(bytes, checkedOffset(tableOffset, glyphClassOffset, "GDEF classDef"), tableOffset + tableLength),
         markAttachClassDef: markAttachOffset === 0 ? null : parseClassDef(bytes, checkedOffset(tableOffset, markAttachOffset, "GDEF markAttach"), tableOffset + tableLength),
-        markGlyphSetCount: markSetsOffset === 0 ? 0 : parseMarkGlyphSets(bytes, tableOffset, tableLength, markSetsOffset),
+        markGlyphSetCount: markGlyphSets.length,
+        markGlyphSets,
         itemVariationStoreOffset,
     };
 }
@@ -459,7 +462,17 @@ function walkRuleSet(bytes: Uint8Array, start: number, limit: number, chaining: 
             skipGlyphIds(rule, `${label} lookahead`, false);
         } else {
             // The first input glyph or class is implied by coverage or by the rule-set index.
-            skipGlyphIds(rule, `${label} input`, true);
+            // Context formats1/2 put lookupRecordCount BEFORE the input array.
+            // ChainContext puts it after its three arrays.
+            const count = readU16(rule, `${label} glyphCount`);
+            const recordCount = readU16(rule, `${label} lookupRecordCount`);
+            if (count === 0) {
+                throw new Error(`${label}: glyphCount 0 is invalid`);
+            }
+            requireCount(count - 1, 2, rule.limit - rule.offset, `${label} input`);
+            skip(rule, (count - 1) * 2, `${label} input`);
+            readKnownLookupRecords(rule, recordCount, nested, lookupCount, label);
+            continue;
         }
         readLookupRecords(rule, nested, lookupCount, label);
     }
@@ -581,7 +594,7 @@ export function parseClassDef(bytes: Uint8Array, start: number, limit: number): 
     throw new Error(`ClassDef: unsupported format ${format}`);
 }
 
-function parseMarkGlyphSets(bytes: Uint8Array, tableOffset: number, tableLength: number, offset: number): number {
+function parseMarkGlyphSets(bytes: Uint8Array, tableOffset: number, tableLength: number, offset: number): readonly (GlyphCoverage | null)[] {
     const start = absoluteOffset(tableOffset, tableLength, offset, "GDEF markGlyphSets");
     const cursor = openCursor(bytes, start, tableOffset + tableLength - start, "GDEF markGlyphSets");
     const format = readU16(cursor, "GDEF markGlyphSets format");
@@ -590,13 +603,12 @@ function parseMarkGlyphSets(bytes: Uint8Array, tableOffset: number, tableLength:
     }
     const count = readU16(cursor, "GDEF markGlyphSetCount");
     requireCount(count, 4, cursor.limit - cursor.offset, "GDEF mark glyph sets");
+    const sets: (GlyphCoverage | null)[] = [];
     for (let index = 0; index < count; index++) {
         const coverageOffset = readU32(cursor, "GDEF markGlyphSet coverage");
-        if (coverageOffset !== 0) {
-            parseCoverage(bytes, start + coverageOffset, cursor.limit, `GDEF mark set ${index}`);
-        }
+        sets.push(coverageOffset === 0 ? null : parseCoverage(bytes, start + coverageOffset, cursor.limit, `GDEF mark set ${index}`));
     }
-    return count;
+    return sets;
 }
 
 function validateAttachOrCaret(bytes: Uint8Array, tableOffset: number, tableLength: number, offset: number, label: string): void {

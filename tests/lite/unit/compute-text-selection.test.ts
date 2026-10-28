@@ -6,9 +6,36 @@ import { join } from "node:path";
 import * as unicodeScripts from "../../../packages/babylon-lite/src/text/unicode-script-data";
 import { createComputeFontFromBuffer, mapComputeFontScalar } from "../../../packages/babylon-lite/src/text/compute-font";
 
-import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
+import { selectComputeTextRun, scanComputeTextRun, computeTextHasDevanagari, computeTextRequiredProfiles } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 
 describe("selectComputeTextRun", () => {
+    it("selects strong Devanagari including digits, keeps weak-only behavior, and mirrors the scanner", () => {
+        for (const text of ["क", "१२३", "॑क", "क\u200dष", "क\u200cष"]) {
+            expect(selectComputeTextRun(text)).toMatchObject({ script: "deva", direction: "ltr" });
+            expect(scanComputeTextRun(text)).toMatchObject({ script: "deva", direction: "ltr", scalarCount: [...text].length });
+            expect(computeTextHasDevanagari(text)).toBe(true);
+        }
+        for (const text of ["।", "॥", "।॥ 12"]) {
+            expect(selectComputeTextRun(text).script).toBe("DFLT");
+            expect(scanComputeTextRun(text).script).toBe("DFLT");
+            expect(computeTextHasDevanagari(text)).toBe(false);
+        }
+        expect(() => selectComputeTextRun("॑")).toThrow("inherited mark without an admitted base script");
+        expect(computeTextRequiredProfiles(["كتب", "क\u200dष"])).toEqual(["arabic", "indic"]);
+    });
+    it("retains conditional joiner and surrogate/unconditional error precedence in both selection paths", () => {
+        for (const select of [selectComputeTextRun, scanComputeTextRun]) {
+            expect(() => select("H\u200d\ud800")).toThrow("lone surrogate");
+            expect(() => select("a\u200db")).toThrow("joining control at scalar 1");
+            expect(() => select("\u200d")).toThrow("joining control at scalar 0");
+            expect(() => select("\u200d\u2066क")).toThrow("bidi control at scalar 1");
+            expect(() => select("कa")).toThrow('mixed scripts "deva" and "latn"');
+            expect(() => select("a\u200dβ")).toThrow("joining control at scalar 1");
+            expect(() => select("\u200d\u2066a")).toThrow("joining control at scalar 0");
+            expect(() => select("aβ\u200d")).toThrow('mixed scripts "latn" and "grek"');
+            expect(() => select("क\u200da")).toThrow('mixed scripts "deva" and "latn"');
+        }
+    });
     it("reuses immutable page directories within one decode while writing fresh scalar, offset and nominal vectors", () => {
         const bytes = readFileSync(join(process.cwd(), "lab/public/fonts/Inter.ttf"));
         const font = createComputeFontFromBuffer(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
@@ -52,7 +79,7 @@ describe("selectComputeTextRun", () => {
             expect(() => selectComputeTextRun("\u{10332}A")).toThrow(/mixed scripts "goth" and "latn"/);
             expect(() => selectComputeTextRun("\u{10332}\nA")).toThrow(/control at scalar 1/);
             for (let index = 0; index < 2; index++) {
-                expect(() => selectComputeTextRun("व")).toThrow(/unsupported script "deva" at scalar 0/);
+                expect(() => selectComputeTextRun("অ")).toThrow(/unsupported script "beng" at scalar 0/);
             }
         } finally {
             tags.mockRestore();
@@ -104,7 +131,7 @@ describe("selectComputeTextRun", () => {
             expect(selectComputeTextRun(revision ? "Η\u0301!" : "H\u0301!").script).toBe(revision ? "grek" : "latn");
             expect(() => selectComputeTextRun("H\u200D\uD800")).toThrow(/lone surrogate at UTF-16 index 2/);
             expect(() => selectComputeTextRun("H\u200D")).toThrow(/joining control at scalar 1 U\+200D/);
-            expect(() => selectComputeTextRun("व")).toThrow(/unsupported script "deva" at scalar 0 U\+0935/);
+            expect(() => selectComputeTextRun("অ")).toThrow(/unsupported script "beng" at scalar 0 U\+0985/);
             expect(() => selectComputeTextRun("\u0378")).toThrow(/unknown script at scalar 0 U\+0378/);
         }
     });
@@ -157,11 +184,11 @@ describe("selectComputeTextRun", () => {
         expect(() => selectComputeTextRun("A\uD800B")).toThrow(/lone surrogate at UTF-16 index 1/);
     });
 
-    it("rejects mixed scripts, Indic, and Hangul before any shaping", () => {
+    it("rejects mixed scripts, unadmitted Indic scripts, and Hangul before any shaping", () => {
         expect(() => selectComputeTextRun("Aβ")).toThrow(/mixed scripts "latn" and "grek"/);
         expect(() => selectComputeTextRun("Hello, κόσμε")).toThrow(/mixed scripts "latn" and "grek"/);
         expect(() => selectComputeTextRun("Aكتب")).toThrow(/mixed scripts "latn" and "arab"/);
-        expect(() => selectComputeTextRun("क")).toThrow(/unsupported script "deva"/);
+        expect(() => selectComputeTextRun("ক")).toThrow(/unsupported script "beng"/);
         expect(() => selectComputeTextRun("한")).toThrow(/unsupported script "hang"/);
         expect(() => selectComputeTextRun("\u1100")).toThrow(/unsupported script "hang"/);
     });

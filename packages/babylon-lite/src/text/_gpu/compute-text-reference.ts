@@ -1,9 +1,10 @@
-/** Deterministic CPU reference for the independent-run kernel.
+/** Legacy test-only CPU interpreter, retained for pre-migration unit tests.
  *
  *  One run, source order, first matching rule, mode 5 fails instead of skipping.
  *  Nested actions are only the direct single substitutions the compiler marked
  *  executable. text-shaper is not imported. The production path dispatches the
- *  matching WGSL kernel; this function is the semantic reference for that kernel. */
+ *  WGSL kernel. Corrected expectations come from independent committed evidence,
+ *  never from this historical interpreter; it is not a production fallback. */
 
 import { ensureComputeFontLayout, readComputeFontAdvance } from "../compute-font.js";
 import type { ComputeGlyphPredicate, ComputeProgramLookup, ComputeProgramRule, ComputeTextProgram } from "../compute-text-program.js";
@@ -228,10 +229,10 @@ function applyGpos(lookup: ComputeProgramLookup, glyphs: LiveGlyph[], gdef: Retu
                     const first = glyphs[index];
                     const other = glyphs[second];
                     if (first) {
-                        first.xAdvance += action.firstXAdvance;
+                        first.xAdvance += action.first.xAdvance;
                     }
-                    if (other && action.applySecond) {
-                        other.xAdvance += action.secondXAdvance;
+                    if (other) {
+                        other.xAdvance += action.second.xAdvance;
                     }
                 }
                 break;
@@ -333,7 +334,7 @@ function applyMarks(lookup: ComputeProgramLookup, glyphs: LiveGlyph[], gdef: Ret
             }
             glyph.xOffset = anchor.x - rule.action.markX + base.xOffset;
             glyph.yOffset = anchor.y - rule.action.markY + base.yOffset;
-            if (rule.action.clearAdvance) {
+            if (rule.mode === COMPUTE_RULE_MODE_MARK_BASE) {
                 glyph.xAdvance = 0;
                 glyph.yAdvance = 0;
             }

@@ -112,7 +112,8 @@ async function run(): Promise<void> {
 
         let published = false;
         try {
-            const rejected = await shapeComputeText(engine, inter, ["A\u20de"]);
+            const unsupported = await loadComputeFont("/fonts/test-unsupported-reverse-chain.ttf");
+            const rejected = await shapeComputeText(engine, unsupported, ["AB"]);
             published = rejected.length > 0;
         } catch (error) {
             results.rejected = true;

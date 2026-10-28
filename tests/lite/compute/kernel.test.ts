@@ -17,7 +17,7 @@ import { computeStorageBufferBinding } from "../../../packages/babylon-lite/src/
 import { createStorageBuffer, disposeStorageBuffer, readStorageBuffer } from "../../../packages/babylon-lite/src/resource/storage-buffer";
 import { assertNativeClean, nativeHarness } from "./native";
 import type { NativeHarness } from "./native";
-import { compare, fixture, fields } from "./fixtures";
+import { compare, fixture, fields, expectedFields, expectedFromReport } from "./fixtures";
 import { syntheticFont } from "./synthetic";
 
 describe("native production action modes and bounded admission", () => {
@@ -37,7 +37,7 @@ describe("native production action modes and bounded admission", () => {
 
     it.each([
         ["pair-first", 3],
-        ["pair-second", 2],
+        ["pair-second", 0],
     ] as const)("proves disjoint pair commits but preserves nonzero second-advance ordering: %s", async (kind, capability) => {
         const font = syntheticFont(kind);
         const program = compileComputeTextProgram(createComputeTextPlan(font.font, selectComputeTextRun("ABC")));
@@ -59,7 +59,7 @@ describe("native production action modes and bounded admission", () => {
         ];
         const result = await shapeComputeText(native.engine, font.font, texts);
         result.forEach((glyphs, run) => compare(font, texts[run]!, glyphs));
-        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("return bits & witnesses;");
+        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("rootPresence[word] = bits & witnesses;");
     });
 
     it("finishes proven nominal/pair runs without executing the complete mutation kernel and retains contextual fallback", async () => {
@@ -167,10 +167,7 @@ describe("native production action modes and bounded admission", () => {
                           [2, 0, 200, 0, 0, 0],
                           [3, 1, 300, 0, 0, 0],
                       ]
-                    : [
-                          [1, 0, 100, 0, 0, 0],
-                          [2, 1, 0, 0, 20, 40],
-                      ]
+                    : expectedFields(font, texts[0]!)
         );
     });
 
@@ -183,10 +180,9 @@ describe("native production action modes and bounded admission", () => {
     it("refreshes root presence after a nested Arabic substitution activates positioning", async () => {
         const font = fixture("NotoSansArabic-Regular.ttf");
         const result = await shapeComputeText(native.engine, font.font, "ج");
-        expect(result.map(fields)).toEqual([
-            [316, 0, 0, 0, 203, 2],
-            [27, 0, 589, 0, 0, 0],
-        ]);
+        expect(result.map(fields)).toEqual(
+            expectedFromReport("tests/lite/compute/kernel.test.ts#refreshes root presence after a nested Arabic substitution activates positioning:NotoSansArabic-Regular.ttf:0")
+        );
         compare(font, "ج", result);
         compare(font, "جج", await shapeComputeText(native.engine, font.font, "جج"));
     });
@@ -345,7 +341,9 @@ describe("native production action modes and bounded admission", () => {
         });
         const packed = prepareComputeTextShapeWords(plan, input);
         expect(packed.runs.length).toBe(9);
-        expect([...packed.runs]).toEqual([3, 6, 8, 2, input[0]!.glyphIds[0], input[0]!.glyphIds[1], 1, input[1]!.glyphIds[0], 0]);
+        // Header bit 31: no GDEF mark glyph in the run.
+        const markFree = 0x80000000;
+        expect([...packed.runs]).toEqual([3, 6, 8, (2 | markFree) >>> 0, input[0]!.glyphIds[0], input[0]!.glyphIds[1], (1 | markFree) >>> 0, input[1]!.glyphIds[0], markFree]);
         const result = await shapeComputeText(native.engine, font.font, texts);
         result.forEach((run, index) => compare(font, texts[index]!, run));
         expect(result[0]?.map((glyph) => glyph.cluster)).toEqual([0, 1]);
@@ -373,8 +371,8 @@ describe("native production action modes and bounded admission", () => {
     });
 
     it("GPOS point-anchor rejection identifies its table and original run after empty-run filtering", async () => {
-        const font = syntheticFont("point-anchor");
-        await expect(shapeComputeText(native.engine, font.font, ["", "B", "AB"])).rejects.toThrow(/run 2 unsupported GPOS 0/);
+        const font = syntheticFont("contour-anchor");
+        await expect(shapeComputeText(native.engine, font.font, ["", "B", "ABC"])).rejects.toThrow(/run 2 unsupported GPOS 0/);
         compare(font, "B", await shapeComputeText(native.engine, font.font, "B"));
     });
 

@@ -27,7 +27,7 @@ import * as nominalMapping from "../../../packages/babylon-lite/src/text/compute
 import * as closure from "../../../packages/babylon-lite/src/text/compute-text-closure";
 import * as glyphExtraction from "../../../packages/babylon-lite/src/text/compute-glyph-extraction";
 import { awaitComputeTextUpdate } from "./await-update";
-import { fixture, oracleFields } from "./fixtures";
+import { fixture, expectedFields } from "./fixtures";
 import { syntheticFont } from "./synthetic";
 import type { Fixture } from "./fixtures";
 import { assertNativeClean, nativeHarness } from "./native";
@@ -180,7 +180,7 @@ async function verifyLayout(data: ComputeTextData, face: Fixture, paragraphs: re
     let globalLine = 0;
     paragraphs.forEach((text, p) => {
         const slotIndex = stage._words[16 + p]!;
-        const records = oracleFields(face, text);
+        const records = expectedFields(face, text);
         const flags = sourceFlags(face, text);
         const expected = referenceLines(records, flags, scale, width);
         expect([...shape.slice(slotIndex * stride, slotIndex * stride + 2)], `${p}: shaped status/count`).toEqual([0, records.length]);

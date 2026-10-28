@@ -1,0 +1,174 @@
+{
+    "schema": 1,
+    "policy": "One shared GPU semantics implementation, not oracle modes. Canonical cases below are evidence links, not exception/waiver lists. Every reviewed input is identity/script/direction keyed and all six fields are checked; U rows still use live text-shaper. Report flags are conservative exposure evidence, not proof that each flagged primitive discriminates that input.",
+    "reviewedBy": "Phase1 Tech Lead reviews and external coordinator-phase1-clearance.json; D10 option A user approval in goals.md",
+    "date": "2026-10-23",
+    "entries": [
+        {
+            "id": "C1",
+            "cases": ["c1-mark-base-0", "c1-mark-base-1", "c1-mark-mark-chain-0"],
+            "correction": "C1",
+            "referenceBehaviour": "Legacy offsets are anchor-origin-relative and attached-chain geometry is wrong.",
+            "liteBehaviour": "Pen-relative attachment links, final root-relative propagation, and zero advances only for actually attached glyphs in every profile.",
+            "evidence": [
+                "synthetic-harfbuzz-11.0.1.json",
+                "existing-impact-report.json (diagnostic, not committed; identity in reference-identity.json)",
+                "phase1-r1-r3-lead-review.md"
+            ],
+            "replacementWitnesses": ["c1-mark-base-0", "c1-mark-mark-chain-0", "contour-anchor"]
+        },
+        {
+            "id": "C2",
+            "cases": ["c2-filter-set-0", "c2-filter-set-1"],
+            "correction": "C2",
+            "referenceBehaviour": "UseMarkFilteringSet is not applied with its selected coverage.",
+            "liteBehaviour": "Filtering-set membership and lookup flags use shared skip semantics.",
+            "evidence": ["synthetic-harfbuzz-11.0.1.json"],
+            "replacementWitnesses": ["c2-filter-set-0"]
+        },
+        {
+            "id": "C3",
+            "cases": ["c3-pair-placement-0", "c3-pair-value2-0", "tests/lite/compute/milestones.test.ts#Hebrew and Arabic:NotoSansHebrew-Regular.ttf:0"],
+            "correction": "C3",
+            "referenceBehaviour": "Pair placement/value2 fields and consuming format-2 continuation are incomplete.",
+            "liteBehaviour": "Both complete horizontal values and the correct continuation are executed.",
+            "evidence": ["synthetic-harfbuzz-11.0.1.json", "existing-impact-report.json (diagnostic, not committed; identity in reference-identity.json)"],
+            "replacementWitnesses": ["c3-pair-placement-0", "c3-pair-value2-0"]
+        },
+        {
+            "id": "C4",
+            "cases": [
+                "c4-nested-ligature-0",
+                "c4-nested-multiple-0",
+                "tests/lite/compute/milestones.test.ts#fail-closed corpus:Inter.ttf:0",
+                "tests/lite/compute/milestones.test.ts#fail-closed corpus:Inter.ttf:1",
+                "tests/lite/compute/milestones.test.ts#fail-closed corpus:Inter.ttf:2"
+            ],
+            "correction": "C4",
+            "referenceBehaviour": "Nested actions are reduced to direct singles or rejected.",
+            "liteBehaviour": "Table-tagged nested actions use the matched sequence after each earlier action.",
+            "evidence": [
+                "synthetic-harfbuzz-11.0.1.json",
+                "existing-impact-report.json (diagnostic, not committed; identity in reference-identity.json)",
+                "production-p1-p2-lead-review.md"
+            ],
+            "replacementWitnesses": ["c4-nested-ligature-0", "c4-nested-multiple-0", "reverse-chain-0", "nested-context-0", "segment-reject"]
+        },
+        {
+            "id": "C5",
+            "cases": ["c5-context-format3-0"],
+            "correction": "C5",
+            "referenceBehaviour": "Context format-3 semantics are incomplete.",
+            "liteBehaviour": "Every context input/backtrack/lookahead coverage is matched with shared predicates.",
+            "evidence": ["synthetic-harfbuzz-11.0.1.json", "arabic-harfbuzz-11.0.1.json"],
+            "replacementWitnesses": ["c5-context-format3-0", "nested-context-0"]
+        },
+        {
+            "id": "C6",
+            "cases": ["c6-context-pos-0"],
+            "correction": "C6",
+            "referenceBehaviour": "Contextual GPOS is unsupported.",
+            "liteBehaviour": "Contextual GPOS invokes the shared position actions at the matched position.",
+            "evidence": ["synthetic-harfbuzz-11.0.1.json"],
+            "replacementWitnesses": ["c6-context-pos-0", "cursive-0"]
+        },
+        {
+            "id": "C7",
+            "cases": ["c7-ligature-across-mark-0"],
+            "correction": "C7",
+            "referenceBehaviour": "Skipped glyphs inside a consumed ligature span retain unrelated clusters.",
+            "liteBehaviour": "The full span merges to the minimum cluster, including skipped marks.",
+            "evidence": ["synthetic-harfbuzz-11.0.1.json", "existing-impact-report.json (diagnostic, not committed; identity in reference-identity.json) G0 proofs"],
+            "replacementWitnesses": ["c7-ligature-across-mark-0"]
+        },
+        {
+            "id": "C8",
+            "cases": [
+                "c8-mark-ligature-0",
+                "c8-mark-ligature-1",
+                "c8-mark-mark-components-0",
+                "c8-mark-mark-components-1",
+                "tests/lite/compute/kernel.test.ts#actual WGSL mode mark-ligature:synthetic:mark-ligature:0"
+            ],
+            "correction": "C8",
+            "referenceBehaviour": "Component selection and MarkMark component identity are incomplete.",
+            "liteBehaviour": "Ligature identities/components propagate; no matching ligature ID selects the last component. Contour anchors still reject when actually selected.",
+            "evidence": [
+                "synthetic-harfbuzz-11.0.1.json",
+                "existing-impact-report.json (diagnostic, not committed; identity in reference-identity.json)",
+                "synthetic.ts contour-anchor table"
+            ],
+            "replacementWitnesses": ["c8-mark-ligature-0", "c8-mark-mark-components-0", "contour-anchor"]
+        },
+        {
+            "id": "C9",
+            "cases": ["arabic-isolated-0", "arabic-joining-1", "arabic-transparent-2", "arabic-long-600"],
+            "correction": "C9",
+            "referenceBehaviour": "The legacy Arabic joining pass misassigns isolated/final/medial/initial forms.",
+            "liteBehaviour": "GPU chunk-carry joining from pinned Unicode16 properties; one-hot masks and Arabic feature stages in the same lookup family.",
+            "evidence": ["arabic-harfbuzz-11.0.1.json", "existing-impact-report.json (diagnostic, not committed; identity in reference-identity.json)"],
+            "replacementWitnesses": ["c5-context-format3-0"]
+        },
+        {
+            "id": "C10",
+            "cases": ["arabic-stacked-0", "arabic-c10-0", "arabic-c10-1", "arabic-c10-2", "arabic-c10-3", "arabic-c10-4", "arabic-c10-5", "arabic-c10-6"],
+            "correction": "C10",
+            "referenceBehaviour": "The unsorted stacked Arabic marks have a real MarkMark geometry defect, not a different representation.",
+            "liteBehaviour": "GPU bounded modified-CCC/MCM stable ordering and span cluster merges before lookups. Runs over 32 marks remain unchanged per the approved cap.",
+            "evidence": ["arabic-harfbuzz-11.0.1.json", "phase1-r1-r3-lead-review.md"],
+            "replacementWitnesses": ["c1-mark-mark-chain-0"]
+        },
+        {
+            "id": "attached-only-advance",
+            "cases": ["c1-mark-mark-chain-0"],
+            "reason": "HarfBuzz GDEF-wide mark advance zeroing is not the approved product contract.",
+            "referenceBehaviour": "HB may zero a nonzero hmtx advance for an unattached class-3 glyph.",
+            "liteBehaviour": "N-proof/G0 use the font-table derivations and A-attach uses old independent records plus widths/pen-relative transforms. Every field remains exact; no general class-3 exemption.",
+            "evidence": [
+                "existing-impact-report.json (diagnostic, not committed; identity in reference-identity.json): exactly 3 N-proof, 3 G0, 3 A-attach rows",
+                "phase1-r1-r3-lead-review.md"
+            ],
+            "replacementWitnesses": ["c1-mark-mark-chain-0"]
+        },
+        {
+            "id": "arabic-font-admission",
+            "cases": [],
+            "reason": "D10 option A: first-increment GPU support boundary, not a claim that other fonts are invalid.",
+            "referenceBehaviour": "Other shapers can use presentation-form or AAT fallback.",
+            "liteBehaviour": "After nominal mapping, reject Arabic plans without selected joining features. Preserve unmapped error precedence and suppress all publication. No presentation-form/AAT fallback.",
+            "evidence": ["goals.md D10 approval", "compute-text-follow-ups.md CTF-01"],
+            "replacementWitnesses": ["arabic-no-joining"]
+        }
+    ],
+    "publicCoverage": [
+        { "correction": "C1", "font": "Inter.ttf", "text": "A̦", "scope": "public exact mark attachment; all six fields use the cleared H record" },
+        { "correction": "C1", "font": "Roboto-Regular.ttf", "text": "A̦", "scope": "public exact C1 arithmetic record" },
+        {
+            "correction": "C2",
+            "scope": "No isolated public real-font claim. Filtering-set roots are exposed by Inter rows; discrimination is the internal PUA c2-filter-set witnesses."
+        },
+        { "correction": "C3", "font": "NotoSansHebrew-Regular.ttf", "text": "שלום", "scope": "public full pair values, including Hebrew placement; exact H record" },
+        {
+            "correction": "C4",
+            "font": "Inter.ttf",
+            "text": "A⃞",
+            "scope": "public nested ligature, root 6/rule 0, exact cleared positive; also A⃝ root 9/rule 0 and <- root 48/rule 2"
+        },
+        { "correction": "C5", "font": "Inter.ttf", "text": "A⃞", "scope": "public format-3 context, co-exercised with C4; not an isolated primitive" },
+        { "correction": "C6", "scope": "No public real-font positive claimed. Internal PUA c6-context-pos is exact primitive evidence." },
+        {
+            "correction": "C7",
+            "scope": "The public Inter nested ligatures exercise ordinary span merges. The discriminating skipped-mark span is internal c7-ligature-across-mark; G0 long-run records are exact."
+        },
+        {
+            "correction": "C8",
+            "scope": "No isolated public real-font component claim. Actual Arabic records traverse the shared attachment machinery, but component discrimination remains internal c8 witnesses and the cleared non-PUA legacy mark-ligature rows."
+        }
+    ],
+    "limits": [
+        "The 11 PUA primitive witnesses execute internal GPU semantics; public admission is deliberately unchanged.",
+        "Inter root 48/rule 3 has no admitted cmap context. No font or admission mutation is used to claim it as public coverage.",
+        "RTL/Arabic uses the proven whole-run path; CTF-14 tracks RTL segmentation/stitch proof. Structural executor eligibility is not a speed claim.",
+        "No residual X treatment or unchecked-field exemption exists."
+    ]
+}

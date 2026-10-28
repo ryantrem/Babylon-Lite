@@ -11,6 +11,7 @@ import * as extraction from "../../../packages/babylon-lite/src/text/compute-gly
 import * as actions from "../../../packages/babylon-lite/src/text/font-parser/layout-actions";
 import type { ParsedSubtable } from "../../../packages/babylon-lite/src/text/font-parser/layout-actions";
 import { coverageIndex } from "../../../packages/babylon-lite/src/text/font-parser/opentype-layout";
+import { syntheticFont } from "../compute/synthetic";
 
 function load(file = "Roboto-Regular.ttf"): ComputeFont {
     const bytes = readFileSync(`lab/public/fonts/${file}`);
@@ -146,6 +147,19 @@ function outputsOf(font: ComputeFont, lookupIndex: number, subtableIndex: number
 
 describe("text-independent ordered closure memo", () => {
     afterEach(() => vi.restoreAllMocks());
+
+    it.each([
+        ["c4-nested-multiple", [1, 2, 3], [7, 8, 9]],
+        ["c4-nested-ligature", [1, 2, 3], [6]],
+    ] as const)("includes nested %s outputs through the selected dependency closure", (kind, seeds, outputs) => {
+        const face = syntheticFont(kind);
+        const plan = createComputeTextPlan(face.font, selectComputeTextRun("ABC"));
+        expect(plan._gsubRoots).toEqual([0]);
+        expect(plan._gsubDependencies.length).toBeGreaterThan(0);
+        const closure = closeComputeTextGlyphs(face.font, [plan], seeds).glyphIds;
+        outputs.forEach((glyph) => expect(closure).toContain(glyph));
+        expect(closure).toEqual(reference(face.font, [plan], seeds));
+    });
 
     it.each(["Inter.ttf", "Roboto-Regular.ttf"])("matches the unmemoized traversal for many seeds and plan orders: %s", (file) => {
         const font = load(file);

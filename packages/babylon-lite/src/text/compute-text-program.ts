@@ -2,15 +2,16 @@
  *
  *  Packed words keep the lab's eight-word lookup descriptors and sixteen-word rule
  *  descriptors. Mode 5 is a fail-if-matched rejection, never a successful skip.
- *  Mode 6 is the lab's HarfBuzz nested-cardinality policy and is never emitted.
  *  A VariationIndex whose default-coordinate delta is zero is ignored and the design
  *  value is used. A nonzero default delta stays a rejection; it is not evaluated into
  *  the action. ppem devices are not evaluated: text-shaper 0.1.28 applies the design
- *  value and this plan has no ppem. Contour anchors stay rejected. UseMarkFilteringSet
- *  is recognized and ignored, matching text-shaper 0.1.28 rather than a HarfBuzz filter.
+ *  value and this plan has no ppem. Contour anchors stay rejected.
+ *  v3 has a 16-word header and four-word roots. Header 10/12 are stage origin/count,
+ *  11 is reserved zero, 13 is presence words/glyph, 14 is the optional profile section.
+ *  Pair actions encode both complete values; horizontal yAdvance words are reserved zero.
  *
  *  Lookup descriptor words, at `descriptorOffset + fontLookupIndex * 8`:
- *    0 kind, 1 flag, 2 cooperative capability, 3 rule origin, 4 rule count,
+ *    0 kind, 1 `flag | markFilteringSet << 16`, 2 cooperative capability, 3 rule origin, 4 rule count,
  *    5 expansion, 6 candidate origin, 7 ordered eligibility (low bits: 0 serial, 1 tiled, 2 bounded insertion; bit 2: forward-only GSUB).
  *  Rule words, 16 each:
  *    0 input origin, 1 input count, 2 backtrack origin, 3 backtrack count,
@@ -74,6 +75,7 @@ const USE_MARK_FILTERING_SET = 0x0010;
 const EMPTY_GLYPHS: readonly number[] = [];
 
 type ComputeProgramMarkBases = readonly { readonly glyphId: number; readonly x: number; readonly y: number }[];
+type ComputeProgramValue = Pick<ParsedValue, "xPlacement" | "yPlacement" | "xAdvance" | "yAdvance">;
 
 export interface ComputeGlyphPredicate {
     readonly kind: "glyphs" | "class";
@@ -87,15 +89,15 @@ export type ComputeProgramAction =
     | { readonly kind: "substitute"; readonly glyphs: readonly number[] }
     | { readonly kind: "multiple"; readonly glyphs: readonly number[] }
     | { readonly kind: "ligature"; readonly components: readonly number[]; readonly glyph: number }
-    | { readonly kind: "context"; readonly lookups: readonly { readonly sequenceIndex: number; readonly lookupIndex: number }[] }
-    | { readonly kind: "pair"; readonly secondGlyph: number; readonly firstXAdvance: number; readonly secondXAdvance: number; readonly applySecond: boolean }
+    | { readonly kind: "context"; readonly table: "GSUB" | "GPOS"; readonly lookups: readonly { readonly sequenceIndex: number; readonly lookupIndex: number }[] }
+    | { readonly kind: "pair"; readonly secondGlyph: number; readonly first: ComputeProgramValue; readonly second: ComputeProgramValue; readonly format2Nonzero: boolean }
     | {
           readonly kind: "class-pair";
           readonly class1: number;
           readonly class2: number;
-          readonly firstXAdvance: number;
-          readonly secondXAdvance: number;
-          readonly applySecond: boolean;
+          readonly first: ComputeProgramValue;
+          readonly second: ComputeProgramValue;
+          readonly format2Nonzero: boolean;
       }
     | { readonly kind: "adjust"; readonly xPlacement: number; readonly yPlacement: number; readonly xAdvance: number; readonly yAdvance: number }
     | {
@@ -114,7 +116,6 @@ export type ComputeProgramAction =
           readonly markX: number;
           readonly markY: number;
           readonly bases: ComputeProgramMarkBases;
-          readonly clearAdvance: boolean;
       }
     | { readonly kind: "reject"; readonly reason: string };
 
@@ -135,8 +136,7 @@ export interface ComputeProgramLookup {
     readonly ignoreLigatures: boolean;
     readonly ignoreMarks: boolean;
     readonly markAttachmentClass: number;
-    /** text-shaper 0.1.28 does not apply this flag. It is not a successful filter. */
-    readonly markFilteringSetIgnored: boolean;
+    readonly markFilteringSet: number;
     readonly rules: readonly ComputeProgramRule[];
     readonly expansion: number;
 }
@@ -155,6 +155,7 @@ export interface ComputeTextProgram {
     readonly maxExpansion: number;
     readonly maxPatternDepth: number;
     readonly maxDependencyDepth: number;
+    readonly maxNestedRecords: number;
     readonly maxAbsAdjustment: number;
     readonly rejections: readonly ComputeProgramRejection[];
     readonly fullyExecutable: boolean;
@@ -192,7 +193,15 @@ export function compileComputeTextProgram(plan: ComputeTextPlan): ComputeTextPro
     order.forEach((key, index) => indexOf.set(key, index));
     const deltaOf = createDefaultVariationDelta(plan.font);
     const lookups = order.map((key) => compileLookup(parsed.get(key) as ParsedLookupActions, plan, parsed, deltaOf));
-    const rootOrder = [...plan._gsubRoots, ...plan._gposRoots].map((index, at) => indexOf.get(`${at < plan._gsubRoots.length ? "GSUB" : "GPOS"}/${index}`) ?? 0);
+    const rootOrder = plan._stages.flatMap((stage) =>
+        stage.roots.map((root) => {
+            const index = indexOf.get(`${stage.table}/${root.lookup}`);
+            if (index === undefined) {
+                throw new Error(`compileComputeTextProgram: stage root ${stage.table}/${root.lookup} is missing from the plan union`);
+            }
+            return index;
+        })
+    );
     const rejections = lookups.flatMap((lookup) =>
         lookup.rules
             .filter((rule) => rule.action.kind === "reject")
@@ -206,11 +215,15 @@ export function compileComputeTextProgram(plan: ComputeTextPlan): ComputeTextPro
     let maxExpansion = 1;
     let maxPatternDepth = 1;
     let maxAbsAdjustment = 0;
+    let maxNestedRecords = 0;
     for (const lookup of lookups) {
         maxExpansion = Math.max(maxExpansion, lookup.expansion);
         for (const rule of lookup.rules) {
             maxPatternDepth = Math.max(maxPatternDepth, rule.input.length, rule.backtrack.length, rule.lookahead.length);
             maxAbsAdjustment = Math.max(maxAbsAdjustment, adjustmentOf(rule));
+            if (rule.action.kind === "context") {
+                maxNestedRecords = Math.max(maxNestedRecords, rule.action.lookups.length);
+            }
         }
     }
     const maxDependencyDepth = lookups.some((lookup) => lookup.rules.some((rule) => rule.action.kind === "context")) ? 1 : 0;
@@ -222,6 +235,7 @@ export function compileComputeTextProgram(plan: ComputeTextPlan): ComputeTextPro
         maxExpansion,
         maxPatternDepth,
         maxDependencyDepth,
+        maxNestedRecords,
         maxAbsAdjustment,
         rejections,
         fullyExecutable: rejections.length === 0,
@@ -244,16 +258,29 @@ function compileLookup(
     if (parsed.lookupFlag & RESERVED_FLAG) {
         throw new Error(`compileComputeTextProgram: ${parsed.table} lookup ${parsed.lookupIndex} has reserved flag bits`);
     }
-    const applySecond = pairAppliesSecond(parsed, plan);
+    const markFilteringSet = parsed.markFilteringSet ?? 0;
+    if ((parsed.lookupFlag & USE_MARK_FILTERING_SET) !== 0 && !ensureComputeFontLayout(plan.font).gdef?.markGlyphSets[markFilteringSet]) {
+        throw new Error(`compileComputeTextProgram: ${parsed.table} lookup ${parsed.lookupIndex} mark filtering set ${markFilteringSet} is missing`);
+    }
     const forceReject = (parsed.lookupFlag & RIGHT_TO_LEFT) !== 0 ? "right-to-left lookup flag is not executed" : null;
-    // text-shaper 0.1.28's Context-3-only GSUB digest is empty; these roots never match.
-    const oracleInert =
-        parsed.table === "GSUB" && parsed.lookupType === 5 && parsed.subtables.every((subtable) => subtable.kind === "context" && !subtable.chaining && subtable.format === 3);
-    const candidates = parsed.subtables.flatMap((subtable) => compileSubtable(subtable, parsed, plan, all, applySecond, forceReject, deltaOf));
-    const rules = oracleInert ? candidates.filter((rule) => rule.mode === COMPUTE_RULE_MODE_REJECT) : candidates;
+    const rules = parsed.subtables.flatMap((subtable) => compileSubtable(subtable, parsed, plan, all, forceReject, deltaOf));
     let expansion = 1;
     for (const rule of rules) {
         expansion = Math.max(expansion, expansionOf(rule));
+        if (rule.input.length > 64) {
+            throw new Error(`compileComputeTextProgram: ${parsed.table} lookup ${parsed.lookupIndex} input exceeds 64 matched positions`);
+        }
+        if (rule.action.kind === "context") {
+            let nestedExpansion = 1;
+            for (const record of rule.action.lookups) {
+                const child = all.get(`${parsed.table}/${record.lookupIndex}`);
+                nestedExpansion *= Math.max(
+                    1,
+                    ...child!.subtables.flatMap((subtable) => (subtable.kind === "multiple" ? subtable.sequences.map((sequence) => sequence.length) : [1]))
+                );
+            }
+            expansion = Math.max(expansion, nestedExpansion);
+        }
     }
     return {
         table: parsed.table,
@@ -264,7 +291,7 @@ function compileLookup(
         ignoreLigatures: (parsed.lookupFlag & IGNORE_LIGATURES) !== 0,
         ignoreMarks: (parsed.lookupFlag & IGNORE_MARKS) !== 0,
         markAttachmentClass: (parsed.lookupFlag >> 8) & 0xff,
-        markFilteringSetIgnored: (parsed.lookupFlag & USE_MARK_FILTERING_SET) !== 0,
+        markFilteringSet,
         rules,
         expansion,
     };
@@ -275,7 +302,6 @@ function compileSubtable(
     lookup: ParsedLookupActions,
     plan: ComputeTextPlan,
     all: Map<string, ParsedLookupActions>,
-    applySecond: boolean,
     forceReject: string | null,
     deltaOf: (outer: number, inner: number) => number
 ): ComputeProgramRule[] {
@@ -310,13 +336,13 @@ function compileSubtable(
         );
     }
     if (forceReject) {
-        return rulesOf(subtable, lookup, plan, all, applySecond, deltaOf).map((rule) => ({
+        return rulesOf(subtable, lookup, plan, all, deltaOf).map((rule) => ({
             ...rule,
             action: { kind: "reject", reason: forceReject },
             mode: COMPUTE_RULE_MODE_REJECT,
         }));
     }
-    return rulesOf(subtable, lookup, plan, all, applySecond, deltaOf);
+    return rulesOf(subtable, lookup, plan, all, deltaOf);
 }
 
 function rulesOf(
@@ -324,7 +350,6 @@ function rulesOf(
     lookup: ParsedLookupActions,
     plan: ComputeTextPlan,
     all: Map<string, ParsedLookupActions>,
-    applySecond: boolean,
     deltaOf: (outer: number, inner: number) => number
 ): ComputeProgramRule[] {
     const glyphCount = plan.font.glyphCount;
@@ -361,7 +386,10 @@ function rulesOf(
         return subtable.rules.map((context) => {
             const nested = context.lookups.map((record) => {
                 const child = all.get(`${lookup.table}/${record.lookupListIndex}`);
-                const executable = child !== undefined && isExecutableSingle(child) && record.sequenceIndex < context.input.length;
+                if (record.sequenceIndex >= context.input.length) {
+                    throw new Error(`compileComputeTextProgram: sequence index ${record.sequenceIndex} exceeds context input length`);
+                }
+                const executable = child !== undefined && !(lookup.table === "GSUB" ? [5, 6] : [7, 8]).includes(child.lookupType);
                 return { record, executable, childType: child?.lookupType ?? -1 };
             });
             const input = context.input.map(toPredicate);
@@ -372,7 +400,11 @@ function rulesOf(
                     input,
                     backtrack,
                     lookahead,
-                    { kind: "context", lookups: context.lookups.map((record) => ({ sequenceIndex: record.sequenceIndex, lookupIndex: record.lookupListIndex })) },
+                    {
+                        kind: "context",
+                        table: lookup.table,
+                        lookups: context.lookups.map((record) => ({ sequenceIndex: record.sequenceIndex, lookupIndex: record.lookupListIndex })),
+                    },
                     COMPUTE_RULE_MODE_CONTEXT
                 );
             }
@@ -383,7 +415,7 @@ function rulesOf(
                 lookahead,
                 {
                     kind: "reject",
-                    reason: `nested ${lookup.table} lookup ${offender?.record.lookupListIndex} type ${offender?.childType} is not an executable single substitution`,
+                    reason: `nested contextual lookup ${offender?.record.lookupListIndex} is not executable`,
                 },
                 COMPUTE_RULE_MODE_REJECT
             );
@@ -398,7 +430,7 @@ function rulesOf(
         const rules: ComputeProgramRule[] = [];
         coverageGlyphs(subtable.coverage, glyphCount).forEach((glyphId, index) => {
             for (const pair of subtable.pairSets[index] ?? []) {
-                rules.push(pairRule([[glyphId], [pair.secondGlyph]], pair.value1, pair.value2, applySecond, lookup, pair.secondGlyph, deltaOf));
+                rules.push(pairRule([[glyphId], [pair.secondGlyph]], pair.value1, pair.value2, subtable.valueFormat2 !== 0, lookup, pair.secondGlyph, deltaOf));
             }
         });
         return rules;
@@ -408,7 +440,7 @@ function rulesOf(
         subtable.rows.forEach((row, class1) => {
             row.forEach((cell, class2) => {
                 const blocked = variationBlocks(cell.value1.variationIndexes, deltaOf) || variationBlocks(cell.value2.variationIndexes, deltaOf);
-                if (!blocked && cell.value1.xAdvance === 0 && cell.value2.xAdvance === 0) {
+                if (!blocked && !applicableValue(cell.value1) && !applicableValue(cell.value2)) {
                     return;
                 }
                 const input = [classPredicate(subtable.classDef1, class1, subtable.coverage), classPredicate(subtable.classDef2, class2, null)];
@@ -421,7 +453,14 @@ function rulesOf(
                         input,
                         [],
                         [],
-                        { kind: "class-pair", class1, class2, firstXAdvance: cell.value1.xAdvance, secondXAdvance: cell.value2.xAdvance, applySecond },
+                        {
+                            kind: "class-pair",
+                            class1,
+                            class2,
+                            first: horizontalValue(cell.value1),
+                            second: horizontalValue(cell.value2),
+                            format2Nonzero: subtable.valueFormat2 !== 0,
+                        },
                         COMPUTE_RULE_MODE_CLASS_PAIR
                     )
                 );
@@ -512,7 +551,6 @@ function rulesOf(
                     markX: mark.anchor.x,
                     markY: mark.anchor.y,
                     bases: entry.bases,
-                    clearAdvance: subtable.kind === "mark-base",
                 },
                 subtable.kind === "mark-base" ? COMPUTE_RULE_MODE_MARK_BASE : COMPUTE_RULE_MODE_MARK_MARK
             );
@@ -525,7 +563,7 @@ function pairRule(
     input: number[][],
     value1: ParsedValue,
     value2: ParsedValue,
-    applySecond: boolean,
+    format2Nonzero: boolean,
     lookup: ParsedLookupActions,
     secondGlyph: number,
     deltaOf: (outer: number, inner: number) => number
@@ -534,38 +572,22 @@ function pairRule(
     if (blocked) {
         return rule(input, [], [], { kind: "reject", reason: deviceReason(lookup, true) }, COMPUTE_RULE_MODE_REJECT);
     }
-    return rule(input, [], [], { kind: "pair", secondGlyph, firstXAdvance: value1.xAdvance, secondXAdvance: value2.xAdvance, applySecond }, COMPUTE_RULE_MODE_POSITION);
+    return rule(input, [], [], { kind: "pair", secondGlyph, first: horizontalValue(value1), second: horizontalValue(value2), format2Nonzero }, COMPUTE_RULE_MODE_POSITION);
 }
 
 function valueRule(input: number[], value: ParsedValue | undefined, lookup: ParsedLookupActions, deltaOf: (outer: number, inner: number) => number): ComputeProgramRule {
     if (!value || variationBlocks(value.variationIndexes, deltaOf)) {
         return rule([input], [], [], { kind: "reject", reason: deviceReason(lookup, true) }, COMPUTE_RULE_MODE_REJECT);
     }
-    return rule(
-        [input],
-        [],
-        [],
-        { kind: "adjust", xPlacement: value.xPlacement, yPlacement: value.yPlacement, xAdvance: value.xAdvance, yAdvance: value.yAdvance },
-        COMPUTE_RULE_MODE_ADJUST
-    );
+    return rule([input], [], [], { kind: "adjust", ...horizontalValue(value) }, COMPUTE_RULE_MODE_ADJUST);
 }
 
-function pairAppliesSecond(lookup: ParsedLookupActions, plan: ComputeTextPlan): boolean {
-    const hasGdef = ensureComputeFontLayout(plan.font).gdef !== null;
-    if (lookup.lookupFlag !== 0 && hasGdef) {
-        return true;
-    }
-    if (lookup.subtables.length === 1) {
-        return false;
-    }
-    if (lookup.subtables.length === 2 && lookup.subtables[0]?.kind === "pair" && lookup.subtables[1]?.kind === "class-pair") {
-        return false;
-    }
-    return lookup.lookupType === 2;
+function horizontalValue(value: ParsedValue): ComputeProgramValue {
+    return { xPlacement: value.xPlacement, yPlacement: value.yPlacement, xAdvance: value.xAdvance, yAdvance: 0 };
 }
 
-function isExecutableSingle(lookup: ParsedLookupActions): boolean {
-    return lookup.lookupType === 1 && lookup.subtables.every((subtable) => subtable.kind === "single") && (lookup.lookupFlag & (RIGHT_TO_LEFT | RESERVED_FLAG)) === 0;
+function applicableValue(value: ComputeProgramValue): boolean {
+    return value.xPlacement !== 0 || value.yPlacement !== 0 || value.xAdvance !== 0;
 }
 
 function variationBlocks(indexes: readonly VariationDeviceIndex[], deltaOf: (outer: number, inner: number) => number): boolean {
@@ -641,7 +663,7 @@ function adjustmentOfBases(bases: ComputeProgramMarkBases): number {
 function adjustmentOf(ruleRecord: ComputeProgramRule): number {
     const action = ruleRecord.action;
     if (action.kind === "pair" || action.kind === "class-pair") {
-        return Math.max(Math.abs(action.firstXAdvance), action.applySecond ? Math.abs(action.secondXAdvance) : 0);
+        return Math.max(...[action.first, action.second].flatMap((value) => [Math.abs(value.xPlacement), Math.abs(value.yPlacement), Math.abs(value.xAdvance)]));
     }
     if (action.kind === "adjust") {
         return Math.max(Math.abs(action.xPlacement), Math.abs(action.yPlacement), Math.abs(action.xAdvance), Math.abs(action.yAdvance));
@@ -808,26 +830,15 @@ function packProgram(
             for (let index = 0; index < action.lookups.length; index++) {
                 const item = action.lookups[index]!;
                 words[origin + 1 + index * 2] = item.sequenceIndex;
-                words[origin + 2 + index * 2] = item.lookupIndex;
+                words[origin + 2 + index * 2] = item.lookupIndex | (action.table === "GPOS" ? 0x10000 : 0);
             }
             return { origin, length: 1 + action.lookups.length * 2 };
         }
         if (action.kind === "pair") {
-            const origin = reserve(4);
-            words[origin] = action.secondGlyph;
-            words[origin + 1] = action.firstXAdvance >>> 0;
-            words[origin + 2] = action.secondXAdvance >>> 0;
-            words[origin + 3] = action.applySecond ? 1 : 0;
-            return { origin, length: 4 };
+            return { origin: append([action.secondGlyph, ...valueWords(action.first), ...valueWords(action.second), Number(action.format2Nonzero)]), length: 10 };
         }
         if (action.kind === "class-pair") {
-            const origin = reserve(5);
-            words[origin] = action.class1;
-            words[origin + 1] = action.class2;
-            words[origin + 2] = action.firstXAdvance >>> 0;
-            words[origin + 3] = action.secondXAdvance >>> 0;
-            words[origin + 4] = action.applySecond ? 1 : 0;
-            return { origin, length: 5 };
+            return { origin: append([action.class1, action.class2, ...valueWords(action.first), ...valueWords(action.second), Number(action.format2Nonzero)]), length: 11 };
         }
         if (action.kind === "adjust") {
             const origin = reserve(4);
@@ -891,18 +902,41 @@ function packProgram(
         }
         return { origin: 0, length: 0 };
     };
-    const headerOrigin = reserve(10);
+    const headerOrigin = reserve(16);
     words[headerOrigin] = 0x43545031;
-    words[headerOrigin + 1] = 2;
-    words[headerOrigin + 2] = plan._gsubRoots.length;
-    words[headerOrigin + 3] = plan._gposRoots.length;
+    words[headerOrigin + 1] = 3;
+    words[headerOrigin + 2] = plan._stages.filter((stage) => stage.table === "GSUB").reduce((sum, stage) => sum + stage.roots.length, 0);
+    words[headerOrigin + 3] = rootOrder.length - words[headerOrigin + 2]!;
     words[headerOrigin + 4] = 0;
     words[headerOrigin + 5] = 0;
     words[headerOrigin + 6] = 0;
     words[headerOrigin + 7] = 0;
     words[headerOrigin + 8] = 0;
     words[headerOrigin + 9] = rootOrder.length;
-    const rootOrigin = append(rootOrder);
+    const rootOrigin = reserve(rootOrder.length * 4);
+    const rootRecords = plan._stages.flatMap((stage, stageIndex) => stage.roots.map((root) => ({ ...root, stageIndex })));
+    rootOrder.forEach((index, root) => {
+        const lookup = lookups[index]!;
+        words[rootOrigin + root * 4] = lookup.lookupIndex | (lookup.table === "GPOS" ? 0x10000 : 0);
+        words[rootOrigin + root * 4 + 1] = rootRecords[root]!.mask;
+        words[rootOrigin + root * 4 + 2] = rootRecords[root]!.flags;
+        words[rootOrigin + root * 4 + 3] = rootRecords[root]!.stageIndex;
+    });
+    let firstRoot = 0;
+    words[10] = append(
+        plan._stages.flatMap((stage) => {
+            const words = [
+                stage.table === "GPOS" ? 1 : 0,
+                firstRoot,
+                stage.roots.length,
+                ["none", "setupSyllables", "initialReorder", "finalReorder", "clearSyllables"].indexOf(stage.pause),
+            ];
+            firstRoot += stage.roots.length;
+            return words;
+        })
+    );
+    words[12] = plan._stages.length;
+    words[13] = Math.ceil(Math.min(rootOrder.length, 256) / 32);
     const gsubCapacity = capacity(lookups, "GSUB");
     const gposCapacity = capacity(lookups, "GPOS");
     const gsubDescriptorOffset = reserve(gsubCapacity * COMPUTE_PROGRAM_LOOKUP_WORDS);
@@ -989,16 +1023,26 @@ function packProgram(
         }
         const base = (lookup.table === "GSUB" ? gsubDescriptorOffset : gposDescriptorOffset) + lookup.lookupIndex * COMPUTE_PROGRAM_LOOKUP_WORDS;
         words[base + COMPUTE_LOOKUP_KIND] = lookup.lookupType;
-        words[base + COMPUTE_LOOKUP_FLAG] = lookup.lookupFlag;
+        words[base + COMPUTE_LOOKUP_FLAG] = lookup.lookupFlag | (lookup.markFilteringSet << 16);
         const independent = lookup.rules.every((rule) => rule.backtrack.length === 0 && rule.lookahead.length === 0);
         words[base + COMPUTE_LOOKUP_MEMBERSHIP] =
             lookup.table === "GSUB" && independent && lookup.rules.every((rule) => rule.input.length === 1 && (rule.mode === 1 || rule.mode === 5))
                 ? 1
-                : lookup.table === "GPOS" && independent && lookup.rules.every((rule) => rule.input.length === 2 && (rule.mode === 3 || rule.mode === 4 || rule.mode === 5))
+                : lookup.table === "GPOS" &&
+                    independent &&
+                    lookup.rules.every(
+                        (rule) =>
+                            rule.input.length === 2 &&
+                            (rule.mode === 3 || rule.mode === 4 || rule.mode === 5) &&
+                            (rule.action.kind === "reject" || ((rule.action.kind === "pair" || rule.action.kind === "class-pair") && !rule.action.format2Nonzero))
+                    )
                   ? lookup.rules.every(
                         (rule) =>
                             rule.action.kind === "reject" ||
-                            ((rule.action.kind === "pair" || rule.action.kind === "class-pair") && (!rule.action.applySecond || rule.action.secondXAdvance === 0))
+                            ((rule.action.kind === "pair" || rule.action.kind === "class-pair") &&
+                                !applicableValue(rule.action.second) &&
+                                rule.action.first.xPlacement === 0 &&
+                                rule.action.first.yPlacement === 0)
                     )
                       ? 3
                       : 2
@@ -1043,17 +1087,19 @@ function packProgram(
             }
         }
         words[base + COMPUTE_LOOKUP_CANDIDATES] = candidateOrigin;
-        const orderedModes = lookup.table === "GSUB" ? [1, 2, 5, 9, 11] : [3, 4, 5, 7, 8, 10, 12];
-        const ordered = lookup.rules.every((rule) => orderedModes.includes(rule.mode)) ? (lookup.rules.some((rule) => rule.mode === 11) ? 2 : 1) : 0;
+        const orderedModes = lookup.table === "GSUB" ? [1, 2, 5, 9, 11] : [2, 3, 4, 5, 7, 8, 10, 12];
+        const ordered = lookup.rules.every((rule) => orderedModes.includes(rule.mode)) ? (lookup.expansion > 1 ? 2 : 1) : 0;
         words[base + COMPUTE_LOOKUP_ORDERED] = ordered | (ordered && lookup.table === "GSUB" && lookup.rules.every((rule) => rule.backtrack.length === 0) ? 4 : 0);
     }
-    const rootWitnesses = new Uint32Array(plan.font.glyphCount);
-    let unconditional = 0;
-    rootOrder.slice(0, 32).forEach((index, root) => {
+    const presenceWords = words[13]!;
+    const rootWitnesses = new Uint32Array(plan.font.glyphCount * presenceWords);
+    const unconditional = new Uint32Array(presenceWords);
+    rootOrder.slice(0, 256).forEach((index, root) => {
         const lookup = lookups[index]!;
-        const bit = 1 << root;
+        const bit = 1 << (root % 32);
+        const word = root >>> 5;
         if (lookup.table !== "GSUB" || lookup.rules.some((rule) => rule.input.length < 2 && rule.backtrack.length === 0 && rule.lookahead.length === 0)) {
-            unconditional |= bit;
+            unconditional[word]! |= bit;
             return;
         }
         for (const rule of lookup.rules) {
@@ -1068,12 +1114,21 @@ function packProgram(
                 throw new Error("compileComputeTextProgram: missing necessary predicate witness");
             }
             for (const glyph of witness) {
-                rootWitnesses[glyph] = (rootWitnesses[glyph]! | bit) >>> 0;
+                const at = glyph * presenceWords + word;
+                rootWitnesses[at] = (rootWitnesses[at]! | bit) >>> 0;
             }
         }
     });
-    for (let glyph = 0; glyph < rootWitnesses.length; glyph++) {
-        rootWitnesses[glyph] = (rootWitnesses[glyph]! | unconditional) >>> 0;
+    for (let at = 0; at < rootWitnesses.length; at++) {
+        rootWitnesses[at] = (rootWitnesses[at]! | unconditional[at % presenceWords]!) >>> 0;
+    }
+
+    function valueWords(value: ComputeProgramValue): readonly number[] {
+        return [value.xPlacement, value.yPlacement, value.xAdvance, 0];
+    }
+    const profile = plan._profileData?.tables();
+    if (profile?.length) {
+        words[14] = append(profile);
     }
     return { words: words.slice(0, length), rootWitnesses, gsubDescriptorOffset, gposDescriptorOffset, classTables: classDefs };
 }

@@ -10,7 +10,7 @@ import { closeComputeTextGlyphs } from "../../../packages/babylon-lite/src/text/
 import { prepareComputeTextShapeWords } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape";
 import { executeResidentComputeText, releaseResidentComputeText } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-resident";
 import { clearTextPipelineCache, getOrCreateTextPipeline } from "../../../packages/babylon-lite/src/text/_gpu/text-pipeline";
-import { fixture, GREEK, CYRILLIC, oracleFields } from "./fixtures";
+import { fixture, GREEK, CYRILLIC, oracleFields, expectedFields } from "./fixtures";
 import type { Fixture } from "./fixtures";
 import { assertNativeClean, nativeHarness } from "./native";
 import type { NativeHarness } from "./native";
@@ -43,7 +43,7 @@ async function verifyResident(data: ComputeTextData, font: Fixture, texts: reado
     const scale = Math.fround(data.fontSizePx / font.font.unitsPerEm);
     let visible = 0;
     texts.forEach((text, run) => {
-        const expected = oracleFields(font, text);
+        const expected = expectedFields(font, text);
         expect([...shaped.slice(run * stride, run * stride + 2)], `${text}: status/count`).toEqual([0, expected.length]);
         let x = 0;
         let y = 0;
@@ -430,7 +430,11 @@ describe("native M1–3 resident production shaping and packing", () => {
     it("rejection clears every indirect word and recovery keeps the caller atlas", async () => {
         const font = fixture("Inter.ttf");
         const data = block(font, "failure");
-        for (const text of ["A\u20de", "A\u20dd", "<-", "\n", "Aא", "\ud800", "😀"]) {
+        for (const text of ["A\u20de", "A\u20dd", "<-"]) {
+            await updateComputeTextData(data, ["A", text]);
+            await verifyResident(data, font, ["A", text]);
+        }
+        for (const text of ["\n", "Aא", "\ud800", "😀"]) {
             await updateComputeTextData(data, ["A"]);
             await expect(updateComputeTextData(data, ["A", text])).rejects.toThrow();
             expect([...new Uint32Array(await readStorageBuffer(data._indirect))]).toEqual([6, 0, 0, 0]);
@@ -438,6 +442,25 @@ describe("native M1–3 resident production shaping and packing", () => {
         }
         await updateComputeTextData(data, ["B"]);
         await verifyResident(data, font, ["B"]);
+        for (const [kind, text] of [
+            ["alternate", "AB"],
+            ["reverse-chain", "AB"],
+            ["nested-context", "AB"],
+            ["contour-anchor", "ABC"],
+        ] as const) {
+            const negative = syntheticFont(kind);
+            const rejected = block(negative, `failure-${kind}`);
+            await updateComputeTextData(rejected, ["B"]);
+            const reason =
+                kind === "reverse-chain"
+                    ? /closure cannot see GSUB lookup 0 subtable 0 output for glyph 1 \(GSUB reverse chaining is not executed\)/
+                    : /updateComputeTextData: unsupported lookup/;
+            await expect(updateComputeTextData(rejected, ["", "B", text])).rejects.toThrow(reason);
+            expect([...new Uint32Array(await readStorageBuffer(rejected._indirect))]).toEqual([6, 0, 0, 0]);
+            expect(rejected.status).toBe("ready");
+            await updateComputeTextData(rejected, ["B"]);
+            await verifyResident(rejected, negative, ["B"]);
+        }
     });
 
     it("transitive selected GSUB closure installs empty-outline outputs, never phantom instances", async () => {

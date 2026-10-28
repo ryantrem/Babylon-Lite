@@ -6,17 +6,17 @@ import type { StorageBuffer } from "../resource/storage-buffer.js";
 import type { ComputeFont } from "./compute-font.js";
 import { mapComputeFontScalars } from "./compute-font.js";
 import { closeComputeTextGlyphs } from "./compute-text-closure.js";
-import { createComputeTextPlan } from "./compute-text-plan.js";
+import { createComputeTextPlan, ensureComputeTextProfile, profileSupport, validateComputeTextPlanFont } from "./compute-text-plan.js";
 import { segmentComputeTextRuns } from "./compute-text-segment.js";
 import type { ComputeTextInputSlab, ComputeTextRunSelection } from "./compute-text-selection.js";
-import { createComputeTextInputSlab, selectComputeTextRun } from "./compute-text-selection.js";
+import { computeTextRequiredProfiles, createComputeTextInputSlab, selectComputeTextRun } from "./compute-text-selection.js";
 import { extractComputeGlyphCurves } from "./compute-glyph-extraction.js";
 import { updateGlyphStorage } from "./glyph-storage.js";
 import type { CurveSetId, GlyphCurves, GlyphStorage } from "./glyph-storage.js";
 import { TEXT_INSTANCE_BYTES, TEXT_STYLE_BYTES, TEXT_STYLE_FLOATS } from "./text-buffer-layout.js";
 import { appendSharedAtlasGpu, ensureSharedAtlasGpu } from "./_gpu/text-textures.js";
 import { createStyleBuffer } from "./_gpu/text-style-buffer.js";
-import { COMPUTE_TEXT_HEADER_WORDS, COMPUTE_TEXT_RECORD_WORDS, computeTextShapeCapacity } from "./_gpu/compute-text-shape.js";
+import { COMPUTE_TEXT_HEADER_WORDS, COMPUTE_TEXT_RECORD_WORDS, computeTextShapeCapacity, checkComputeTextPlanBounds } from "./_gpu/compute-text-shape.js";
 import { executeResidentComputeText, releaseResidentComputeText, residentStatusMessage } from "./_gpu/compute-text-resident.js";
 import type { ResidentPackStage, ResidentShapeGroup } from "./_gpu/compute-text-resident.js";
 import type { ComputeTextChunkBudgets } from "./compute-text-paragraph-chunks.js";
@@ -184,6 +184,24 @@ export function createComputeTextData(
 
 /** Admit shape/pack/status work. Rendering in this task fuses its submission; otherwise a macrotask submits it. Observe GPU errors through `completed`. */
 export async function updateComputeTextData(data: ComputeTextData, texts: readonly string[]): Promise<ComputeTextUpdate> {
+    assertReady(data);
+    if (!profileSupport("arabic") || !profileSupport("indic")) {
+        const required = computeTextRequiredProfiles(texts).filter((id) => !profileSupport(id));
+        if (required.length) {
+            const snapshot = texts.slice();
+            try {
+                for (const id of required) {
+                    await ensureComputeTextProfile(id);
+                }
+            } catch (error) {
+                if (!data._dead) {
+                    clearIndirect(data);
+                }
+                throw error;
+            }
+            return submitComputeTextData(data, snapshot);
+        }
+    }
     return submitComputeTextData(data, texts);
 }
 
@@ -211,6 +229,7 @@ export function submitComputeTextData(
             }
             return text;
         });
+        // Every nominal glyph: seeds the closure and lets packing prove runs mark-free.
         const seeds = new Set<number>();
         const slab = createComputeTextInputSlab(snapshot, false);
         const prepared = snapshot.map((text, run) => prepareRun(data._font, text, run, seeds, slab));
@@ -221,21 +240,57 @@ export function submitComputeTextData(
         const needed = sharedCapacity(groups);
         const stage = createStage?.(groups, needed);
         const capacity = options?.capacity ?? needed;
+        const runCount = prepared.length;
+        const drawSizes = checkDrawBufferSizes(data, options?.pool ?? runCount, capacity);
+        const scalarCounts: number[] = [];
+        for (const group of groups) {
+            let count = 0;
+            for (const run of group.runs) {
+                count += run.scalars.length;
+            }
+            scalarCounts.push(count);
+        }
+        const shapeGroups = segments?.groups ?? groups;
+        for (let index = 0; index < shapeGroups.length; index++) {
+            const group = shapeGroups[index]!;
+            try {
+                checkComputeTextPlanBounds(
+                    device.limits,
+                    group.plan,
+                    group.runs,
+                    segments?.capacity ?? capacity,
+                    group.outputRun + (segments ? 0 : (options?.runBase ?? 0)),
+                    scalarCounts[index]!
+                );
+            } catch (error) {
+                if (!(error instanceof Error)) {
+                    throw error;
+                }
+                throw new Error(error.message.replace(/^shapeComputeText:/, "updateComputeTextData:"), { cause: error });
+            }
+        }
         return () => {
             let closure;
             try {
+                let profileSeeds: number[] | undefined;
                 closure = closeComputeTextGlyphs(
                     data._font,
-                    groups.map((group) => group.plan),
-                    [...seeds]
+                    groups.map((group) => {
+                        const extra = group.plan._profileData?.closureSeeds;
+                        if (extra) {
+                            (profileSeeds ??= []).push(...extra);
+                        }
+                        return group.plan;
+                    }),
+                    [...seeds],
+                    profileSeeds
                 );
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
                 throw new Error(`${message} (witness: ${snapshot.join(" | ") || "<empty>"})`, { cause: error });
             }
             installComputeTextClosure(data, closure.glyphIds, options?.rebuild);
-            const runCount = prepared.length;
-            growDrawBuffers(data, options?.pool ?? runCount, capacity);
+            growDrawBuffers(data, drawSizes);
             return executeResidentComputeText(
                 data,
                 data._engine,
@@ -249,7 +304,8 @@ export function submitComputeTextData(
                 assertLive,
                 segments,
                 stage,
-                options?.runBase
+                options?.runBase,
+                seeds
             );
         };
     });
@@ -414,7 +470,7 @@ export function computeTextDrawBufferSizes(runCount: number, capacity: number): 
     ];
 }
 
-function growDrawBuffers(data: ComputeTextData, runCount: number, capacity: number): void {
+function checkDrawBufferSizes(data: ComputeTextData, runCount: number, capacity: number): readonly (readonly [string, number])[] {
     const sizes = computeTextDrawBufferSizes(runCount, capacity);
     for (const [, bytes] of sizes) {
         const limits = data._device.limits;
@@ -422,6 +478,10 @@ function growDrawBuffers(data: ComputeTextData, runCount: number, capacity: numb
             throw new Error(`updateComputeTextData: draw buffer of ${bytes} bytes exceeds device storage limits`);
         }
     }
+    return sizes;
+}
+
+function growDrawBuffers(data: ComputeTextData, sizes: ReturnType<typeof computeTextDrawBufferSizes>): void {
     data._shaped = grow(data, data._shaped, sizes[0]![1], { label: "compute-text-shaped", writable: true });
     const nextInstances = grow(data, data._instances, sizes[1]![1], { label: "compute-text-instances", writable: true, vertex: true });
     if (nextInstances !== data._instances) {
@@ -456,7 +516,7 @@ function groupRuns(font: ComputeFont, runs: readonly PreparedRun[]): ResidentSha
             index++;
         }
         groups.push({
-            plan: createComputeTextPlan(font, selection),
+            plan: runs[start]!.plan ?? createComputeTextPlan(font, selection),
             runs: chunk,
             outputRun: start,
         });
@@ -465,6 +525,7 @@ function groupRuns(font: ComputeFont, runs: readonly PreparedRun[]): ResidentSha
 }
 
 interface PreparedRun {
+    readonly plan?: ResidentShapeGroup["plan"];
     readonly selection: ComputeTextRunSelection;
     readonly scalars: Uint32Array;
     readonly glyphIds: Uint32Array;
@@ -474,6 +535,13 @@ function prepareRun(font: ComputeFont, text: string, run: number, seeds: Set<num
     let selection: ComputeTextRunSelection;
     try {
         selection = selectComputeTextRun(text, font, seeds, slab);
+        if (selection.script === "deva") {
+            profileSupport("indic")?.validateRun?.(selection);
+            createComputeTextPlan(font, selection);
+            if (profileSupport("indic")?.available === false) {
+                throw new Error("Indic kernel variant not available");
+            }
+        }
     } catch (error) {
         const message = error instanceof Error ? error.message.replace(/^selectComputeTextRun:\s*/, "") : "invalid text";
         throw new Error(`updateComputeTextData: run ${run} ${message}`, { cause: error });
@@ -487,7 +555,12 @@ function prepareRun(font: ComputeFont, text: string, run: number, seeds: Set<num
         },
         selection._nominal
     );
-    return { selection, scalars: selection._scalars, glyphIds };
+    let plan: ResidentShapeGroup["plan"] | undefined;
+    if (selection.scalarCount !== 0) {
+        plan = createComputeTextPlan(font, selection);
+        validateComputeTextPlanFont(plan);
+    }
+    return { selection, scalars: selection._scalars, glyphIds, plan };
 }
 
 function clearIndirect(data: ComputeTextData): void {

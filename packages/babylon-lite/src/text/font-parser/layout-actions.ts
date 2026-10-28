@@ -399,6 +399,22 @@ function parseContext(bytes: Uint8Array, start: number, limit: number, format: n
         }
         for (const ruleOffset of ruleOffsets) {
             const rule = openCursor(bytes, start + setOffset + ruleOffset, limit - (start + setOffset + ruleOffset), label);
+            if (!chaining) {
+                // Context formats 1/2 place recordCount before input[], unlike ChainContext.
+                const glyphCount = readU16(rule, `${label} glyphCount`);
+                const recordCount = readU16(rule, `${label} lookupCount`);
+                if (glyphCount === 0) {
+                    throw new Error(`${label}: contextual input is empty`);
+                }
+                const first = format === 1 ? glyphPredicate(coverageGlyphsAt(coverage, setIndex)) : classPredicate(inputClass, setIndex, coverage);
+                const input = [first];
+                for (let i = 1; i < glyphCount; i++) {
+                    const value = readU16(rule, `${label} input glyph or class`);
+                    input.push(inputClass ? classPredicate(inputClass, value, null) : { kind: "glyphs", ids: [value], classDef: null, classId: 0, coverage: null });
+                }
+                rules.push({ input, backtrack: [], lookahead: [], lookups: readKnownLookupRecords(rule, recordCount, label) });
+                continue;
+            }
             const backtrack = chaining ? readRuleGlyphs(rule, backtrackClass, false, label) : [];
             const inputRest = readRuleGlyphs(rule, inputClass, true, label);
             const lookahead = chaining ? readRuleGlyphs(rule, lookaheadClass, false, label) : [];

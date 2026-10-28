@@ -1,6 +1,80 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import ts from "typescript";
+import { spawnSync } from "node:child_process";
 
-import { cleanupTempDirs, ensureLibBuilt, LIB_ENTRY, runRollup, runVite } from "./bundler-harness";
+import { cleanupTempDirs, ensureLibBuilt, LIB_ENTRY, runRollup as runRollupOutput, runVite as runViteOutput } from "./bundler-harness";
+
+// Runtime ownership follows reachable static/dynamic chunks. Unreferenced
+// Rolldown output files are not fetched by these consumers (GUIDANCE §4).
+function assertVisibleCodeEdges(code: string): void {
+    const file = ts.createSourceFile("consumer.js", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    const visit = (node: ts.Node): void => {
+        if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+            expect(node.arguments[0] && ts.isStringLiteral(node.arguments[0]), "reachable non-literal import() cannot be accounted as an orphan").toBe(true);
+        }
+        if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "URL") {
+            const base = node.arguments?.[1],
+                target = node.arguments?.[0];
+            if (
+                base &&
+                ts.isPropertyAccessExpression(base) &&
+                ts.isMetaProperty(base.expression) &&
+                base.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+                base.name.text === "url"
+            ) {
+                expect(target && ts.isStringLiteral(target), `opaque new URL(..., import.meta.url) might reference code: ${node.getText(file)}`).toBe(true);
+                const literal = target && ts.isStringLiteral(target) ? target.text : "";
+                expect(
+                    /\.(?:png|jpe?g|webp|svg|gif|woff2?|ttf|otf|wasm|bin)(?:[?#].*)?$/i.test(literal),
+                    `code/unknown new URL edge is not covered by chunk imports: ${literal}`
+                ).toBe(true);
+            }
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(file);
+}
+const runRollup = async (options: Parameters<typeof runRollupOutput>[0]) => {
+    const result = await runRollupOutput(options);
+    for (const chunk of result.chunks ?? []) {
+        assertVisibleCodeEdges(chunk.code);
+    }
+    return result;
+};
+const runVite = async (source: string) => {
+    // Use an actual downstream Node build, not Vitest's instrumented Vite
+    // module instance (which adds its own non-literal import-meta resolver).
+    // The normal harness/options and both static/dynamic graph edges are kept.
+    const child = spawnSync(
+        process.execPath,
+        [
+            "--import",
+            "tsx",
+            "--input-type=module",
+            "-e",
+            `
+import harness from "./tests/lite/build/bundler-harness.ts";
+try {
+ const result = await harness.runVite(${JSON.stringify(source)}, true);
+ process.stdout.write(JSON.stringify(result));
+} finally { await harness.cleanupTempDirs(); }
+`,
+        ],
+        {
+            encoding: "utf8",
+            maxBuffer: 128 * 1024 * 1024,
+            env: { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("VITEST") && !key.startsWith("VITE_NODE"))), NODE_ENV: "production" },
+        }
+    );
+    expect(child.status, child.stderr).toBe(0);
+    const result = JSON.parse(child.stdout) as Awaited<ReturnType<typeof runViteOutput>>;
+    for (const chunk of result.chunks ?? []) {
+        assertVisibleCodeEdges(chunk.code);
+    }
+    return result;
+};
 
 const KERNEL_ONLY = "fn rejectRun(";
 const PARSER_ONLY = "function compileComputeTextProgram";
@@ -10,6 +84,53 @@ afterAll(cleanupTempDirs);
 beforeAll(ensureLibBuilt);
 
 describe("compute text shaper tree shaking", () => {
+    it("fails closed on opaque/code URL edges while accepting literal lazy imports", () => {
+        expect(() => assertVisibleCodeEdges('import("./profile.js")')).not.toThrow();
+        expect(() => assertVisibleCodeEdges('new URL("./font.woff2", import.meta.url)')).not.toThrow();
+        expect(() => assertVisibleCodeEdges("import(profileName)")).toThrow();
+        expect(() => assertVisibleCodeEdges('new URL("./worker.js", import.meta.url)')).toThrow();
+        expect(() => assertVisibleCodeEdges("new URL(codeName, import.meta.url)")).toThrow();
+    });
+    it("reachable-graph accounting retains the actual requested lazy Indic and Arabic chunks", async () => {
+        const result = await runVite(`import {shapeComputeText} from ${JSON.stringify(LIB_ENTRY)}; console.log(shapeComputeText);`);
+        expect(result.errors).toEqual([]);
+        const entry = result
+            .chunks!.filter((chunk) => chunk.isEntry)
+            .map((chunk) => chunk.code)
+            .join("\n");
+        expect(entry).not.toContain("fn indicProps(");
+        expect(result.code).toContain("fn indicProps(");
+        expect(result.modules!.some((module) => /compute-text-indic\.js$/.test(module.id))).toBe(true);
+        expect(result.modules!.some((module) => /compute-text-arabic\.js$/.test(module.id))).toBe(true);
+    });
+    it("production/lab modules never import test references and consumers use only identity-bound compact data", () => {
+        const directories = ["packages/babylon-lite/src", "lab/lite/src"];
+        while (directories.length) {
+            const directory = directories.pop()!;
+            for (const entry of readdirSync(directory, { withFileTypes: true })) {
+                const path = join(directory, entry.name);
+                if (entry.isDirectory()) {
+                    directories.push(path);
+                } else if (/\.[cm]?[jt]sx?$/.test(entry.name)) {
+                    expect(readFileSync(path, "utf8"), path).not.toContain("tests/lite/compute/references");
+                }
+            }
+        }
+        for (const path of [
+            "tests/lite/compute/references/reviewed-records.ts",
+            "tests/lite/compute/arabic-joining.test.ts",
+            "tests/lite/compute/shared-core-corrections.test.ts",
+            "tests/lite/plumbing/compute-text-shaper-adapter.ts",
+            "tests/lite/unit/existing-impact-report.test.ts",
+            "tests/lite/unit/shaping-reference-attachments.test.ts",
+            "tests/lite/unit/shaping-reference-mark-order.test.ts",
+        ]) {
+            expect(readFileSync(path, "utf8"), path).not.toContain("existing-impact-report.json");
+        }
+        const compact = JSON.parse(readFileSync("tests/lite/compute/references/reviewed-expectations.json", "utf8")) as { cases: { category: string }[] };
+        expect(compact.cases.length).toBeGreaterThan(0);
+        expect(compact.cases.every((row) => row.category !== "U" && row.category !== "X")).toBe(true);
+    });
     it("keeps text-shaper out of a compute-only import graph", async () => {
         const entrySource = `import { loadComputeFont, shapeComputeText } from ${JSON.stringify(LIB_ENTRY)};\n` + `console.log(loadComputeFont, shapeComputeText);\n`;
         const result = await runRollup({ entrySource, format: "es", minify: false });

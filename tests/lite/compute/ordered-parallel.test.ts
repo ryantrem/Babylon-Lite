@@ -77,6 +77,10 @@ describe("parallel selection with exact source-ordered commitment", () => {
                 .replace("var<private> removed:bool;", "var<private> removed:bool;\nvar<private> reused:u32;\nvar<private> reselected:u32;")
                 .replace("chosen = selected[", "reused++; chosen = selected[")
                 .replace("} else { chosen = selectRule", "} else { reselected++; chosen = selectRule")
+                // C4 advances over the complete matched context. That may no
+                // longer naturally revisit the written position, so force the
+                // conservative frontier in this test-only differential variant.
+                .replace("frontier = max(frontier, applied.y);", "frontier = count;")
                 .replace("output[out + 1] = i32(length);", "output[out + 1] = i32(length); output[out + 2] = i32(reused); output[out + 3] = i32(reselected);")
         );
         expect(header[0]).toBe(0);
@@ -89,8 +93,10 @@ describe("parallel selection with exact source-ordered commitment", () => {
         const font = syntheticFont("backtrack-reject");
         for (const index of [40, 255, 256, 300]) {
             const text = "C".repeat(index) + "ABA" + "C".repeat(10) + "ABA";
-            expect((await rawRecords(font, text)).slice(0, 4)).toEqual([1, 0, 0, index + 1]);
-            await expect(shapeComputeText(native.engine, font.font, text)).rejects.toThrow(new RegExp(`unsupported GSUB 0 matched at glyph ${index + 1}$`));
+            // The matched parent is executable under C4; the failing record is
+            // child lookup 1, sequence index 1, not a pre-emptive parent rejection.
+            expect((await rawRecords(font, text)).slice(0, 4)).toEqual([1, 0, 1, index + 2]);
+            await expect(shapeComputeText(native.engine, font.font, text)).rejects.toThrow(new RegExp(`unsupported GSUB 1 matched at glyph ${index + 2}$`));
         }
     });
 
@@ -100,9 +106,9 @@ describe("parallel selection with exact source-ordered commitment", () => {
     });
 
     it("rejects the first contour mark-ligature anchor before a later rejection in the same root", async () => {
-        const font = syntheticFont("point-anchor");
+        const font = syntheticFont("contour-anchor");
         for (const index of [40, 255, 300]) {
-            const text = "C".repeat(index) + "AB" + "C".repeat(10) + "AB";
+            const text = "C".repeat(index) + "ABC" + "C".repeat(10) + "ABC";
             expect((await rawRecords(font, text)).slice(0, 4)).toEqual([1, 0, 0x10000, index + 1]);
         }
     });

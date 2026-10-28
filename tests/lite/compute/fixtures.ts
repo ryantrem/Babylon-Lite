@@ -6,6 +6,8 @@ import { Direction, Font, GlyphBuffer, UnicodeBuffer, shapeInto } from "../../..
 import { createComputeFontFromBuffer } from "../../../packages/babylon-lite/src/index";
 import type { ComputeFont, ComputeTextGlyph } from "../../../packages/babylon-lite/src/index";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
+import { reviewedFontKey, reviewedRecordByInput } from "./references/reviewed-records";
+export { expectedFromReport } from "./references/reviewed-records";
 
 export const FONT_HASHES = {
     "Inter.ttf": "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031",
@@ -14,6 +16,7 @@ export const FONT_HASHES = {
     "NotoSansGothic-Regular.ttf": "1977c6f245a6f1ae4b421370b0aba480238cc8a31744b7e3ef7f92569f662c07",
     "NotoSansHebrew-Regular.ttf": "671951828bd5c95db818e5bb12dcea2d0c0dda00311888522be061ee6835125e",
     "NotoSansSC-Regular-subset.ttf": "db2aee41c6b823a7487f1057e4f0f429603acd5a02949dbb9cc176810e4b31d6",
+    "NotoSansDevanagari-Regular.ttf": "9c7d935139ea6a1e6ad9dbac4f6d27ece1e04bca8123c8888d00a0f9df4724cd",
 } as const;
 
 export type FontFile = keyof typeof FONT_HASHES;
@@ -44,16 +47,46 @@ export function oracleFields(font: Fixture, text: string): number[][] {
         language: null,
         scalarCount: [...text].length,
     });
+    return oracleConfigured(font, text, selection.script, selection.direction);
+}
+
+function oracleConfigured(font: Fixture, text: string, script: string, direction: "ltr" | "rtl"): number[][] {
     const input = new UnicodeBuffer();
     const output = new GlyphBuffer();
     input.addStr(text);
-    input.setScript(selection.script);
-    input.setDirection(selection.direction === "rtl" ? Direction.RTL : Direction.LTR);
-    shapeInto(font.oracle, input, output, { script: selection.script, language: null, direction: selection.direction });
+    input.setScript(script);
+    input.setDirection(direction === "rtl" ? Direction.RTL : Direction.LTR);
+    shapeInto(font.oracle, input, output, { script, language: null, direction });
     return output.infos.slice(0, output.length).map((info, index) => {
         const position = output.positions[index]!;
         return [info.glyphId, info.cluster, position.xAdvance, position.yAdvance, position.xOffset, position.yOffset];
     });
+}
+
+let fontKeys: WeakMap<ComputeFont, string | undefined> | null = null;
+
+/** Exact normative records for reviewed corrections. U rows stay live text-shaper.
+ * The optional configuration serves explicit-plan unit cases, not a public override.
+ * No shaped result from Lite is ever consulted.
+ */
+export function expectedFields(font: Fixture, text: string, configuration?: { script: string; direction: "ltr" | "rtl" }): number[][] {
+    let key = fontKeys?.get(font.font);
+    if (!fontKeys?.has(font.font)) {
+        key = reviewedFontKey(font.bytes);
+        (fontKeys ??= new WeakMap()).set(font.font, key);
+    }
+    const selection = configuration ?? oracleSelection(text);
+    const row = key ? reviewedRecordByInput(key, text, selection.script, selection.direction) : undefined;
+    if (row && row.category !== "U") {
+        if (!row.records) {
+            throw new Error(`${row.id}: missing reviewed fields`);
+        }
+        return row.records.map((record) => record.slice());
+    }
+    if (selection.script === "arab" && !row) {
+        throw new Error(`No reviewed Arabic expectation for ${JSON.stringify(text)}; do not use the legacy joining approximation`);
+    }
+    return configuration ? oracleConfigured(font, text, selection.script, selection.direction) : oracleFields(font, text);
 }
 
 export function label(font: Fixture, text: string): string {
@@ -77,7 +110,7 @@ function oracleSelection(text: string): { script: string; direction: "ltr" | "rt
 }
 
 export function compare(font: Fixture, text: string, actual: readonly ComputeTextGlyph[]): void {
-    const expected = oracleFields(font, text);
+    const expected = expectedFields(font, text);
     const message = label(font, text);
     expect(actual.length, `${message}: count`).toBe(expected.length);
     actual.forEach((glyph, index) => expect(fields(glyph), `${message}: record ${index} [id,cluster,xAdvance,yAdvance,xOffset,yOffset]`).toEqual(expected[index]));
@@ -89,15 +122,4 @@ export function mapped(font: Fixture, start: number, end: number): string[] {
         .map((scalar) => String.fromCodePoint(scalar));
 }
 
-export function seededStrings(alphabet: string, count = 64): string[] {
-    let state = 0x4d313233;
-    return Array.from({ length: count }, (_, run) =>
-        Array.from({ length: 2 + (run % 49) }, () => {
-            state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-            return alphabet[state % alphabet.length]!;
-        }).join("")
-    );
-}
-
-export const GREEK = "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩαβγδεζηθικλμνξοπρστυφχψωΑθήναςϊϋΐ";
-export const CYRILLIC = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюяМоскваІіЇїЄє";
+export { CYRILLIC, GREEK, seededStrings } from "./corpus";

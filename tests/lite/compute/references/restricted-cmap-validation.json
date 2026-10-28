@@ -1,0 +1,6 @@
+{
+  "contract": "Subfont maps input scalars plus U+0020 only; every refined-inert case is cross-checked against unrestricted CLI.",
+  "failed": 0,
+  "failures": [],
+  "tested": 5456
+}

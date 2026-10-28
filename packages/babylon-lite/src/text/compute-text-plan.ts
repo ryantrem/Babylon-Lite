@@ -18,6 +18,46 @@ declare const computeTextPlanBrand: unique symbol;
 
 const REQUIRED_FEATURE_NONE = 0xffff;
 
+export type ComputeTextProfileId = "default" | "arabic" | "hebrew" | "indic";
+export type ComputeTextPause = "none" | "setupSyllables" | "initialReorder" | "finalReorder" | "clearSyllables";
+export interface ComputeTextStage {
+    readonly table: "GSUB" | "GPOS";
+    readonly roots: readonly { readonly lookup: number; readonly mask: number; readonly flags: number }[];
+    readonly pause: ComputeTextPause;
+}
+export interface ComputeTextKernelFragments {
+    readonly loadGlyph?: string;
+    readonly profilePrepass?: string;
+    readonly glyphMask?: string;
+    readonly pauses?: string;
+    readonly glyphAddress?: string;
+    readonly recordInit?: string;
+    readonly gates?: string;
+    readonly postprocess?: string;
+}
+export interface ComputeTextProfileData {
+    readonly tables: () => Uint32Array;
+    readonly closureSeeds?: readonly number[];
+    readonly capacity?: (scalars: Uint32Array) => number;
+    readonly spaceLocal?: boolean;
+    readonly normalizationClosure?: readonly (readonly [number, number])[];
+}
+export interface ComputeTextProfileSupport {
+    readonly glyphWords: 8 | 16;
+    readonly masked: boolean;
+    readonly fragments?: ComputeTextKernelFragments;
+    readonly planes?: number;
+    readonly auxBytes?: (capacity: number) => number;
+    readonly joiningType?: (scalar: number) => number;
+    readonly markClass?: (scalar: number) => number;
+    readonly isMcm?: (scalar: number) => boolean;
+    /** Packed per-scalar properties only; allows one shared mark-table search. */
+    readonly inputProperties?: (scalar: number) => number;
+    readonly buildPlan?: (font: ComputeFont) => ComputeTextPlan;
+    readonly validateRun?: (selection: ComputeTextRunSelection) => void;
+    readonly available?: boolean;
+}
+
 /** CPU lookup plan for one font, script, and direction. No GPU resources. */
 export interface ComputeTextPlan {
     readonly [computeTextPlanBrand]: true;
@@ -33,9 +73,98 @@ export interface ComputeTextPlan {
     readonly _gsubDependencies: readonly number[];
     /** @internal GPOS lookups reachable from roots but not themselves roots, ascending. */
     readonly _gposDependencies: readonly number[];
+    /** @internal Script-specific data and execution footprint, not lookup semantics. */
+    readonly _profile: ComputeTextProfileId;
+    /** @internal Ordered root records; a lookup may appear in more than one stage. */
+    readonly _stages: readonly ComputeTextStage[];
+    /** @internal Optional lazy profile tables. */
+    readonly _profileData?: ComputeTextProfileData;
 }
 
 let plansByFont: WeakMap<ComputeFont, Map<string, ComputeTextPlan>> | null = null;
+let supports: Map<ComputeTextProfileId, ComputeTextProfileSupport> | null = null;
+let importers: Map<ComputeTextProfileId, () => Promise<void>> | null = null;
+let pendingProfiles: Map<ComputeTextProfileId, Promise<void>> | null = null;
+let arabicFontSupport: WeakMap<ComputeTextPlan, boolean> | null = null;
+
+/** @internal Called only by a lazy profile installer. */
+export function installComputeTextProfile(id: ComputeTextProfileId, support: ComputeTextProfileSupport): void {
+    (supports ??= new Map()).set(id, support);
+}
+
+/** @internal No module-level registration or eager profile import. */
+export function profileSupport(id: ComputeTextProfileId): ComputeTextProfileSupport | undefined {
+    return supports?.get(id);
+}
+
+/** @internal Importer seam also used by focused lifecycle tests. */
+export function installComputeTextProfileLoader(id: ComputeTextProfileId, importer: () => Promise<void>): void {
+    (importers ??= new Map()).set(id, importer);
+    pendingProfiles?.delete(id);
+    supports?.delete(id);
+}
+
+/** @internal Lazy, memoized, retryable. Import failures are propagated, never replaced. */
+export function ensureComputeTextProfile(id: ComputeTextProfileId): Promise<void> {
+    if (profileSupport(id)) {
+        return Promise.resolve();
+    }
+    const pending = pendingProfiles?.get(id);
+    if (pending) {
+        return pending;
+    }
+    const importer = importers?.get(id) ?? (id === "arabic" ? loadArabicProfile : id === "indic" ? loadIndicProfile : undefined);
+    if (!importer) {
+        return Promise.reject(new Error(`compute text profile ${id} is not available`));
+    }
+    const promise = Promise.resolve()
+        .then(importer)
+        .then(() => {
+            if (!profileSupport(id)) {
+                throw new Error(`compute text profile ${id} installer did not install support`);
+            }
+        })
+        .catch((error: unknown) => {
+            pendingProfiles?.delete(id);
+            supports?.delete(id);
+            throw error;
+        });
+    (pendingProfiles ??= new Map()).set(id, promise);
+    return promise;
+}
+
+async function loadArabicProfile(): Promise<void> {
+    const profile = await import("./compute-text-arabic.js");
+    profile.installComputeTextArabicProfile();
+}
+
+async function loadIndicProfile(): Promise<void> {
+    const profile = await import("./compute-text-indic.js");
+    profile.installComputeTextIndicProfile();
+}
+
+/** @internal Entry points check this after nominal mapping, preserving unmapped precedence. */
+export function validateComputeTextPlanFont(plan: ComputeTextPlan): void {
+    if (plan.script !== "arab") {
+        return;
+    }
+    let supported = arabicFontSupport?.get(plan);
+    if (supported === undefined) {
+        const table = ensureComputeFontLayout(plan.font).gsub;
+        const language = selectedLanguage(table, plan.script);
+        const indices = language ? [...language.featureIndices, ...(language.requiredFeatureIndex === REQUIRED_FEATURE_NONE ? [] : [language.requiredFeatureIndex])] : [];
+        supported = indices.some((index) => ["isol", "fina", "medi", "init"].includes(table!.features[index]?.tag ?? ""));
+        (arabicFontSupport ??= new WeakMap()).set(plan, supported);
+    }
+    if (!supported) {
+        throw new Error("createComputeTextPlan: font has no Arabic joining features (isol/fina/medi/init); Arabic joining fallback is unsupported");
+    }
+}
+
+/** @internal Profiles whose property data/kernel hooks must be loaded before submission. */
+export function requiredComputeTextProfiles(scripts: readonly ComputeTextScript[]): ComputeTextProfileId[] {
+    return [...(scripts.includes("arab") ? ["arabic" as const] : []), ...(scripts.includes("deva") ? ["indic" as const] : [])];
+}
 
 /** Compile the default Script/LangSys/feature lookups for `selection`. Does not shape text. */
 export function createComputeTextPlan(font: ComputeFont, selection: ComputeTextRunSelection): ComputeTextPlan {
@@ -58,6 +187,19 @@ export function createComputeTextPlanForSelection(font: ComputeFont, selection: 
     if (existing) {
         return existing;
     }
+    if (script === "deva") {
+        const build = profileSupport("indic")?.buildPlan;
+        if (!build) {
+            throw new Error("createComputeTextPlan: Indic profile is not loaded");
+        }
+        const plan = build(font);
+        if (!plans) {
+            plans = new Map();
+            (plansByFont ??= new WeakMap()).set(font, plans);
+        }
+        plans.set(key, plan);
+        return plan;
+    }
     const layout = ensureComputeFontLayout(font);
     const gsubRoots = collectRoots(layout.gsub, script, true);
     const gposRoots = collectRoots(layout.gpos, script, false);
@@ -70,6 +212,14 @@ export function createComputeTextPlanForSelection(font: ComputeFont, selection: 
         _gposRoots: gposRoots,
         _gsubDependencies: closeDependencies(layout.gsub, gsubRoots),
         _gposDependencies: closeDependencies(layout.gpos, gposRoots),
+        _profile: script === "arab" ? "arabic" : script === "hebr" ? "hebrew" : "default",
+        _stages:
+            script === "arab"
+                ? arabicStages(layout.gsub, layout.gpos)
+                : [
+                      { table: "GSUB", roots: gsubRoots.map((lookup) => ({ lookup, mask: 0xffffffff, flags: 0 })), pause: "none" },
+                      { table: "GPOS", roots: gposRoots.map((lookup) => ({ lookup, mask: 0xffffffff, flags: 0 })), pause: "none" },
+                  ],
     } as unknown as ComputeTextPlan;
     if (!plans) {
         plans = new Map();
@@ -77,6 +227,70 @@ export function createComputeTextPlanForSelection(font: ComputeFont, selection: 
     }
     plans.set(key, plan);
     return plan;
+}
+
+/** @internal Generic staged-plan construction for a lazy profile. No text is shaped. */
+export function createComputeTextProfilePlan(
+    font: ComputeFont,
+    script: ComputeTextScript,
+    profile: ComputeTextProfileId,
+    stages: readonly ComputeTextStage[],
+    data: ComputeTextProfileData
+): ComputeTextPlan {
+    const layout = ensureComputeFontLayout(font);
+    const roots = (table: "GSUB" | "GPOS") =>
+        [...new Set(stages.filter((stage) => stage.table === table).flatMap((stage) => stage.roots.map((root) => root.lookup)))].sort((a, b) => a - b);
+    const gsub = roots("GSUB"),
+        gpos = roots("GPOS");
+    return {
+        font,
+        script,
+        direction: directionForComputeTextScript(script),
+        language: null,
+        _profile: profile,
+        _stages: stages,
+        _profileData: data,
+        _gsubRoots: gsub,
+        _gposRoots: gpos,
+        _gsubDependencies: closeDependencies(layout.gsub, gsub),
+        _gposDependencies: closeDependencies(layout.gpos, gpos),
+    } as unknown as ComputeTextPlan;
+}
+
+function selectedLanguage(table: LayoutTable | null, script: ComputeTextScript) {
+    return (table && (findLayoutScript(table, script) ?? findLayoutScript(table, "DFLT") ?? findLayoutScript(table, "latn")))?.defaultLangSys;
+}
+
+function arabicStages(gsub: LayoutTable | null, gpos: LayoutTable | null): ComputeTextStage[] {
+    const groups: readonly (readonly string[])[] = [["ccmp", "locl"], ["isol"], ["fina"], ["medi"], ["init"], ["rlig"], ["rclt", "calt"], ["liga"]];
+    const stages: ComputeTextStage[] = [];
+    const build = (table: LayoutTable | null, tags: readonly string[], first: boolean): void => {
+        const language = selectedLanguage(table, "arab");
+        if (!table || !language) {
+            return;
+        }
+        const roots = new Map<number, number>();
+        const indices = [...language.featureIndices, ...(first && language.requiredFeatureIndex !== REQUIRED_FEATURE_NONE ? [language.requiredFeatureIndex] : [])];
+        for (const index of indices) {
+            const feature = table.features[index];
+            if (!feature || (!tags.includes(feature.tag) && !(first && index === language.requiredFeatureIndex))) {
+                continue;
+            }
+            const form = ["isol", "fina", "medi", "init"].indexOf(feature.tag);
+            const mask = form < 0 ? 0x80000000 : 1 << form;
+            for (const lookup of feature.lookupListIndices) {
+                if (table.lookups[lookup]) {
+                    roots.set(lookup, ((roots.get(lookup) ?? 0) | mask) >>> 0);
+                }
+            }
+        }
+        if (roots.size) {
+            stages.push({ table: table.kind, roots: [...roots].sort(([a], [b]) => a - b).map(([lookup, mask]) => ({ lookup, mask, flags: 0 })), pause: "none" });
+        }
+    };
+    groups.forEach((tags, i) => build(gsub, tags, i === 0));
+    build(gpos, ["kern", "mark", "mkmk"], true);
+    return stages;
 }
 
 function collectRoots(table: LayoutTable | null, script: ComputeTextScript, gsub: boolean): number[] {
@@ -151,5 +365,15 @@ function isDefaultGposFeature(tag: string): boolean {
 }
 
 function isScript(value: string): value is ComputeTextScript {
-    return value === "latn" || value === "grek" || value === "cyrl" || value === "hebr" || value === "arab" || value === "hani" || value === "goth" || value === "DFLT";
+    return (
+        value === "latn" ||
+        value === "grek" ||
+        value === "cyrl" ||
+        value === "hebr" ||
+        value === "arab" ||
+        value === "hani" ||
+        value === "goth" ||
+        value === "deva" ||
+        value === "DFLT"
+    );
 }

@@ -24,8 +24,13 @@ import * as selectors from "../../../packages/babylon-lite/src/text/compute-text
 import { glyphClass } from "../../../packages/babylon-lite/src/text/font-parser/opentype-layout";
 import type { EngineContext } from "../../../packages/babylon-lite/src/engine/engine";
 import { Font, GlyphBuffer, UnicodeBuffer, shapeInto } from "../../../packages/babylon-lite/node_modules/text-shaper/dist/index.js";
+import { expectedFields, expectedFromReport } from "../compute/fixtures";
+import { syntheticFont } from "../compute/synthetic";
+import { reviewedRecordByInput } from "../compute/references/reviewed-records";
 
 const TEXT_SHAPER_VERSION = JSON.parse(readFileSync(join(process.cwd(), "packages/babylon-lite/node_modules/text-shaper/package.json"), "utf8")).version as string;
+// Run header bit set when the CPU proves no nominal glyph is a GDEF mark.
+const MARK_FREE = 0x80000000;
 
 function fontBytes(file: string): ArrayBuffer {
     const buf = readFileSync(join(process.cwd(), "lab", "public", "fonts", file));
@@ -67,14 +72,19 @@ function shapeFields(bytes: ArrayBuffer, text: string): number[][] {
 }
 
 function referenceFields(plan: ComputeTextPlan, text: string): number[][] {
-    const selection = selectComputeTextRun(text);
-    const glyphIds = [...selection._scalars].map((scalar) => mapComputeFontScalar(plan.font, scalar));
-    const program = compileComputeTextProgram(plan);
-    return executeComputeTextReference(
-        program,
-        glyphIds,
-        selection._scalars.map((_, index) => index)
-    ).map(fieldsOf);
+    const bytes = plan.font._bytes.slice().buffer as ArrayBuffer;
+    return expectedFields({ file: "synthetic", bytes, font: plan.font, oracle: Font.load(bytes) }, text, plan);
+}
+
+function referenceGlyphs(plan: ComputeTextPlan, text: string): ComputeTextGlyph[] {
+    return referenceFields(plan, text).map((row) => ({
+        glyphId: row[0]!,
+        cluster: row[1]!,
+        xAdvance: row[2]!,
+        yAdvance: row[3]!,
+        xOffset: row[4]!,
+        yOffset: row[5]!,
+    }));
 }
 
 function fieldsOf(glyph: ComputeTextGlyph): number[] {
@@ -170,8 +180,8 @@ describe("compute text shaper", () => {
             expect(second.programWords).toBe(first.programWords);
             expect(second.tables).toBe(first.tables);
             expect(second.runs).not.toBe(first.runs);
-            expect([...second.runs]).toEqual([1, 2, 38, 38]);
-            expect([...second.params]).toEqual([1, 4, 0, font.glyphCount, first.program.rootOrder.length, first.program.words.length, 7]);
+            expect([...second.runs]).toEqual([1, (2 | MARK_FREE) >>> 0, 38, 38]);
+            expect([...second.params]).toEqual([1, 4, 0, font.glyphCount, first.program.rootOrder.length, first.program.words.length, 7, 0]);
             expect(second.scratchBytes).toBe(128);
             const greek = createComputeTextPlan(font, selectComputeTextRun("Α"));
             const other = prepareComputeTextShapeWords(greek, [{ scalars: Uint32Array.of(0x391), glyphIds: Uint32Array.of(mapComputeFontScalar(font, 0x391)) }]);
@@ -202,16 +212,47 @@ describe("compute text shaper", () => {
                 { scalars: empty, glyphIds: empty },
                 { scalars: Uint32Array.of(67), glyphIds: last },
             ]);
-            expect([...packed.runs]).toEqual([3, 6, 7, 2, 38, 39, 0, 1, 40]);
+            expect([...packed.runs]).toEqual([3, 6, 7, (2 | MARK_FREE) >>> 0, 38, 39, MARK_FREE, (1 | MARK_FREE) >>> 0, 40]);
             expect(copy.mock.calls.filter(([source]) => source === first || source === last)).toHaveLength(2);
             first[0] = 41;
             expect(packed.runs[4]).toBe(38);
             const changed = prepareComputeTextShapeWords(plan, [{ scalars: Uint32Array.of(65, 66), glyphIds: first }]);
-            expect([...changed.runs]).toEqual([1, 2, 41, 39]);
+            expect([...changed.runs]).toEqual([1, (2 | MARK_FREE) >>> 0, 41, 39]);
             expect(changed.runs.buffer).not.toBe(packed.runs.buffer);
         } finally {
             copy.mockRestore();
         }
+    });
+
+    it("marks a run mark-free only when none of its nominal glyphs is a GDEF mark", () => {
+        const font = createComputeFontFromBuffer(fontBytes("Roboto-Regular.ttf"));
+        const plan = createComputeTextPlan(font, selectComputeTextRun("A"));
+        const base = mapComputeFontScalar(font, 65);
+        const mark = mapComputeFontScalar(font, 0x301);
+        const packed = prepareComputeTextShapeWords(plan, [
+            { scalars: Uint32Array.of(65), glyphIds: Uint32Array.of(base) },
+            { scalars: Uint32Array.of(65, 0x301), glyphIds: Uint32Array.of(base, mark) },
+        ]);
+        expect(packed.tables[4]).toBe(1);
+        expect(packed.tables[packed.tables[2]! + mark]! & 0xffff).toBe(3);
+        expect(packed.runs[packed.runs[0]!]).toBe((1 | MARK_FREE) >>> 0);
+        expect(packed.runs[packed.runs[1]!]).toBe(2);
+    });
+
+    it("proves runs mark-free from a document's nominal glyph set and scans per run when that set holds a mark", () => {
+        const font = createComputeFontFromBuffer(fontBytes("Roboto-Regular.ttf"));
+        const plan = createComputeTextPlan(font, selectComputeTextRun("A"));
+        const base = mapComputeFontScalar(font, 65);
+        const mark = mapComputeFontScalar(font, 0x301);
+        const runs = [
+            { scalars: Uint32Array.of(65), glyphIds: Uint32Array.of(base) },
+            { scalars: Uint32Array.of(65, 0x301), glyphIds: Uint32Array.of(base, mark) },
+        ];
+        const free = prepareComputeTextShapeWords(plan, runs.slice(0, 1), 0, undefined, undefined, new Set([base]));
+        expect(free.runs[free.runs[0]!]).toBe((1 | MARK_FREE) >>> 0);
+        const scanned = prepareComputeTextShapeWords(plan, runs, 0, undefined, undefined, new Set([base, mark]));
+        expect(scanned.runs[scanned.runs[0]!]).toBe((1 | MARK_FREE) >>> 0);
+        expect(scanned.runs[scanned.runs[1]!]).toBe(2);
     });
 
     it("packs every class definition as a constant-time glyph-indexed table including the class-zero complement", () => {
@@ -219,7 +260,7 @@ describe("compute text shaper", () => {
         const prepared = prepareComputeTextShapeWords(createComputeTextPlan(font, selectComputeTextRun("A")), []);
         expect(prepared.program.classTables.length).toBeGreaterThan(0);
         prepared.program.classTables.forEach((def, index) => {
-            const origin = prepared.tables[6 + index]!;
+            const origin = prepared.tables[8 + index]!;
             expect([...prepared.tables.slice(origin, origin + font.glyphCount)]).toEqual(Array.from({ length: font.glyphCount }, (_, glyph) => glyphClass(def, glyph)));
         });
     });
@@ -228,7 +269,7 @@ describe("compute text shaper", () => {
         const font = createComputeFontFromBuffer(fontBytes("Inter.ttf"));
         const packed = prepareComputeTextShapeWords(createComputeTextPlan(font, selectComputeTextRun("A")), []);
         const words = packed.programWords;
-        const footer = packed.programWords[8]! + packed.program.rootOrder.length * 2 + font.glyphCount * 2;
+        const footer = packed.programWords.length - packed.simpleWordCount;
         expect(words.length).toBeGreaterThan(footer + packed.program.rootOrder.length);
         let checkedRows = 0;
         packed.program.rootOrder.forEach((lookupAt, root) => {
@@ -260,7 +301,7 @@ describe("compute text shaper", () => {
                     const rule = words[descriptor + 3]! + (cell - 1) * 16;
                     const mode = cell === 0 ? 0 : words[rule + 8]!;
                     expect(words[row + cls * 2 + 1]).toBe(mode === 0 ? 0 : mode === 5 ? 2 : 1);
-                    expect(words[row + cls * 2]).toBe(mode === 0 || mode === 5 ? 0 : words[words[rule + 6]! + (mode === 4 ? 2 : 1)]);
+                    expect(words[row + cls * 2]).toBe(mode === 0 || mode === 5 ? 0 : words[words[rule + 6]! + (mode === 4 ? 4 : 3)]);
                 }
                 checkedRows++;
                 break;
@@ -272,7 +313,8 @@ describe("compute text shaper", () => {
     it.each(["Inter.ttf", "Roboto-Regular.ttf"])("packs exhaustive first-32-root presence masks from candidate directories: %s", (file) => {
         const font = createComputeFontFromBuffer(fontBytes(file));
         const prepared = prepareComputeTextShapeWords(createComputeTextPlan(font, selectComputeTextRun("A")), []);
-        const masks = prepared.programWords[8]! + prepared.program.rootOrder.length * 2;
+        const masks = prepared.programWords[8]! + prepared.program.rootOrder.length * 4;
+        expect(prepared.programWords[13]).toBe(1);
         expect(prepared.programWords.length - masks).toBe(font.glyphCount * 2 + prepared.simpleWordCount);
         for (let glyph = 0; glyph < font.glyphCount; glyph++) {
             let expected = 0;
@@ -292,7 +334,7 @@ describe("compute text shaper", () => {
         const font = createComputeFontFromBuffer(fontBytes("Inter.ttf"));
         const selection = selectComputeTextRun("Block 01 office AVATAR quick fox 0140 ffi fl To");
         const prepared = prepareComputeTextShapeWords(createComputeTextPlan(font, selection), []);
-        const masks = prepared.programWords[8]! + prepared.program.rootOrder.length * 2;
+        const masks = prepared.programWords[8]! + prepared.program.rootOrder.length * 4;
         expect(prepared.programWords.length - masks).toBe(font.glyphCount * 2 + prepared.simpleWordCount);
         const glyphs = [...selection._scalars].map((scalar) => mapComputeFontScalar(font, scalar));
         const firstBits = glyphs.reduce((bits, glyph) => (bits | prepared.programWords[masks + glyph]!) >>> 0, 0);
@@ -310,12 +352,16 @@ describe("compute text shaper", () => {
                 expect(prepared.programWords[masks + font.glyphCount + combining]! & (1 << root)).not.toBe(0);
             }
         }
-        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("return bits & witnesses;");
+        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("rootPresence[word] = bits & witnesses;");
     });
 
     it("bypasses absent roots before fetching their global lookup descriptors", () => {
-        const loop = COMPUTE_TEXT_KERNEL_SOURCE.slice(COMPUTE_TEXT_KERNEL_SOURCE.indexOf("for (var root = 0u;"), COMPUTE_TEXT_KERNEL_SOURCE.indexOf("let cooperative"));
-        expect(loop.indexOf("candidates & (1u << root)")).toBeLessThan(loop.indexOf("let tableBit"));
+        const loop = COMPUTE_TEXT_KERNEL_SOURCE.slice(
+            COMPUTE_TEXT_KERNEL_SOURCE.indexOf("for (var root = program[stageAt + 1u];"),
+            COMPUTE_TEXT_KERNEL_SOURCE.indexOf("let cooperative")
+        );
+        expect(loop.indexOf("workgroupUniformLoad(&rootPresence[root / 32u])")).toBeGreaterThanOrEqual(0);
+        expect(loop.indexOf("workgroupUniformLoad(&rootPresence[root / 32u])")).toBeLessThan(loop.indexOf("let tableBit"));
     });
 
     it("does not re-fetch successfully committed disjoint actions in the serial rejection scan", () => {
@@ -332,7 +378,7 @@ describe("compute text shaper", () => {
     });
 
     it("does not load GDEF classes for flags that have no filtering effect", () => {
-        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("(flag & 0xff0eu) == 0u");
+        expect(COMPUTE_TEXT_KERNEL_SOURCE).toContain("(flag & 0xff1eu) == 0u");
     });
 
     it("compacts only ordered substitution roots, never independent roots or an already compact GPOS transition", () => {
@@ -425,14 +471,7 @@ describe("compute text shaper", () => {
         let calls = 0;
         _installComputeTextShapeExecutorForTests(async (_shaper: ComputeTextShaper, active: ComputeTextPlan, runs) => {
             calls++;
-            const program = compileComputeTextProgram(active);
-            return runs.map((run) =>
-                executeComputeTextReference(
-                    program,
-                    run.glyphIds,
-                    [...run.glyphIds].map((_, index) => index)
-                )
-            );
+            return runs.map((run) => referenceGlyphs(active, run.text));
         });
         const shaped = await shapeComputeTextPlan(shaper, plan, ["fi"]);
         expect(calls).toBe(1);
@@ -444,7 +483,7 @@ describe("compute text shaper", () => {
         disposeComputeTextShaper(shaper);
     });
 
-    it("matches text-shaper for Roboto Latin and executable Inter kerning and marks", () => {
+    it("keeps U references live and uses all six reviewed fields for corrected Inter records", () => {
         const robotoBytes = fontBytes("Roboto-Regular.ttf");
         const roboto = createComputeTextPlan(createComputeFontFromBuffer(robotoBytes), selectComputeTextRun("fi"));
         for (const text of ["fi", "A", "To", " "]) {
@@ -452,13 +491,17 @@ describe("compute text shaper", () => {
         }
         const interBytes = fontBytes("Inter.ttf");
         const inter = createComputeTextPlan(createComputeFontFromBuffer(interBytes), selectComputeTextRun("A"));
-        for (const text of ["A", "AC", "5,", "A\u0326"]) {
+        for (const text of ["A", "AC", "5,"]) {
             expect(referenceFields(inter, text), text).toEqual(shapeFields(interBytes, text));
         }
-        const marks = [0x0301, 0x0300].map((scalar) => mapComputeFontScalar(inter.font, scalar));
-        expect(executeComputeTextReference(compileComputeTextProgram(inter), marks, [0, 1]).map(fieldsOf)).toEqual(shapeFields(interBytes, "\u0301\u0300"));
-        for (const text of ["A\u20de", "A\u20dd", "<-"]) {
-            expect(() => referenceFields(inter, text), text).toThrow(/unsupported GSUB lookup/);
+        for (const text of ["A\u0326", "\u0301\u0300", "A\u20de", "A\u20dd", "<-"]) {
+            const row = reviewedRecordByInput("Inter.ttf", text, "latn", "ltr")!;
+            expect(referenceFields(inter, text), text).toEqual(expectedFromReport(row.id));
+        }
+        for (const kind of ["alternate", "reverse-chain", "nested-context"] as const) {
+            const negative = syntheticFont(kind);
+            const plan = createComputeTextPlan(negative.font, selectComputeTextRun("AB"));
+            expect(() => executeComputeTextReference(compileComputeTextProgram(plan), [1, 2], [0, 1])).toThrow(/unsupported GSUB lookup/);
         }
     });
 
@@ -467,14 +510,7 @@ describe("compute text shaper", () => {
         const font = createComputeFontFromBuffer(bytes);
         const { engine } = mockEngine();
         _installComputeTextShapeExecutorForTests(async (_shaper, active, runs) => {
-            const program = compileComputeTextProgram(active);
-            return runs.map((run) =>
-                executeComputeTextReference(
-                    program,
-                    run.glyphIds,
-                    [...run.glyphIds].map((_, index) => index)
-                )
-            );
+            return runs.map((run) => referenceGlyphs(active, run.text));
         });
         const glyphs = await shapeComputeText(engine, font, "fi");
         expect(glyphs.map(fieldsOf)).toEqual(shapeFields(bytes, "fi"));

@@ -1,0 +1,137 @@
+{
+  "cliCtypesAgreement": {
+    "c10RestrictedCliCtypes": 139,
+    "checked": 6239,
+    "indicCanonicalPathChecks": 8,
+    "restrictedCmapInertCrossChecks": 5456,
+    "restrictedCmapNonInertRequests": 65,
+    "total": 6239
+  },
+  "configuration": {
+    "clusterLevel": 1,
+    "direction": "ltr",
+    "features": [],
+    "flags": 0,
+    "fontFuncs": "ot",
+    "language": "und",
+    "ppem": 0,
+    "scale": "upem",
+    "script": "Deva",
+    "shaper": "ot",
+    "variations": []
+  },
+  "corpusSourceHashes": {
+    "lab/lite/src/lite/compute-text-shaper-test.ts": "1fd751737dc512e36c1c5285f1def324a8f5c1426bf7be0f89c464438bf14211",
+    "tests/lite/compute/kernel.test.ts": "b7398ed5d647d4de73fbfc50cf914021ca82279cfaf15afa60792e9ab4558e63",
+    "tests/lite/compute/lifecycle.test.ts": "43ac30c9d3291fc14efb0ffbe2627b52a2b31d6a7b1ae32eab3f29bac5d77cea",
+    "tests/lite/compute/long-run.test.ts": "648d4970f2fd1593dea9d1890ba39e36af4ddde7b33f8cf1a06fd5221cb4f05f",
+    "tests/lite/compute/milestones.test.ts": "f8e707f540d7a7f9bcf7e193b5f85adaded636a53b027b57bd83a447f3823f7e",
+    "tests/lite/compute/ordered-parallel.test.ts": "f47a7c53b7ddef1c2c89b9321e9556c1419b57ba1d3311d032bd5e4e9f7f460c",
+    "tests/lite/compute/paragraph-chunks.test.ts": "0eb4d6ecb923a362621cc8d031ef054ce2fb4a972dbc58f9769c094e9e8a8def",
+    "tests/lite/compute/paragraph-layout.test.ts": "40a5e73dd523be94382811d5669f8f27754210b90a74c59d68cf9defb0e0adce",
+    "tests/lite/compute/parallel-refresh.test.ts": "3a0a95a4b6c19f2dbf316cb2a8e914ed95292e62ef4ac55732618ac1de1c9408",
+    "tests/lite/compute/resident.test.ts": "d0e4674e1f10262d4e83921f7a32cbf63949d131c7e5eaa0ddd5806a383ecaa4",
+    "tests/lite/compute/segment.test.ts": "354bba83cb5963824b6782ee2b95549d28195ae9773ad4a250b343001fe0cc27",
+    "tests/lite/compute/stitch-routing.test.ts": "f403bb396a7a0b5456a537d8f3b646519ad8f16ad3708b7853063fee74bcb255",
+    "tests/lite/compute/stitch-tiling.test.ts": "e40b18ae03f6243d56ed7399b1289695becf75fc87e93bdecd13ad58b51ee79e",
+    "tests/lite/plumbing/compute-text-shaper.spec.ts": "a77b341ac9bcfe60b6f47dcbdf54bc4c5ed0e769a150e4507a583f9e99d419d3",
+    "tests/lite/unit/compute-text-plan.test.ts": "7d7c8c24fab563a90c58094b7b5156ebb0efc1ae980875e98a14b37bd4de7a17",
+    "tests/lite/unit/compute-text-program.test.ts": "3c45c75a68d186cf62c56637eba9cb3f2ef36f910b3cd5776ea704369f83b231",
+    "tests/lite/unit/compute-text-shaper.test.ts": "2a2feaca2b5efd9f3e3d526cb7a4d18b89ffbebb7551d17e3eaf5f9a82767d60"
+  },
+  "existingFontHashes": {
+    "Inter.ttf": "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031",
+    "NotoSansArabic-Regular.ttf": "7ed3fe069312aceac454f17cf613a30f95271d6ed7ce58005ed4d016bd3823d7",
+    "NotoSansGothic-Regular.ttf": "1977c6f245a6f1ae4b421370b0aba480238cc8a31744b7e3ef7f92569f662c07",
+    "NotoSansHebrew-Regular.ttf": "671951828bd5c95db818e5bb12dcea2d0c0dda00311888522be061ee6835125e",
+    "NotoSansSC-Regular-subset.ttf": "db2aee41c6b823a7487f1057e4f0f429603acd5a02949dbb9cc176810e4b31d6",
+    "Roboto-Regular.ttf": "56a45233d29f11b4dfb86d248e921939d115778f87325e7ae8cc108383d6664d",
+    "synthetic:adjust": "5c079a760acb22f08b049caddfb0a512a3178e1cf70f329db5e58eb22c17e7eb",
+    "synthetic:alternate": "5271ee7844d34128875213bb21167b652ccdadec232f9631e73f87decab29d30",
+    "synthetic:backtrack": "738d237470d84c8ba0026c6d50043dfc2be59b93c577fd78fd140e20ddc86147",
+    "synthetic:backtrack-reject": "312bc51785edf112497c83732c91a7136210a24d0217037a40fa69413db992c0",
+    "synthetic:context": "3153323d447d3789f45a15cdc0ace70cd98d3403802d808fdb0a27605782566a",
+    "synthetic:ligature-ignore-marks": "bb9ae7ecb6bdcc39c72ed8eeda124c8f1ebf15264b45f51e1b068969a909fdc1",
+    "synthetic:mark-ligature": "b55e61f4ca172933f155e3189ee2dcc8072eaa92a5547b159cbeb4f2b5e8a0ca",
+    "synthetic:mark-mark": "a0942969c0d14bfece664a9cca0c99d1e4e6ce8049991faec94c494b5dc34ede",
+    "synthetic:multiple": "ede722128eaa7c6fb1de8cf72bfc55b88ec0cb7c72ed21c56cfbd7801fbcbc84",
+    "synthetic:pair-first": "fc39de46450c677e57f49b0f5d6d860455831a1205fb8e7e81ef77d642ff4e19",
+    "synthetic:pair-reject": "c9758ba6d92215afc20eafe9bb6f67e451892f0b77fa960dd887b59da5caf3d3",
+    "synthetic:pair-second": "2323a0901c0a919e5f98f8a3f804b00524fd8351758f5e75fb27c5551fdcc7e8",
+    "synthetic:point-anchor": "071b8f9a4ca2eeb4322c2a2c5e8d78d5622351243bdaf332a450270197e313ff",
+    "synthetic:refresh-ligature": "083f991ce0a93832db470ee6fa399e075f733b35b99d223365f675177cef7118",
+    "synthetic:refresh-roots": "472ad4693129145acc05862196b92222821a0df231c1aedd2285aaebe9cc5f81",
+    "synthetic:transitive": "e34fae4e9363f67884041997c1bc8d525ef6cb83052eb3129ca4427c5549f908"
+  },
+  "existingImpactReportMarkdownSha256": "6158b65a873c850346ea987084295f3f798860391078faf154da8ee7b65a66fb",
+  "existingImpactReportSha256": "6d55bc05618e096b7afea3be1be371d5cb2442211c89617f5b5f3eadea9f9c23",
+  "font": {
+    "file": "NotoSansDevanagari-Regular.ttf",
+    "licenseSha256": "a216f6f8d85c7228093e0ee5e258d9d377e6671f68acb4db1930b29583d0f331",
+    "sha256": "9c7d935139ea6a1e6ad9dbac4f6d27ece1e04bca8123c8888d00a0f9df4724cd"
+  },
+  "generatedAt": "2026-10-28T03:09:41.741Z",
+  "generatorSources": {
+    "scripts/generate-shaping-references.mjs": "6e4a4bb8466692eeac6d7324c7f0cf783e4139dbc571eedb55a16fe4b3854f9b",
+    "scripts/shaping-reference-analysis.mjs": "38b086daed47df90f23504a5cbf33467f14cf3e86cd2a5c332c305c3b55c58b7",
+    "scripts/shaping-reference-attachments.mjs": "09c9ef585701af7ccb1c5637f701f9cf5f2728ccb877b8bce6fec665bbd54f19",
+    "scripts/shaping-reference-cmap.mjs": "f9961c12eaf314dd3dbc8125d044a33b7b646d46dc6749919b4a86210365f7cb",
+    "scripts/shaping-reference-derivations.mjs": "88b4d38e83c24d90f0e475eb0dead6469623d3c1d4dcaa0dff93554c4dc33c10",
+    "scripts/shaping-reference-indic-projection.mjs": "5838a6c0a6eb5ee5c532114f3848f5c5b9024a141bc4be674cb584500183afe3",
+    "scripts/shaping-reference-outputs.mjs": "eff5ce1337c93702ce865db58d7f6b84d8ca4d091af32fe381e1ae00ef931dcb",
+    "scripts/shaping-reference-unicode.mjs": "1009eae1ce52bc12056def07f76e5635e1c03a2a9575b4bca5fe2bfab40f4700",
+    "scripts/shaping-references-corpus.ts": "9c19622c086f55603d956341abcc0be60b96d30c36a5317529aa429cd2f9471c",
+    "scripts/shaping-references-ctypes.py": "998291bf79771cca1425f517bc5e38dda4e6e18f6c4f49114792266bd9c18b3c",
+    "scripts/shaping-references-fixtures.ts": "9c608cb6db85087433f24ed3953f920fbdaa4a193f80c023d43ad75c62021220",
+    "tests/lite/compute/corpus-inventory.ts": "4e5a850f93be2fb927c8ca5a00abaeb6ef46d55b0d8c36268bb2ade73b869960",
+    "tests/lite/compute/corpus.ts": "abbd3885d8034d18d56dc43852e89554b9ba9615653fa882d9436f7e8960175f",
+    "tests/lite/compute/references/arabic-corpus.mjs": "91621bc9fa438793acdaf3aeed16c0dc978c694d33bc0d1725120fe16d51a1c9",
+    "tests/lite/compute/references/devanagari-corpus.mjs": "ab9ead18228737445621cb4d05659087873b62c4b1711c154ffa4fc16f99de97",
+    "tests/lite/compute/references/synthetic-corpus.mjs": "a762918b4e09369e13cbffb7ae66ea68a948f98195eac9966fbad08f861c2257",
+    "tests/lite/compute/synthetic.ts": "dfaa1bb22fe8f888243ac2aa3a623e8383ed3f540dd419cd26a20aad1d947f5e"
+  },
+  "harfbuzz": {
+    "binary": "/opt/homebrew/Cellar/harfbuzz/11.0.1/bin/hb-shape",
+    "binarySha256": "75ff65d0aee0d59a0baade13620f7effac5ed12f2710b7aabd87c148315fff5c",
+    "library": "/opt/homebrew/Cellar/harfbuzz/11.0.1/lib/libharfbuzz.0.dylib",
+    "librarySha256": "75cd955a1a28be95a789b529974690e7017d747f363937cc2680eccdc12fe8a4",
+    "sourceCommit": "9f3deba7",
+    "version": "11.0.1"
+  },
+  "observedPauseMessages": [
+    "end reordering indic final",
+    "end reordering indic initial",
+    "end table GPOS",
+    "start reordering indic final",
+    "start reordering indic initial",
+    "start table GPOS"
+  ],
+  "textShaper": {
+    "entrySha256": "6c844a3133e6816b00be742ee0d9ae4b4298a3db63c1f5975ed0c7b4ae253943",
+    "version": "0.1.28"
+  },
+  "unavailablePauseMessages": [],
+  "unicode": {
+    "crossCheckedScalars": 1112064,
+    "license": "Unicode License v3",
+    "sources": {
+      "ArabicShaping.txt": {
+        "sha256": "764f420cedfc8b43d9fec251c957a5d55fc45d40f6573f162990ed1dce7e36e0",
+        "url": "https://www.unicode.org/Public/16.0.0/ucd/ArabicShaping.txt"
+      },
+      "DerivedJoiningType.txt": {
+        "sha256": "6bd08b97da66b70ccfdab105a352de2984e02625239ec5695422c99b33d854f0",
+        "url": "https://www.unicode.org/Public/16.0.0/ucd/extracted/DerivedJoiningType.txt"
+      },
+      "LICENSE.txt": {
+        "sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
+        "url": "https://www.unicode.org/license.txt"
+      },
+      "UnicodeData.txt": {
+        "sha256": "ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f",
+        "url": "https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt"
+      }
+    },
+    "version": "16.0.0"
+  }
+}

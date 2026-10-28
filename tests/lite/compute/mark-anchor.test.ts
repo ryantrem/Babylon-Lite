@@ -28,16 +28,20 @@ it.each([7, 8])("preserves missing/first/last/duplicate anchors and signed inher
 @compute @workgroup_size(1)
 fn anchorSearch() {
 scratch[0] = i32(params.glyphCount);
+scratch[2] = 100;
 scratch[4] = 10;
 scratch[5] = -20;
-scratch[7] = select(1, 3, params.direction == 7u);
+scratch[7] = select(1, 3, params.rootCount == 7u);
 scratch[8] = 3;
 scratch[10] = 200;
 scratch[11] = 30;
 scratch[12] = 5;
 scratch[13] = 6;
 scratch[15] = 3;
-let applied = applyMark(0u, 2u, 1u, 0u, params.direction);
+let applied = applyMark(0u, 2u, 1u, 0u, 0u, params.rootCount);
+// Run the same attached-only zeroing/final propagation as the shared main entry.
+if (attachDistance(8u) != 0u) { scratch[10] = 0; scratch[11] = 0; }
+propagateAttachments(0u, 2u);
 output[0] = i32(applied);
 for (var word = 0u; word < 4u; word++) { output[word + 1u] = scratch[10u + word]; }
 }`;
@@ -51,7 +55,8 @@ for (var word = 0u; word < 4u; word++) { output[word + 1u] = scratch[10u + word]
     try {
         for (const anchors of [[], [0, 7, -8], [0, 7, -8, 2, 100, 200, 2, -30, 40, 255, 50, -60]]) {
             for (const base of [0, 1, 2, 3, 254, 255, 256]) {
-                const params = Uint32Array.of(0, 2, mode, base, 0, 0, 0);
+                // Custom entry uses rootCount as mode; direction remains valid LTR.
+                const params = Uint32Array.of(0, 2, 0, base, mode, 0, 0, 0);
                 const program = Uint32Array.from([0, -2, 3, anchors.length / 3, ...anchors]);
                 const buffers = {
                     params: createStorageBuffer(native.engine, params),
@@ -73,7 +78,9 @@ for (var word = 0u; word < 4u; word++) { output[word + 1u] = scratch[10u + word]
                             selected = index;
                         }
                     }
-                    const expected = selected < 0 ? [0, 200, 30, 5, 6] : [1, mode === 8 ? 0 : 200, mode === 8 ? 0 : 30, anchors[selected + 1]! + 12, anchors[selected + 2]! - 23];
+                    // Independent C1 arithmetic: root offset (10,-20), root pen
+                    // advance100, mark anchor(-2,3). Unattached widths stay intact.
+                    const expected = selected < 0 ? [0, 200, 30, 5, 6] : [1, 0, 0, anchors[selected + 1]! - 88, anchors[selected + 2]! - 23];
                     expect([...new Int32Array(await readStorageBuffer(buffers.output))], `mode ${mode}, base ${base}, ${anchors}`).toEqual(expected);
                 } finally {
                     task.dispose();

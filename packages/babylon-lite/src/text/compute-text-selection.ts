@@ -8,7 +8,7 @@
 import { scriptTagForScalar } from "./unicode-script-data.js";
 import type { ComputeFont, ComputeNominalVector } from "./compute-font.js";
 import { mapComputeFontScalars } from "./compute-font.js";
-import type { ComputeTextPlan } from "./compute-text-plan.js";
+import type { ComputeTextPlan, ComputeTextProfileId } from "./compute-text-plan.js";
 
 let scriptPages: (Uint8Array | undefined)[] | null = null;
 let markPages: (Uint8Array | undefined)[] | null = null;
@@ -36,9 +36,9 @@ export function computeTextNoBreakBefore(cp: number): number {
 declare const computeTextRunSelectionBrand: unique symbol;
 
 /** Admitted strong scripts, plus `DFLT` for empty or Common-only input. */
-export type ComputeTextScript = "latn" | "grek" | "cyrl" | "hebr" | "arab" | "hani" | "goth" | "DFLT";
+export type ComputeTextScript = "latn" | "grek" | "cyrl" | "hebr" | "arab" | "hani" | "goth" | "deva" | "DFLT";
 
-const ADMITTED_SCRIPTS: readonly ComputeTextScript[] = ["latn", "grek", "cyrl", "hebr", "arab", "hani", "goth"];
+const ADMITTED_SCRIPTS: readonly ComputeTextScript[] = ["latn", "grek", "cyrl", "hebr", "arab", "hani", "goth", "deva"];
 const EMPTY_OFFSETS = /* @__PURE__ */ new Uint32Array(0);
 
 /** Horizontal direction of one admitted run. */
@@ -106,6 +106,7 @@ export function selectComputeTextRun(text: string, font?: ComputeFont, seeds?: S
     let strong = 0;
     let sawInherited = false;
     let deferred: Error | null = null;
+    let joinerIndex = -1;
     for (let offset = 0; offset < text.length; offset++) {
         const start = offset;
         const unit = text.charCodeAt(offset);
@@ -159,6 +160,12 @@ export function selectComputeTextRun(text: string, font?: ComputeFont, seeds?: S
             }
         }
         if (deferred) {
+            if (joinerIndex >= 0 && strong === 0) {
+                const later = classifyScalar(scalar);
+                if (later >= 3 && later <= 10) {
+                    strong = later;
+                }
+            }
             continue;
         }
         let classification = classificationPage?.[pageOffset] ?? 0;
@@ -173,15 +180,28 @@ export function selectComputeTextRun(text: string, font?: ComputeFont, seeds?: S
             sawInherited = true;
             continue;
         }
+        // Rare classes nest here so the common strong-script path stays one compare.
         if (classification >= 10) {
-            deferred = new Error(`selectComputeTextRun: ${classificationRejection(classification, scalar)} at scalar ${index} ${formatScalar(scalar)}`);
-            continue;
+            if (classification === 15) {
+                if (joinerIndex < 0) {
+                    joinerIndex = index;
+                }
+                continue;
+            }
+            if (classification !== 10) {
+                deferred = new Error(`selectComputeTextRun: ${classificationRejection(classification, scalar)} at scalar ${index} ${formatScalar(scalar)}`);
+                continue;
+            }
         }
         if (strong === 0) {
             strong = classification;
         } else if (strong !== classification) {
             deferred = new Error(`selectComputeTextRun: mixed scripts "${ADMITTED_SCRIPTS[strong - 3]}" and "${ADMITTED_SCRIPTS[classification - 3]}"`);
         }
+    }
+    // Joiners are recorded only before deferral, so they always precede any deferred error.
+    if (joinerIndex >= 0 && strong !== 10) {
+        throw new Error(`selectComputeTextRun: joining control at scalar ${joinerIndex} ${formatScalar(scalars[joinerIndex]!)}`);
     }
     if (deferred) {
         throw deferred;
@@ -218,19 +238,79 @@ function classifyScalar(scalar: number): number {
         } else {
             const tag = scriptTagForScalar(scalar);
             const admitted = ADMITTED_SCRIPTS.findIndex((script) => script === tag);
-            classification = tag === "Zyyy" ? 1 : tag === "Zinh" ? 2 : tag === "Zzzz" ? 10 : admitted >= 0 ? admitted + 3 : 11;
+            // Devanagari appends strong code10. Unknown moves to private code17;
+            // existing scripts/rejection messages and codes12..16 stay intact.
+            classification = tag === "Zyyy" ? 1 : tag === "Zinh" ? 2 : tag === "Zzzz" ? 17 : admitted >= 0 ? admitted + 3 : 11;
         }
         page[offset] = classification;
     }
     return classification;
 }
 
+/** @internal Non-throwing cold-profile pre-scan. Warm callers need not scan again.
+ * Reuses Script classification pages, never nominal mapping or contextual shaping.
+ */
+export function computeTextRequiredProfiles(texts: readonly string[]): ComputeTextProfileId[] {
+    let arabic = false;
+    let indic = false;
+    for (const text of texts) {
+        if (typeof text !== "string" || !/[\u0080-\u{10ffff}]/u.test(text)) {
+            continue;
+        }
+        let strong = 0;
+        let invalid = false;
+        let joiner = false;
+        for (const character of text) {
+            const scalar = character.codePointAt(0)!;
+            if (scalar >= 0xd800 && scalar <= 0xdfff) {
+                invalid = true;
+                break;
+            }
+            const classification = classifyScalar(scalar);
+            if (classification === 15) {
+                joiner = true;
+                continue;
+            }
+            if (classification > 10) {
+                invalid = true;
+                break;
+            }
+            if (classification >= 3) {
+                if (strong !== 0 && strong !== classification) {
+                    invalid = true;
+                    break;
+                }
+                strong = classification;
+            }
+        }
+        if (!invalid && (!joiner || strong === 10)) {
+            arabic ||= ADMITTED_SCRIPTS[strong - 3] === "arab";
+            indic ||= strong === 10;
+        }
+    }
+    return [...(arabic ? ["arabic" as const] : []), ...(indic ? ["indic" as const] : [])];
+}
+
+/** @internal Non-throwing Script scan; Common/Inherited block members are not strong. */
+export function computeTextHasDevanagari(text: string): boolean {
+    if (!/[\u0080-\u{10ffff}]/u.test(text)) {
+        return false;
+    }
+    for (const character of text) {
+        if (classifyScalar(character.codePointAt(0)!) === 10) {
+            return true;
+        }
+    }
+    return false;
+}
 /** @internal Paragraph-level admission without a paragraph-sized decode allocation. */
 export function scanComputeTextRun(text: string): Pick<ComputeTextRunSelection, "script" | "direction" | "language" | "scalarCount"> {
     let strong = 0;
     let inherited = false;
     let count = 0;
     let deferred: Error | undefined;
+    let joinerIndex = -1;
+    let joinerScalar = 0;
     for (let offset = 0; offset < text.length; offset++) {
         const unit = text.charCodeAt(offset);
         let scalar = unit;
@@ -246,12 +326,23 @@ export function scanComputeTextRun(text: string): Pick<ComputeTextRunSelection, 
         }
         const index = count++;
         if (deferred) {
+            if (joinerIndex >= 0 && strong === 0) {
+                const later = classifyScalar(scalar);
+                if (later >= 3 && later <= 10) {
+                    strong = later;
+                }
+            }
             continue;
         }
         const classification = classifyScalar(scalar);
         if (classification === 2) {
             inherited = true;
-        } else if (classification >= 10) {
+        } else if (classification === 15) {
+            if (joinerIndex < 0) {
+                joinerIndex = index;
+                joinerScalar = scalar;
+            }
+        } else if (classification > 10) {
             deferred = new Error(`selectComputeTextRun: ${classificationRejection(classification, scalar)} at scalar ${index} ${formatScalar(scalar)}`);
         } else if (classification >= 3) {
             if (!strong) {
@@ -260,6 +351,10 @@ export function scanComputeTextRun(text: string): Pick<ComputeTextRunSelection, 
                 deferred = new Error(`selectComputeTextRun: mixed scripts "${ADMITTED_SCRIPTS[strong - 3]}" and "${ADMITTED_SCRIPTS[classification - 3]}"`);
             }
         }
+    }
+    // Joiners are recorded only before deferral, so they always precede any deferred error.
+    if (joinerIndex >= 0 && strong !== 10) {
+        throw new Error(`selectComputeTextRun: joining control at scalar ${joinerIndex} ${formatScalar(joinerScalar)}`);
     }
     if (deferred) {
         throw deferred;
@@ -344,7 +439,7 @@ function rejectionClass(scalar: number): number {
 
 function classificationRejection(classification: number, scalar: number): string {
     switch (classification) {
-        case 10:
+        case 17:
             return "unknown script";
         case 11:
             return `unsupported script "${scriptTagForScalar(scalar)}"`;

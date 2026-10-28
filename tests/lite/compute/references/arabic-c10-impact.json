@@ -1,0 +1,173 @@
+{
+  "arabicRows": 159,
+  "cases": [
+    {
+      "exactMatchedHarfbuzz": true,
+      "expectedPreLookup": [
+        [1576, 0],
+        [1617, 1],
+        [1614, 1]
+      ],
+      "id": "tests/lite/compute/milestones.test.ts#mapped RTL repertoire and seeded joining/marks: NotoSansArabic-Regular.ttf:NotoSansArabic-Regular.ttf:112",
+      "kind": "existing",
+      "records": [
+        [370, 1, 0, 0, 307, 40],
+        [367, 1, 0, 0, 315, -160],
+        [316, 0, 0, 0, 410, -23],
+        [14, 0, 993, 0, 0, 0]
+      ],
+      "text": "بَّ",
+      "treatment": "H-C10"
+    },
+    {
+      "exactMatchedHarfbuzz": true,
+      "expectedPreLookup": [
+        [1576, 0],
+        [1617, 1],
+        [1614, 1]
+      ],
+      "id": "tests/lite/compute/resident.test.ts#resident RTL/scalar repertoire: NotoSansArabic-Regular.ttf:NotoSansArabic-Regular.ttf:2",
+      "kind": "existing",
+      "records": [
+        [370, 1, 0, 0, 307, 40],
+        [367, 1, 0, 0, 315, -160],
+        [316, 0, 0, 0, 410, -23],
+        [14, 0, 993, 0, 0, 0]
+      ],
+      "text": "بَّ",
+      "treatment": "H-C10"
+    },
+    {
+      "exactMatchedHarfbuzz": true,
+      "expectedPreLookup": [
+        [1576, 0],
+        [1617, 1],
+        [1614, 1]
+      ],
+      "id": "arabic-stacked-0",
+      "kind": "new-arabic",
+      "records": [
+        [370, 1, 0, 0, 307, 40],
+        [367, 1, 0, 0, 315, -160],
+        [316, 0, 0, 0, 410, -23],
+        [14, 0, 993, 0, 0, 0]
+      ],
+      "text": "بَّ",
+      "treatment": "H-C10"
+    },
+    {
+      "exactMatchedHarfbuzz": true,
+      "expectedPreLookup": [
+        [1576, 0],
+        [1617, 1],
+        [1616, 1]
+      ],
+      "id": "arabic-c10-0",
+      "kind": "new-arabic",
+      "records": [
+        [368, 1, 0, 0, 296, -360],
+        [316, 0, 0, 0, 410, -23],
+        [14, 0, 993, 0, 0, 0]
+      ],
+      "text": "بِّ",
+      "treatment": "H-C10"
+    },
+    {
+      "exactMatchedHarfbuzz": true,
+      "expectedPreLookup": [
+        [1576, 0],
+        [1617, 1],
+        [1615, 1]
+      ],
+      "id": "arabic-c10-1",
+      "kind": "new-arabic",
+      "records": [
+        [371, 1, 0, 0, 295, 40],
+        [367, 1, 0, 0, 315, -160],
+        [316, 0, 0, 0, 410, -23],
+        [14, 0, 993, 0, 0, 0]
+      ],
+      "text": "بُّ",
+      "treatment": "H-C10"
+    },
+    {
+      "exactMatchedHarfbuzz": true,
+      "expectedPreLookup": [
+        [1576, 0],
+        [1620, 1],
+        [1614, 1]
+      ],
+      "id": "arabic-c10-4",
+      "kind": "new-arabic",
+      "records": [
+        [370, 1, 0, 0, 313, 56],
+        [297, 1, 0, 0, 357, -220],
+        [316, 0, 0, 0, 410, -23],
+        [14, 0, 993, 0, 0, 0]
+      ],
+      "text": "بَٔ",
+      "treatment": "H-C10"
+    },
+    {
+      "exactMatchedHarfbuzz": true,
+      "expectedPreLookup": [
+        [1576, 0],
+        [1620, 1],
+        [1617, 1],
+        [1614, 1]
+      ],
+      "id": "arabic-c10-5",
+      "kind": "new-arabic",
+      "records": [
+        [370, 1, 0, 0, 296, 256],
+        [367, 1, 0, 0, 304, 56],
+        [297, 1, 0, 0, 357, -220],
+        [316, 0, 0, 0, 410, -23],
+        [14, 0, 993, 0, 0, 0]
+      ],
+      "text": "بَّٔ",
+      "treatment": "H-C10"
+    },
+    {
+      "exactMatchedHarfbuzz": true,
+      "expectedPreLookup": [
+        [1576, 0],
+        [1621, 1],
+        [1620, 1]
+      ],
+      "id": "arabic-c10-both-0",
+      "kind": "new-arabic",
+      "records": [
+        [297, 1, 0, 0, 357, -220],
+        [325, 1, 0, 0, 380, -211],
+        [316, 0, 0, 0, 410, -23],
+        [14, 0, 993, 0, 0, 0]
+      ],
+      "text": "بٕٔ",
+      "treatment": "H-C10"
+    },
+    {
+      "exactMatchedHarfbuzz": true,
+      "expectedPreLookup": [
+        [1576, 0],
+        [1621, 1],
+        [1620, 1],
+        [1614, 1],
+        [1616, 1]
+      ],
+      "id": "arabic-c10-both-1",
+      "kind": "new-arabic",
+      "records": [
+        [426, 1, 0, 0, 365, -480],
+        [370, 1, 0, 0, 313, 56],
+        [297, 1, 0, 0, 357, -220],
+        [325, 1, 0, 0, 380, -211],
+        [316, 0, 0, 0, 410, -23],
+        [14, 0, 993, 0, 0, 0]
+      ],
+      "text": "بَِٕٔ",
+      "treatment": "H-C10"
+    }
+  ],
+  "reorderedRows": 9
+}

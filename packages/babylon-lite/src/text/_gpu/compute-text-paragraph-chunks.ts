@@ -18,7 +18,7 @@ import type { ComputeTask } from "../../compute/compute-task.js";
 import { createComputeShader, disposeComputeShader } from "../../compute/compute-shader.js";
 import type { ComputeShader } from "../../compute/compute-shader.js";
 import { submitDeferredComputeTaskResult } from "../../compute/compute-task-readback.js";
-import { computeTextScratchCapacity, createComputeTextShapeShader, createShapeSchedule, prepareComputeTextShapeWords } from "./compute-text-shape.js";
+import { computeTextVariantTier, createComputeTextShapeShader, createShapeSchedule, prepareComputeTextShapeWords } from "./compute-text-shape.js";
 import { COMPUTE_TEXT_STITCH_KERNEL } from "./compute-text-resident.js";
 import { COMPUTE_TEXT_CHUNK_LAYOUT, COMPUTE_TEXT_CHUNK_PUBLISH } from "./compute-text-paragraph-chunk-layout.js";
 
@@ -469,7 +469,7 @@ async function shapeChunks(data: ComputeTextData, state: ComputeTextChunkState, 
             const prepared = prepareComputeTextShapeWords(source.plan, runs, 0, capacity, data._device.limits);
             const outputBytes = runs.length * (4 + capacity * 6) * 4;
             const shapeBuffers = {
-                params: buffer(data, state, "shape-params", 28),
+                params: buffer(data, state, "shape-params", 32),
                 program: buffer(data, state, "program", prepared.programWords.byteLength),
                 tables: buffer(data, state, "tables", prepared.tables.byteLength),
                 runs: buffer(data, state, "runs", prepared.runs.byteLength),
@@ -483,10 +483,10 @@ async function shapeChunks(data: ComputeTextData, state: ComputeTextChunkState, 
                 updateStorageBuffer(engine, shapeBuffers.tables, prepared.tables);
                 state.uploadedPlan = source.plan;
             }
-            const shapeKey = `shape-${computeTextScratchCapacity(capacity)}`;
+            const shapeKey = `shape-${prepared.variant.id}-${computeTextVariantTier(capacity, prepared.variant, engine._device.limits.maxComputeWorkgroupStorageSize)}`;
             let shape = state.shaders.get(shapeKey);
             if (!shape) {
-                shape = createComputeTextShapeShader(engine, capacity);
+                shape = createComputeTextShapeShader(engine, capacity, prepared.variant);
                 state.shaders.set(shapeKey, shape);
             }
             const schedule = createShapeSchedule(engine, shape, shapeBuffers, runs.length);

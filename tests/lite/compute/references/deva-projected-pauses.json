@@ -1,0 +1,806 @@
+{
+  "cases": [
+    {
+      "clusterMap": [0, 0],
+      "finalSixFieldsExact": true,
+      "id": "scalar-929",
+      "passed": true,
+      "pauseSnapshots": [
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "start reordering indic initial",
+          "rawGlyphs": [
+            [75, 0],
+            [104, 0]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "end reordering indic initial",
+          "rawGlyphs": [
+            [75, 0],
+            [104, 0]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "start reordering indic final",
+          "rawGlyphs": [
+            [227, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "end reordering indic final",
+          "rawGlyphs": [
+            [227, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "start table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [227, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "end table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [227, 0]
+          ],
+          "relation": "exact"
+        }
+      ]
+    },
+    {
+      "clusterMap": [0, 0],
+      "finalSixFieldsExact": true,
+      "id": "scalar-931",
+      "passed": true,
+      "pauseSnapshots": [
+        {
+          "decomposedGlyphs": [
+            [230, 0]
+          ],
+          "glyphs": [
+            [230, 0]
+          ],
+          "message": "start reordering indic initial",
+          "rawGlyphs": [
+            [230, 0]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [230, 0]
+          ],
+          "glyphs": [
+            [230, 0]
+          ],
+          "message": "end reordering indic initial",
+          "rawGlyphs": [
+            [230, 0]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [230, 0]
+          ],
+          "glyphs": [
+            [230, 0]
+          ],
+          "message": "start reordering indic final",
+          "rawGlyphs": [
+            [230, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [230, 0]
+          ],
+          "glyphs": [
+            [230, 0]
+          ],
+          "message": "end reordering indic final",
+          "rawGlyphs": [
+            [230, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [230, 0]
+          ],
+          "glyphs": [
+            [230, 0]
+          ],
+          "message": "start table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [230, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [230, 0]
+          ],
+          "glyphs": [
+            [230, 0]
+          ],
+          "message": "end table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [230, 0]
+          ],
+          "relation": "exact"
+        }
+      ]
+    },
+    {
+      "clusterMap": [0, 0],
+      "finalSixFieldsExact": true,
+      "id": "scalar-934",
+      "passed": true,
+      "pauseSnapshots": [
+        {
+          "decomposedGlyphs": [
+            [231, 0]
+          ],
+          "glyphs": [
+            [231, 0]
+          ],
+          "message": "start reordering indic initial",
+          "rawGlyphs": [
+            [89, 0],
+            [104, 0]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [231, 0]
+          ],
+          "glyphs": [
+            [231, 0]
+          ],
+          "message": "end reordering indic initial",
+          "rawGlyphs": [
+            [89, 0],
+            [104, 0]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [231, 0]
+          ],
+          "glyphs": [
+            [231, 0]
+          ],
+          "message": "start reordering indic final",
+          "rawGlyphs": [
+            [231, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [231, 0]
+          ],
+          "glyphs": [
+            [231, 0]
+          ],
+          "message": "end reordering indic final",
+          "rawGlyphs": [
+            [231, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [231, 0]
+          ],
+          "glyphs": [
+            [231, 0]
+          ],
+          "message": "start table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [231, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [231, 0]
+          ],
+          "glyphs": [
+            [231, 0]
+          ],
+          "message": "end table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [231, 0]
+          ],
+          "relation": "exact"
+        }
+      ]
+    },
+    {
+      "clusterMap": [0, 0],
+      "finalSixFieldsExact": true,
+      "id": "nukta-2",
+      "passed": true,
+      "pauseSnapshots": [
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "start reordering indic initial",
+          "rawGlyphs": [
+            [75, 0],
+            [104, 0]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "end reordering indic initial",
+          "rawGlyphs": [
+            [75, 0],
+            [104, 0]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "start reordering indic final",
+          "rawGlyphs": [
+            [227, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "end reordering indic final",
+          "rawGlyphs": [
+            [227, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "start table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [227, 0]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0]
+          ],
+          "glyphs": [
+            [227, 0]
+          ],
+          "message": "end table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [227, 0]
+          ],
+          "relation": "exact"
+        }
+      ]
+    },
+    {
+      "clusterMap": [0, 0, 1],
+      "finalSixFieldsExact": true,
+      "id": "normalization-bridge-0",
+      "passed": true,
+      "pauseSnapshots": [
+        {
+          "decomposedGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "glyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "message": "start reordering indic initial",
+          "rawGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "glyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "message": "end reordering indic initial",
+          "rawGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "glyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "message": "start reordering indic final",
+          "rawGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "glyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "message": "end reordering indic final",
+          "rawGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "glyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "message": "start table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "glyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "message": "end table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [227, 0],
+            [40, 1]
+          ],
+          "relation": "exact"
+        }
+      ]
+    },
+    {
+      "clusterMap": [0, 0, 1, 2],
+      "finalSixFieldsExact": true,
+      "id": "normalization-bridge-1",
+      "passed": true,
+      "pauseSnapshots": [
+        {
+          "decomposedGlyphs": [
+            [227, 0],
+            [103, 1],
+            [75, 2]
+          ],
+          "glyphs": [
+            [227, 0],
+            [103, 1],
+            [75, 2]
+          ],
+          "message": "start reordering indic initial",
+          "rawGlyphs": [
+            [227, 0],
+            [103, 1],
+            [75, 2]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [227, 0],
+            [103, 1],
+            [75, 2]
+          ],
+          "glyphs": [
+            [227, 0],
+            [103, 1],
+            [75, 2]
+          ],
+          "message": "end reordering indic initial",
+          "rawGlyphs": [
+            [227, 0],
+            [103, 1],
+            [75, 2]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "glyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "message": "start reordering indic final",
+          "rawGlyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "glyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "message": "end reordering indic final",
+          "rawGlyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "glyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "message": "start table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "glyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "message": "end table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [280, 0],
+            [75, 2]
+          ],
+          "relation": "exact"
+        }
+      ]
+    },
+    {
+      "clusterMap": [0, 0, 1, 2],
+      "finalSixFieldsExact": true,
+      "id": "normalization-bridge-2",
+      "passed": true,
+      "pauseSnapshots": [
+        {
+          "decomposedGlyphs": [
+            [231, 0],
+            [103, 1],
+            [81, 2]
+          ],
+          "glyphs": [
+            [231, 0],
+            [103, 1],
+            [81, 2]
+          ],
+          "message": "start reordering indic initial",
+          "rawGlyphs": [
+            [231, 0],
+            [103, 1],
+            [81, 2]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [231, 0],
+            [103, 1],
+            [81, 2]
+          ],
+          "glyphs": [
+            [231, 0],
+            [103, 1],
+            [81, 2]
+          ],
+          "message": "end reordering indic initial",
+          "rawGlyphs": [
+            [231, 0],
+            [103, 1],
+            [81, 2]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "glyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "message": "start reordering indic final",
+          "rawGlyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "glyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "message": "end reordering indic final",
+          "rawGlyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "glyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "message": "start table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "glyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "message": "end table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [293, 0],
+            [81, 2]
+          ],
+          "relation": "exact"
+        }
+      ]
+    },
+    {
+      "clusterMap": [0, 0, 1],
+      "finalSixFieldsExact": true,
+      "id": "normalization-bridge-3",
+      "passed": true,
+      "pauseSnapshots": [
+        {
+          "decomposedGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "glyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "message": "start reordering indic initial",
+          "rawGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "glyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "message": "end reordering indic initial",
+          "rawGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "relation": "three-pair-pre-nukt-projection"
+        },
+        {
+          "decomposedGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "glyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "message": "start reordering indic final",
+          "rawGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "glyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "message": "end reordering indic final",
+          "rawGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "glyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "message": "start table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "relation": "exact"
+        },
+        {
+          "decomposedGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "glyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "message": "end table GPOS script tag 'dev2'",
+          "rawGlyphs": [
+            [230, 0],
+            [103, 1]
+          ],
+          "relation": "exact"
+        }
+      ]
+    }
+  ],
+  "compositions": [
+    {
+      "glyphs": [75, 104, 227],
+      "scalars": [2344, 2364, 2345]
+    },
+    {
+      "glyphs": [82, 104, 230],
+      "scalars": [2352, 2364, 2353]
+    },
+    {
+      "glyphs": [89, 104, 231],
+      "scalars": [2355, 2364, 2356]
+    }
+  ],
+  "fontSha256": "9c7d935139ea6a1e6ad9dbac4f6d27ece1e04bca8123c8888d00a0f9df4724cd",
+  "note": "Raw independent snapshots are unchanged. Only three same-cluster nominal pairs before nukt are projected; later pauses and all final fields are exact.",
+  "preNuktCoverage": {
+    "checks": [],
+    "language": "default",
+    "passed": true,
+    "roots": [],
+    "script": "dev2"
+  },
+  "unicodeSha256": "ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f"
+}

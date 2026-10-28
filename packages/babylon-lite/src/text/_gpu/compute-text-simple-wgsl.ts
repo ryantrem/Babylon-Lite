@@ -1,5 +1,5 @@
 /** Exact nominal-run proof and fused first-only pair positioning. */
-export function computeTextSimpleSource(globalScratch: boolean): string {
+export function computeTextSimpleSource(globalScratch: boolean, proofMatch: "matchInput" | "matchInputProbe" = "matchInput"): string {
     return `
 var<workgroup> simpleRoots:vec2u;
 var<workgroup> firstFailure:atomic<u32>;
@@ -11,7 +11,7 @@ var<workgroup> proofResult:u32;`
         : ""
 }
 fn simplePair(first:u32, second:u32, root:u32)->vec2u {
-let footer = params.programWords + params.rootCount * 2u + params.glyphCount * 2u;
+let footer = params.programWords + params.rootCount * 4u + params.glyphCount * program[13u] * 2u;
 let directory = program[footer + root];
 let entry = directory + first * 2u;
 let ops = program[entry];
@@ -38,11 +38,11 @@ while (remaining != 0u) {
 let root = countTrailingZeros(remaining);
 let bit = 1u << root;
 remaining &= remaining - 1u;
-let table = program[roots + root * 2u];
-let lookup = program[roots + root * 2u + 1u];
+let table = program[roots + root * 4u] >> 16u;
+let lookup = program[roots + root * 4u] & 0xffffu;
 let descriptor = select(program[4u], program[5u], table == 1u) + lookup * 8u;
 if (table == 1u) {
-let footer = params.programWords + params.rootCount * 2u + params.glyphCount * 2u;
+let footer = params.programWords + params.rootCount * 4u + params.glyphCount * program[13u] * 2u;
 if (program[descriptor + 2u] != 3u || footer + root >= arrayLength(&program) || program[footer + root] == 0u) { return vec2u(candidates, 0u); }
 continue;
 }
@@ -56,12 +56,12 @@ let entry = directory + readGlyph(base, index) * 2u;
 let entries = program[entry];
 for (var candidate = 0u; candidate < program[entry + 1u]; candidate++) {
 let ruleAt = rules + program[entries + candidate] * 16u;
-if (matchInput(base, count, index, flag, ruleAt)) { return vec2u(candidates, 0u); }
+if (${globalScratch ? "matchInput" : proofMatch}(base, count, index, flag, ruleAt)) { return vec2u(candidates, 0u); }
 }
 }
 admittedRoots &= ~bit;
 }
-return vec2u(admittedRoots, 1u);
+return vec2u(admittedRoots, 1u | ((runs[base] >> 31u) << 1u));
 }
 ${
     globalScratch
@@ -74,13 +74,13 @@ while (remaining != 0u) {
 let root = countTrailingZeros(remaining);
 let bit = 1u << root;
 remaining &= remaining - 1u;
-let table = program[roots + root * 2u];
-let lookup = program[roots + root * 2u + 1u];
+let table = program[roots + root * 4u] >> 16u;
+let lookup = program[roots + root * 4u] & 0xffffu;
 let descriptor = select(program[4u], program[5u], table == 1u) + lookup * 8u;
 if (lane == 0u) { atomicStore(&proofFailure, 0u); }
 workgroupBarrier();
 if (table == 1u) {
-let footer = params.programWords + params.rootCount * 2u + params.glyphCount * 2u;
+let footer = params.programWords + params.rootCount * 4u + params.glyphCount * program[13u] * 2u;
 if (program[descriptor + 2u] != 3u || footer + root >= arrayLength(&program) || program[footer + root] == 0u) { atomicStore(&proofFailure, 1u); }
 } else {
 let flag = program[descriptor + 1u];
@@ -102,11 +102,22 @@ let result = workgroupUniformLoad(&proofResult);
 if (result == 1u) { return vec2u(candidates, 0u); }
 if (result == 0u) { admittedRoots &= ~bit; }
 }
-return vec2u(admittedRoots, 1u);
+return vec2u(admittedRoots, 1u | ((runs[base] >> 31u) << 1u));
 }`
         : ""
 }
-fn finishSimpleRun(base:u32, count:u32, candidates:u32, out:u32, lane:u32) {
+${finishSimpleRun(globalScratch, "", "")}
+${finishSimpleRun(globalScratch, "Lean", " & 0xff0fu")}
+`;
+}
+
+/**
+ * Fused first-only pair positioning. `Lean` serves runs the CPU proved mark-free
+ * (run header bit 31): UseMarkFilteringSet only skips class-3 glyphs, so dropping
+ * it is exact there, and a constant mask lets the compiler remove the set lookup.
+ */
+function finishSimpleRun(globalScratch: boolean, name: string, flagMask: string): string {
+    return `fn finishSimpleRun${name}(base:u32, count:u32, candidates:u32, out:u32, lane:u32) {
 let roots = program[8u];
 for (var index = lane; index < count; index += 32u) {
 let id = readGlyph(base, index);
@@ -115,9 +126,9 @@ var remaining = candidates;
 while (remaining != 0u) {
 let root = countTrailingZeros(remaining);
 remaining &= remaining - 1u;
-let lookup = program[roots + root * 2u + 1u];
+let lookup = program[roots + root * 4u] & 0xffffu;
 let descriptor = program[5u] + lookup * 8u;
-let flag = program[descriptor + 1u] & 0xff0eu;
+let flag = program[descriptor + 1u]${flagMask};
 if (skipped(flag, id)) { continue; }
 let second = pairSecond(base, count, index, flag);
 if (second >= count) { continue; }
@@ -141,9 +152,9 @@ ${
         ? `if (lane == 0u) { proofResult = atomicLoad(&firstFailure); }
 let failure = workgroupUniformLoad(&proofResult);
 if (failure != 0xffffffffu) {
-let lookup = program[roots + failure * 2u + 1u];
+let lookup = program[roots + failure * 4u] & 0xffffu;
 let descriptor = program[5u] + lookup * 8u;
-let flag = program[descriptor + 1u] & 0xff0eu;
+let flag = program[descriptor + 1u]${flagMask};
 for (var index = lane; index < count; index += 32u) {
 let id = readGlyph(base, index);
 if (skipped(flag, id)) { continue; }
@@ -159,7 +170,7 @@ output[out + 3u] = i32(atomicLoad(&firstFailureIndex));`
 let failure = atomicLoad(&firstFailure);
 if (failure != 0xffffffffu) {
 output[out] = 1;
-output[out + 2u] = i32(program[roots + (failure >> 8u) * 2u + 1u] | 0x10000u);
+output[out + 2u] = i32((program[roots + (failure >> 8u) * 4u] & 0xffffu) | 0x10000u);
 output[out + 3u] = i32(failure & 255u);`
 }
 } else {

@@ -1,0 +1,2919 @@
+{
+  "coverageComplete": true,
+  "nonReference": [
+    {
+      "font": "synthetic:multiple",
+      "inputSource": "Production action invoked with deliberately undersized capacity; compares terminal header, not shaped expectations",
+      "reason": "negative",
+      "source": "tests/lite/compute/kernel.test.ts#shape overflow status 2 executes production WGSL (internal capacity injection)"
+    },
+    {
+      "font": "synthetic:pair-reject",
+      "inputSource": "Explicit injected overflow or matched unsupported lookup; no positive six-field record comparison",
+      "reason": "negative",
+      "source": "tests/lite/compute/long-run.test.ts#reports root-first, then full source-index rejection beyond the first tile"
+    },
+    {
+      "font": "synthetic:pair-reject",
+      "inputSource": "Explicit injected overflow or matched unsupported lookup; no positive six-field record comparison",
+      "reason": "negative",
+      "source": "tests/lite/compute/long-run.test.ts#tiled pair fallback preserves rejection priority when compact simple metadata is unavailable"
+    },
+    {
+      "font": "synthetic:multiple",
+      "inputSource": "Multiple substitution with deliberately undersized capacity, terminal header only",
+      "reason": "negative",
+      "source": "tests/lite/compute/long-run.test.ts#keeps long multiple-substitution overflow header exact"
+    },
+    {
+      "font": "synthetic:backtrack-reject",
+      "inputSource": "C-prefix + ABA + C-prefix + ABA; index 40/255/256/300, raw unsupported header",
+      "reason": "negative",
+      "source": "tests/lite/compute/ordered-parallel.test.ts#keeps the first of two ordered rejections and the original lookup word in both scratch modes"
+    },
+    {
+      "font": "synthetic:point-anchor",
+      "inputSource": "C-prefix + AB at index40/255/300; point-anchor rejection",
+      "reason": "negative",
+      "source": "tests/lite/compute/ordered-parallel.test.ts#rejects the first contour mark-ligature anchor before a later rejection in the same root"
+    },
+    {
+      "font": "synthetic:refresh-roots",
+      "inputSource": "Record word j = index*101+j, selected deleted indices; arithmetic survivors, not text-shaper data",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves all eight words across arbitrary tombstones at length 1"
+    },
+    {
+      "font": "synthetic:refresh-roots",
+      "inputSource": "Record word j = index*101+j, selected deleted indices; arithmetic survivors, not text-shaper data",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves all eight words across arbitrary tombstones at length 2"
+    },
+    {
+      "font": "synthetic:refresh-roots",
+      "inputSource": "Record word j = index*101+j, selected deleted indices; arithmetic survivors, not text-shaper data",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves all eight words across arbitrary tombstones at length 31"
+    },
+    {
+      "font": "synthetic:refresh-roots",
+      "inputSource": "Record word j = index*101+j, selected deleted indices; arithmetic survivors, not text-shaper data",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves all eight words across arbitrary tombstones at length 32"
+    },
+    {
+      "font": "synthetic:refresh-roots",
+      "inputSource": "Record word j = index*101+j, selected deleted indices; arithmetic survivors, not text-shaper data",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves all eight words across arbitrary tombstones at length 33"
+    },
+    {
+      "font": "synthetic:refresh-roots",
+      "inputSource": "Record word j = index*101+j, selected deleted indices; arithmetic survivors, not text-shaper data",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves all eight words across arbitrary tombstones at length 64"
+    },
+    {
+      "font": "synthetic:refresh-roots",
+      "inputSource": "Record word j = index*101+j, selected deleted indices; arithmetic survivors, not text-shaper data",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves all eight words across arbitrary tombstones at length 255"
+    },
+    {
+      "font": "synthetic:refresh-roots",
+      "inputSource": "Record word j = index*101+j, selected deleted indices; arithmetic survivors, not text-shaper data",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves all eight words across arbitrary tombstones at length 256"
+    },
+    {
+      "font": "synthetic:refresh-roots",
+      "inputSource": "Record word j = index*101+j, selected deleted indices; arithmetic survivors, not text-shaper data",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves all eight words across arbitrary tombstones at length 257"
+    },
+    {
+      "font": "synthetic:refresh-roots",
+      "inputSource": "Record word j = index*101+j, selected deleted indices; arithmetic survivors, not text-shaper data",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves all eight words across arbitrary tombstones at length 480"
+    },
+    {
+      "font": "synthetic:refresh-roots",
+      "inputSource": "Record word j = index*101+j, selected deleted indices; arithmetic survivors, not text-shaper data",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves all eight words across arbitrary tombstones at length 768"
+    },
+    {
+      "font": "synthetic:backtrack-reject",
+      "inputSource": "C-prefix+ABA, raw unsupported headers",
+      "reason": "negative",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves the first unsupported status and source cursor"
+    },
+    {
+      "font": "synthetic:multiple",
+      "inputSource": "Multiple action with forced capacity overflow",
+      "reason": "negative",
+      "source": "tests/lite/compute/parallel-refresh.test.ts#preserves capacity overflow before any refresh"
+    },
+    {
+      "font": "NotoSansGothic-Regular.ttf",
+      "inputSource": "Style words [1,1,1,1,unitsPerEm/48,0,0,0], no shaped data",
+      "reason": "structural",
+      "source": "tests/lite/compute/resident.test.ts#style ABI uses each font's unitsPerEm and requested pixel size"
+    },
+    {
+      "inputSource": "AB plus undersized instance buffer; expects status2 and [6,0,0,0]",
+      "reason": "negative",
+      "source": "tests/lite/compute/resident.test.ts#kernel overflow clears draw count (internal undersized instance allocation)"
+    },
+    {
+      "inputSource": "Draw/bind-group command ownership for A and atlas growth; no reference field equality",
+      "reason": "structural",
+      "source": "tests/lite/compute/resident.test.ts#nonvisual actual indirect draws reuse shared native atlas resources and invalidate sibling bindings on growth"
+    },
+    {
+      "inputSource": "Pending actual pipeline, dispose/loss, survivor status and indirect resource ownership",
+      "reason": "status-only",
+      "source": "tests/lite/compute/lifecycle.test.ts#resident busy, disposal and survivor ownership while the real pipeline is pending"
+    },
+    {
+      "inputSource": "Pending actual pipeline, dispose/loss, survivor status and indirect resource ownership",
+      "reason": "status-only",
+      "source": "tests/lite/compute/lifecycle.test.ts#resident device.lost is terminal during actual pipeline preparation"
+    },
+    {
+      "inputSource": "Cache invalidation/required allocation errors; no shaped output expectation",
+      "reason": "status-only",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#invalidates flag entries with ready admission errors and never publishes a busy-rejected candidate"
+    },
+    {
+      "inputSource": "Cache invalidation/required allocation errors; no shaped output expectation",
+      "reason": "status-only",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#clears a previously visible draw on required budget overflow without installing new glyphs"
+    },
+    {
+      "inputSource": "Flag-work counts and resource version/lifetime, not shaped values",
+      "reason": "structural",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#performs bounded flag work on eligible edits and fully regenerates every ineligible dirty paragraph"
+    },
+    {
+      "inputSource": "Flag-work counts and resource version/lifetime, not shaped values",
+      "reason": "structural",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#recreates stage resources and bumps its version on a device change"
+    },
+    {
+      "font": "synthetic:pair-reject",
+      "inputSource": "BC matches a nonzero default variation delta and rejects; positive A/BA/C recovery inputs are registered separately",
+      "reason": "negative",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#matches fresh failing paragraphs and their later fixes through real unsupported lookups"
+    },
+    {
+      "inputSource": "Manually injected records/advances/flags (source literals and seeds), CPU referenceLines or unchanged serial WGSL; no text-shaper input",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#preserves cached slot failures and selects the first failing logical paragraph after reordering or deletion"
+    },
+    {
+      "inputSource": "Manually injected records/advances/flags (source literals and seeds), CPU referenceLines or unchanged serial WGSL; no text-shaper input",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#matches serial WGSL bit-for-bit for blocked scans, candidate events, fallback, failures and incremental reuse (seed 0x31415926)"
+    },
+    {
+      "inputSource": "Manually injected records/advances/flags (source literals and seeds), CPU referenceLines or unchanged serial WGSL; no text-shaper input",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#matches the serial oracle for hinted gallop and lane line sweeps through 120001 records (seed 0x6a09e667)"
+    },
+    {
+      "inputSource": "Manually injected records/advances/flags (source literals and seeds), CPU referenceLines or unchanged serial WGSL; no text-shaper input",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#keeps final-record decisions exact at counts 1/2/256/257/512/513 and one f32 step below"
+    },
+    {
+      "inputSource": "Manually injected records/advances/flags (source literals and seeds), CPU referenceLines or unchanged serial WGSL; no text-shaper input",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#preserves rounded boundaries for sampled starts and cross-lane successors"
+    },
+    {
+      "inputSource": "Manually injected records/advances/flags (source literals and seeds), CPU referenceLines or unchanged serial WGSL; no text-shaper input",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#handles equal prefixes across lane/span boundaries and paragraph tails with emergency-only breaks"
+    },
+    {
+      "inputSource": "Manually injected records/advances/flags (source literals and seeds), CPU referenceLines or unchanged serial WGSL; no text-shaper input",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#keeps the exact signed-prefix limit parallel and overflow or negative advances serial"
+    },
+    {
+      "inputSource": "Manually injected records/advances/flags (source literals and seeds), CPU referenceLines or unchanged serial WGSL; no text-shaper input",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#matches fixed-seed mixed batches including adjacent final-paragraph bounds"
+    },
+    {
+      "inputSource": "Manually injected records/advances/flags (source literals and seeds), CPU referenceLines or unchanged serial WGSL; no text-shaper input",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#counts visible slots and keeps y advances across lines, including visible hanging spaces and protected clusters"
+    },
+    {
+      "inputSource": "300 records with injected status/capacity/slot failures; expected first logical failure",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#reports the lowest failing paragraph or capacity overflow and draws nothing: {\"failureAt\":299,\"failure\":1,\"limit\":300,\"expected\":1}"
+    },
+    {
+      "inputSource": "300 records with injected status/capacity/slot failures; expected first logical failure",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#reports the lowest failing paragraph or capacity overflow and draws nothing: {\"failureAt\":299,\"failure\":3,\"limit\":1,\"expected\":2}"
+    },
+    {
+      "inputSource": "300 records with injected status/capacity/slot failures; expected first logical failure",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#reports the lowest failing paragraph or capacity overflow and draws nothing: {\"failureAt\":0,\"failure\":3,\"limit\":1,\"expected\":3}"
+    },
+    {
+      "inputSource": "300 records with injected status/capacity/slot failures; expected first logical failure",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#reports the lowest failing paragraph or capacity overflow and draws nothing: {\"failureAt\":3,\"failure\":1,\"limit\":2,\"expected\":2}"
+    },
+    {
+      "inputSource": "300 records with injected status/capacity/slot failures; expected first logical failure",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#reports the lowest failing paragraph or capacity overflow and draws nothing: {\"failureAt\":0,\"failure\":2,\"limit\":300,\"expected\":2}"
+    },
+    {
+      "inputSource": "300 records with injected status/capacity/slot failures; expected first logical failure",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#reports the lowest failing paragraph or capacity overflow and draws nothing: {\"failureAt\":0,\"failure\":-3,\"limit\":300,\"expected\":3}"
+    },
+    {
+      "inputSource": "Metadata counters, render command order or binding window bounds; no reference shaping values",
+      "reason": "structural",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#skips measure/place only at exact checkpoint and reverse-event convergence"
+    },
+    {
+      "inputSource": "Metadata counters, render command order or binding window bounds; no reference shaping values",
+      "reason": "structural",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#retains the original fitting-path render command order"
+    },
+    {
+      "inputSource": "Metadata counters, render command order or binding window bounds; no reference shaping values",
+      "reason": "structural",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#encodes every actual ordered window and invalidates bundles only when the range list changes"
+    },
+    {
+      "inputSource": "Metadata counters, render command order or binding window bounds; no reference shaping values",
+      "reason": "structural",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#binds bounded windows inside arenas larger than the effective test binding limit"
+    },
+    {
+      "inputSource": "Busy/dispose/preparation/loss status and resource lifetime checks",
+      "reason": "status-only",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#preserves busy admission, multiple pending results and terminal resource release"
+    },
+    {
+      "inputSource": "Busy/dispose/preparation/loss status and resource lifetime checks",
+      "reason": "status-only",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#preserves status results while switching between submitted legacy and paged resources"
+    },
+    {
+      "inputSource": "Busy/dispose/preparation/loss status and resource lifetime checks",
+      "reason": "status-only",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#releases early paged allocations when disposal interrupts pipeline preparation"
+    },
+    {
+      "inputSource": "Busy/dispose/preparation/loss status and resource lifetime checks",
+      "reason": "status-only",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#retires a failed admitted candidate before retrying pipeline preparation"
+    },
+    {
+      "inputSource": "Busy/dispose/preparation/loss status and resource lifetime checks",
+      "reason": "status-only",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#forgets all paged resources on actual device loss and never resurrects the owner"
+    },
+    {
+      "inputSource": "Injected completion status1, subsequent generation invalidation and visible-range status",
+      "reason": "status-only",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#invalidates a failed paged ancestor without clearing a newer independent generation: false"
+    },
+    {
+      "inputSource": "Injected completion status1, subsequent generation invalidation and visible-range status",
+      "reason": "status-only",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#invalidates a failed paged ancestor without clearing a newer independent generation: true"
+    },
+    {
+      "inputSource": "Injected shaped status, count overflow or missing atlas slot; indirect draw must be suppressed",
+      "reason": "negative",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#keeps every old/candidate range invisible after synchronous or later-chunk GPU failure 1"
+    },
+    {
+      "inputSource": "Injected shaped status, count overflow or missing atlas slot; indirect draw must be suppressed",
+      "reason": "negative",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#keeps every old/candidate range invisible after synchronous or later-chunk GPU failure 2"
+    },
+    {
+      "inputSource": "Injected shaped status, count overflow or missing atlas slot; indirect draw must be suppressed",
+      "reason": "negative",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#keeps every old/candidate range invisible after synchronous or later-chunk GPU failure 3"
+    },
+    {
+      "inputSource": "A.repeat(200) required workspace exceeds effective binding budget, no published output",
+      "reason": "negative",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#rejects an indivisible required span before installing atlas or paged resources"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "Model repeats the oracleFields(\"a a a \") two-record period for a device-limit-derived count; the source six-field period is registered separately",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#renders a real paragraph beyond required Stage1 line storage with default device limits#periodic-large-run"
+    },
+    {
+      "inputSource": "Source buildCase() produces controlled segment headers/records; CPU stitch model, no text-shaper records",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-routing.test.ts#routes S=0 through one exact shader/output dispatch"
+    },
+    {
+      "inputSource": "Source buildCase() produces controlled segment headers/records; CPU stitch model, no text-shaper records",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-routing.test.ts#routes S=1 through one exact shader/output dispatch"
+    },
+    {
+      "inputSource": "Source buildCase() produces controlled segment headers/records; CPU stitch model, no text-shaper records",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-routing.test.ts#routes S=64 through one exact shader/output dispatch"
+    },
+    {
+      "inputSource": "Source buildCase() produces controlled segment headers/records; CPU stitch model, no text-shaper records",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-routing.test.ts#routes S=65 through one exact shader/output dispatch"
+    },
+    {
+      "inputSource": "Controlled segment words from buildCase(); routing/lifecycle or CPU byte model",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-routing.test.ts#keeps the exported tiled kernel byte-identical for the separate paged executor"
+    },
+    {
+      "inputSource": "Controlled segment words from buildCase(); routing/lifecycle or CPU byte model",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-routing.test.ts#prepares both variants before first submission and flips 1→2→1 rows without cold compile"
+    },
+    {
+      "inputSource": "Controlled segment words from buildCase(); routing/lifecycle or CPU byte model",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-routing.test.ts#uses the same route changes without a custom pack stage"
+    },
+    {
+      "inputSource": "Controlled segment words from buildCase(); routing/lifecycle or CPU byte model",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-routing.test.ts#does not publish readiness when preparation of the initially unselected variant fails"
+    },
+    {
+      "inputSource": "Controlled segment words from buildCase(); routing/lifecycle or CPU byte model",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-routing.test.ts#uses the batch maximum for mixed runs and preserves signed failure and overflow headers"
+    },
+    {
+      "inputSource": "Source compare(StitchCase) constructs synthetic segment record bytes and sentinels; CPU stitch expected bytes",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-tiling.test.ts#preserves every output/header/sentinel byte for S=0 at Y=1/formula/overprovided, twice"
+    },
+    {
+      "inputSource": "Source compare(StitchCase) constructs synthetic segment record bytes and sentinels; CPU stitch expected bytes",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-tiling.test.ts#preserves every output/header/sentinel byte for S=1 at Y=1/formula/overprovided, twice"
+    },
+    {
+      "inputSource": "Source compare(StitchCase) constructs synthetic segment record bytes and sentinels; CPU stitch expected bytes",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-tiling.test.ts#preserves every output/header/sentinel byte for S=63 at Y=1/formula/overprovided, twice"
+    },
+    {
+      "inputSource": "Source compare(StitchCase) constructs synthetic segment record bytes and sentinels; CPU stitch expected bytes",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-tiling.test.ts#preserves every output/header/sentinel byte for S=64 at Y=1/formula/overprovided, twice"
+    },
+    {
+      "inputSource": "Source compare(StitchCase) constructs synthetic segment record bytes and sentinels; CPU stitch expected bytes",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-tiling.test.ts#preserves every output/header/sentinel byte for S=65 at Y=1/formula/overprovided, twice"
+    },
+    {
+      "inputSource": "Source compare(StitchCase) constructs synthetic segment record bytes and sentinels; CPU stitch expected bytes",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-tiling.test.ts#preserves every output/header/sentinel byte for S=128 at Y=1/formula/overprovided, twice"
+    },
+    {
+      "inputSource": "Source compare(StitchCase) constructs synthetic segment record bytes and sentinels; CPU stitch expected bytes",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-tiling.test.ts#preserves every output/header/sentinel byte for S=129 at Y=1/formula/overprovided, twice"
+    },
+    {
+      "inputSource": "Source compare(StitchCase) constructs synthetic segment record bytes and sentinels; CPU stitch expected bytes",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-tiling.test.ts#preserves every output/header/sentinel byte for S=1961 at Y=1/formula/overprovided, twice"
+    },
+    {
+      "inputSource": "Source StitchCase counts, failures and offsets feed the CPU byte model, not a font shaper",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-tiling.test.ts#preserves mixed runs, nonzero first/runBase, exact fit and capacity overflow by one"
+    },
+    {
+      "inputSource": "Source StitchCase counts, failures and offsets feed the CPU byte model, not a font shaper",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-tiling.test.ts#preserves the earliest failure's exact signed status and diagnostics across all tiles"
+    },
+    {
+      "inputSource": "Source StitchCase counts, failures and offsets feed the CPU byte model, not a font shaper",
+      "reason": "internal-model",
+      "source": "tests/lite/compute/stitch-tiling.test.ts#keeps ragged 300-run global-Y overdispatch and high run indices exact, including failures and overflow"
+    },
+    {
+      "inputSource": "Forged selection object",
+      "reason": "negative",
+      "source": "tests/lite/unit/compute-text-plan.test.ts#rejects a forged script/direction pair and does not read extra option fields"
+    },
+    {
+      "inputSource": "Local sfnt table construction and expected lookup-index structure; no shaped records",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-plan.test.ts#includes a required feature that is not in the default set"
+    },
+    {
+      "inputSource": "Local sfnt table construction and expected lookup-index structure; no shaped records",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-plan.test.ts#deduplicates lookup references and closes an extension-wrapped dependency"
+    },
+    {
+      "inputSource": "Local sfnt table construction and expected lookup-index structure; no shaped records",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-plan.test.ts#uses an empty plan for a missing layout table, an absent script, or a missing default LangSys"
+    },
+    {
+      "inputSource": "Compiler/parser rule directories, immutable storage or lookup digest; no six-field expectation fabricated",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#packs a tight program buffer and shares mark-class base lists without changing per-rule anchors"
+    },
+    {
+      "inputSource": "Compiler/parser rule directories, immutable storage or lookup digest; no six-field expectation fabricated",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#reuses immutable parsed actions without aliasing a different font snapshot or lookup"
+    },
+    {
+      "inputSource": "Compiler/parser rule directories, immutable storage or lookup digest; no six-field expectation fabricated",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#shares class coverage and indexes every nonzero or rejected class-pair cell without changing logical rule order"
+    },
+    {
+      "inputSource": "Compiler/parser rule directories, immutable storage or lookup digest; no six-field expectation fabricated",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#classifies only dependency-free single and pair roots for cooperative predicate selection"
+    },
+    {
+      "inputSource": "Compiler/parser rule directories, immutable storage or lookup digest; no six-field expectation fabricated",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#compiles Roboto's Latin plan as executable text-shaper actions"
+    },
+    {
+      "inputSource": "Compiler/parser rule directories, immutable storage or lookup digest; no six-field expectation fabricated",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#keeps Arabic Context-3 roots oracle-inert without weakening Inter rejection predicates"
+    },
+    {
+      "inputSource": "Compiler/parser rule directories, immutable storage or lookup digest; no six-field expectation fabricated",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#compiles a single substitution and does not emit a no-op mode"
+    },
+    {
+      "inputSource": "Local unsupported sfnt lookup rejection assertions",
+      "reason": "negative",
+      "source": "tests/lite/unit/compute-text-program.test.ts#rejects an unknown selected lookup type instead of skipping it"
+    },
+    {
+      "inputSource": "Local unsupported sfnt lookup rejection assertions",
+      "reason": "negative",
+      "source": "tests/lite/unit/compute-text-program.test.ts#keeps an understood alternate substitution as a fail-if-matched rejection"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "Parsed anchors vs packed words",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#packs stable sorted mark anchors with exact signed positions: Inter.ttf"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "Parsed anchors vs packed words",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#packs stable sorted mark anchors with exact signed positions: Roboto-Regular.ttf"
+    },
+    {
+      "font": "NotoSansArabic-Regular.ttf",
+      "inputSource": "Parsed anchors vs packed words",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#packs stable sorted mark anchors with exact signed positions: NotoSansArabic-Regular.ttf"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "Compiled predicate/capability/ordering metadata, not oracle glyph output",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#indexes every first predicate in original order, including rejection and class zero: Inter.ttf"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "Compiled predicate/capability/ordering metadata, not oracle glyph output",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#encodes ordered eligibility and forward-only proof without changing cooperative capabilities: Inter.ttf"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "Compiled predicate/capability/ordering metadata, not oracle glyph output",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#indexes every first predicate in original order, including rejection and class zero: Roboto-Regular.ttf"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "Compiled predicate/capability/ordering metadata, not oracle glyph output",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-program.test.ts#encodes ordered eligibility and forward-only proof without changing cooperative capabilities: Roboto-Regular.ttf"
+    },
+    {
+      "inputSource": "Installed mock executor/device supplies records or deliberately invalid results",
+      "reason": "mock",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#omits unused offset vectors in shaping batches without changing standalone offsets or UTF-16 rejection priority"
+    },
+    {
+      "inputSource": "Installed mock executor/device supplies records or deliberately invalid results",
+      "reason": "mock",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#selects each public input once and preserves executor snapshot isolation"
+    },
+    {
+      "inputSource": "Installed mock executor/device supplies records or deliberately invalid results",
+      "reason": "mock",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#rejects an incomplete executor batch instead of publishing missing nonempty runs as empty"
+    },
+    {
+      "inputSource": "Installed mock executor/device supplies records or deliberately invalid results",
+      "reason": "mock",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#checks every signed publication field without allocating an intermediate numeric array per glyph"
+    },
+    {
+      "inputSource": "Installed mock executor/device supplies records or deliberately invalid results",
+      "reason": "mock",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#rejects a second batch, dispose, and device loss without publishing"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#reuses immutable preparation and compiles once while repacking every warm revision and capacity"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#bulk-packs current nominal glyph vectors without transmitting redundant initial scalar-index clusters"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#packs every class definition as a constant-time glyph-indexed table including the class-zero complement"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#compacts first-only pair rows without losing original cell deltas or rejection modes"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#requires a non-leading predicate witness before visiting dormant Inter composition roots"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#bypasses absent roots before fetching their global lookup descriptors"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#does not re-fetch successfully committed disjoint actions in the serial rejection scan"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#uses bounded binary membership for remaining glyph-set predicates, not linear coverage scans"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#does not load GDEF classes for flags that have no filtering effect"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#compacts only ordered substitution roots, never independent roots or an already compact GPOS transition"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#compacts ordered substitution scratch only after a successful ligature creates tombstones"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#refreshes root presence only after glyph identities or live membership actually change"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#maintains nominal advances during initialization and glyph replacement without a redundant whole-run GPOS transition"
+    },
+    {
+      "inputSource": "Packed preparation words and source/code-string structure, not independently shaped glyph values",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#keeps the GPU kernel behind a dynamic import and fails closed on mode 5"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "Exhaustive candidate-bit construction",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#packs exhaustive first-32-root presence masks from candidate directories: Inter.ttf"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "Exhaustive candidate-bit construction",
+      "reason": "structural",
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#packs exhaustive first-32-root presence masks from candidate directories: Roboto-Regular.ttf"
+    },
+    {
+      "inputSource": "Original UTF16/control/script/joiner/variation/unmapped cases; obsolete C4 rejections are shaped rows separately",
+      "reason": "negative",
+      "source": "tests/lite/compute/milestones.test.ts#fail-closed corpus"
+    },
+    {
+      "font": "synthetic:pair-reject",
+      "inputSource": "Batch ['', 'A', 'ABC'] matches nonzero default variation delta; positive non-matching pairs are registered separately",
+      "reason": "negative",
+      "source": "tests/lite/compute/kernel.test.ts#retains original root-first rejection priority across independently positioned glyphs"
+    },
+    {
+      "font": "synthetic:alternate",
+      "inputSource": "A matches Alternate; B is a separately registered positive row",
+      "reason": "negative",
+      "source": "tests/lite/compute/kernel.test.ts#understood alternate is rejected when matched, never a mode-5 noop"
+    },
+    {
+      "font": "synthetic:point-anchor",
+      "inputSource": "Batch ['', 'B', 'AB'] matches a contour anchor; B is registered separately",
+      "reason": "negative",
+      "source": "tests/lite/compute/kernel.test.ts#GPOS point-anchor rejection identifies its table and original run after empty-run filtering"
+    },
+    {
+      "inputSource": "CPU exact storage/workgroup limit checks and capacity0 error; the positive Gothic record is registered separately",
+      "reason": "structural",
+      "source": "tests/lite/compute/kernel.test.ts#storage/buffer/workgroup exact boundaries use real device limits without near-OOM allocation"
+    },
+    {
+      "inputSource": "Newline, mixed script, lone surrogate and unmapped emoji; obsolete C4 rejections are shaped rows separately",
+      "reason": "negative",
+      "source": "tests/lite/compute/resident.test.ts#rejection clears every indirect word and recovery keeps the caller atlas"
+    },
+    {
+      "font": "NotoSansSC-Regular-subset.ttf",
+      "inputSource": "NotoSansSC subset with unmapped Latin A; no expected glyph records",
+      "reason": "negative",
+      "source": "lab/lite/src/lite/compute-text-shaper-test.ts#run"
+    },
+    {
+      "font": "NotoSansSC-Regular-subset.ttf",
+      "inputSource": "NotoSansSC subset with unmapped Latin A; no expected glyph records",
+      "reason": "negative",
+      "source": "tests/lite/plumbing/compute-text-shaper.spec.ts#compute text shaper matches text-shaper on a real WebGPU device"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "Every edit, including office.repeat(live cache capacity): compareFresh -> residentOutputs equality plus capacity/order assertions; no reference shaping expectation",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#is bit-identical to fresh updates through a four-medium-paragraph editing sequence: Inter.ttf"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "Every edit, including office.repeat(live cache capacity): compareFresh -> residentOutputs equality plus capacity/order assertions; no reference shaping expectation",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#is bit-identical to fresh updates through a four-medium-paragraph editing sequence: Roboto-Regular.ttf"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "Before/after clean-slot residentOutputs and compareFresh equality; mapping/dispatch counts are structural only",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#prepares only one dirty paragraph in a 100-paragraph document (whole-run=false)"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "Before/after clean-slot residentOutputs and compareFresh equality; mapping/dispatch counts are structural only",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#prepares only one dirty paragraph in a 100-paragraph document (whole-run=true)"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "Before/after clean-slot residentOutputs and compareFresh equality; mapping/dispatch counts are structural only",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#prepares only one dirty paragraph in a 500-paragraph document (whole-run=false)"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "compareFresh -> residentOutputs(incremental) == residentOutputs(fresh), plus structural/status/error assertions; no oracleFields/verifyLayout",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#does no preparation/shape/stitch work for placement, width, deletion, or unchanged updates"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "compareFresh -> residentOutputs(incremental) == residentOutputs(fresh), plus structural/status/error assertions; no oracleFields/verifyLayout",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#compacts on pool exhaustion and retains scalar flags when a dirty slot shrinks"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "compareFresh -> residentOutputs(incremental) == residentOutputs(fresh), plus structural/status/error assertions; no oracleFields/verifyLayout",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#plain updates and synchronous errors invalidate reuse, then recover through a full rebuild"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "compareFresh -> residentOutputs(incremental) == residentOutputs(fresh), plus structural/status/error assertions; no oracleFields/verifyLayout",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#adds new glyph outlines/slot entries only and rebuilds on atlas capacity growth"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "compareFresh -> residentOutputs(incremental) == residentOutputs(fresh), plus structural/status/error assertions; no oracleFields/verifyLayout",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#keeps logical failure ordering in cached slot info and invalidates after a failed incremental submission"
+    },
+    {
+      "font": "synthetic:pair-reject",
+      "inputSource": "compareFresh -> residentOutputs(incremental) == residentOutputs(fresh), plus structural/status/error assertions; no oracleFields/verifyLayout",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#matches fresh failing paragraphs and their later fixes through real unsupported lookups"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "compareFresh -> residentOutputs(incremental) == residentOutputs(fresh), plus structural/status/error assertions; no oracleFields/verifyLayout",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#rebuilds after external atlas mutation, including a formerly empty glyph becoming visible"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "Completion/cache lifetime checks and compareFresh output equality; no reference shaping values",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#late completion failure invalidates descendants but not a newer full rebuild (rebuild=false)"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "Completion/cache lifetime checks and compareFresh output equality; no reference shaping values",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-layout.test.ts#late completion failure invalidates descendants but not a newer full rebuild (rebuild=true)"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All widths/alignments compare outputs(paged) == outputs(monolithic), not an independent shaper",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#matches six-field records and f32 instance bits across small arena seams: Inter.ttf"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "All widths/alignments compare outputs(paged) == outputs(monolithic), not an independent shaper",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#matches six-field records and f32 instance bits across small arena seams: Roboto-Regular.ttf"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#places a fitting indivisible span through a one-workgroup grid without truncation"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#bounds uneven segment workspace without rejecting a fitting indivisible span"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#retires obsolete dedicated arenas and transient high-water storage after a smaller replacement"
+    },
+    {
+      "font": "NotoSansGothic-Regular.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#retains paragraph-level script selection and scalar clusters across Common-only and supplementary chunks"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#uploads immutable font data once per selected plan rather than once per chunk"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#skips clean shape dispatches and releases paged state when switching to plain updates"
+    },
+    {
+      "font": "Roboto-Regular.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#reuses proven shifted suffix shapes, converges exactly, and handles paragraph split/merge/reorder edits"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#re-places a clean prefix when a future chunk changes the width of their shared open line"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#matches serial signed wrapping, deleted chunks and cross-boundary pen arithmetic"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#carries both retroactive line closures over many chunks without losing hanging-space events"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#automatically pages materially wasteful mixed-length storage while preserving clean paragraph shapes"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#rebuilds paged placement/slot dependencies after external atlas mutation"
+    },
+    {
+      "font": "Inter.ttf",
+      "inputSource": "All source inputs/edits compare paged and monolithic Lite outputs; other assertions concern workspace, counters, injected layout words or resource ownership",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#retains admitted immutable source/layout snapshots while chunk preparation is pending"
+    },
+    {
+      "font": "synthetic:multiple",
+      "inputSource": "ABCABC/AABC/BC compare outputs of two Lite paths; no independent six-field expectation",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#preserves fitting indivisible synthetic shaping: multiple"
+    },
+    {
+      "font": "synthetic:context",
+      "inputSource": "ABCABC/AABC/BC compare outputs of two Lite paths; no independent six-field expectation",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#preserves fitting indivisible synthetic shaping: context"
+    },
+    {
+      "font": "synthetic:backtrack",
+      "inputSource": "ABCABC/AABC/BC compare outputs of two Lite paths; no independent six-field expectation",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#preserves fitting indivisible synthetic shaping: backtrack"
+    },
+    {
+      "font": "synthetic:ligature-ignore-marks",
+      "inputSource": "ABCABC/AABC/BC compare outputs of two Lite paths; no independent six-field expectation",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#preserves fitting indivisible synthetic shaping: ligature-ignore-marks"
+    },
+    {
+      "font": "synthetic:adjust",
+      "inputSource": "ABCABC/AABC/BC compare outputs of two Lite paths; no independent six-field expectation",
+      "reason": "differential",
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#preserves fitting indivisible synthetic shaping: adjust"
+    }
+  ],
+  "pendingInputs": [],
+  "planIndex": [
+    {
+      "direction": "ltr",
+      "feature": "default",
+      "flags": [
+        "C5",
+        "C4"
+      ],
+      "font": "Inter.ttf",
+      "gposRoots": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+      "gsubRoots": [3, 5, 6, 8, 9, 11, 47, 48, 51, 52],
+      "kind": "plan-index",
+      "script": "latn",
+      "source": "tests/lite/unit/compute-text-plan.test.ts#locks Inter.ttf latn/und/ltr roots and nested dependencies"
+    },
+    {
+      "direction": "ltr",
+      "feature": "default",
+      "flags": [
+        "C4"
+      ],
+      "font": "Roboto-Regular.ttf",
+      "gposRoots": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+      "gsubRoots": [3, 4, 5, 6, 7, 8, 14, 15],
+      "kind": "plan-index",
+      "script": "latn",
+      "source": "tests/lite/unit/compute-text-plan.test.ts#locks Roboto-Regular.ttf latn/und/ltr roots and nested dependencies"
+    }
+  ],
+  "registered": [
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 20,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 20,
+      "source": "tests/lite/compute/milestones.test.ts#Latin repertoire and ordered witnesses: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 800,
+        "N-proof": 0,
+        "U": 97,
+        "X": 0
+      },
+      "shapedRows": 897,
+      "source": "tests/lite/compute/milestones.test.ts#Latin-1/Extended scalar repertoire and seeded sequences: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 118,
+        "N-proof": 0,
+        "U": 9,
+        "X": 0
+      },
+      "shapedRows": 127,
+      "source": "tests/lite/compute/milestones.test.ts#Greek and Cyrillic: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 5,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 5,
+      "source": "tests/lite/compute/kernel.test.ts#keeps exact marked records across anchor search boundaries and global scratch: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 3,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/long-run.test.ts#finishes proven long nominal runs without scratch fallback: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 40,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 41,
+      "source": "tests/lite/compute/long-run.test.ts#matches all six oracle fields across scratch/tile boundaries: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 10,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 11,
+      "source": "tests/lite/compute/long-run.test.ts#resident shared owner grows, shrinks, reuses and disposes: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 14,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 14,
+      "source": "tests/lite/compute/ordered-parallel.test.ts#retains overlapping ffi/ffl/fi precedence, marks and boundary-crossing ligatures: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 9,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 9,
+      "source": "tests/lite/compute/parallel-refresh.test.ts#compacts real boundary-crossing ligatures exactly: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 22,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 25,
+      "source": "tests/lite/compute/resident.test.ts#resident records, packing and indirect: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 5,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 15,
+        "X": 0
+      },
+      "shapedRows": 20,
+      "source": "tests/lite/compute/milestones.test.ts#Latin repertoire and ordered witnesses: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 4,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1129,
+        "X": 0
+      },
+      "shapedRows": 1133,
+      "source": "tests/lite/compute/milestones.test.ts#Latin-1/Extended scalar repertoire and seeded sequences: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 127,
+        "X": 0
+      },
+      "shapedRows": 127,
+      "source": "tests/lite/compute/milestones.test.ts#Greek and Cyrillic: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 3,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 5,
+      "source": "tests/lite/compute/kernel.test.ts#keeps exact marked records across anchor search boundaries and global scratch: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/long-run.test.ts#finishes proven long nominal runs without scratch fallback: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 6,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 35,
+        "X": 0
+      },
+      "shapedRows": 41,
+      "source": "tests/lite/compute/long-run.test.ts#matches all six oracle fields across scratch/tile boundaries: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 1,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 10,
+        "X": 0
+      },
+      "shapedRows": 11,
+      "source": "tests/lite/compute/long-run.test.ts#resident shared owner grows, shrinks, reuses and disposes: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 4,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 4,
+        "N-proof": 0,
+        "U": 6,
+        "X": 0
+      },
+      "shapedRows": 14,
+      "source": "tests/lite/compute/ordered-parallel.test.ts#retains overlapping ffi/ffl/fi precedence, marks and boundary-crossing ligatures: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 9,
+        "X": 0
+      },
+      "shapedRows": 9,
+      "source": "tests/lite/compute/parallel-refresh.test.ts#compacts real boundary-crossing ligatures exactly: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 1,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 24,
+        "X": 0
+      },
+      "shapedRows": 25,
+      "source": "tests/lite/compute/resident.test.ts#resident records, packing and indirect: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 266,
+        "X": 0
+      },
+      "shapedRows": 266,
+      "source": "tests/lite/compute/milestones.test.ts#CJK and supplementary Gothic"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 10,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 12,
+      "source": "tests/lite/compute/milestones.test.ts#Hebrew and Arabic"
+    },
+    {
+      "categories": {
+        "A": 2,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 60,
+        "N-proof": 0,
+        "U": 34,
+        "X": 0
+      },
+      "shapedRows": 96,
+      "source": "tests/lite/compute/milestones.test.ts#mapped RTL repertoire and seeded joining/marks: NotoSansHebrew-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 115,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 115,
+      "source": "tests/lite/compute/milestones.test.ts#mapped RTL repertoire and seeded joining/marks: NotoSansArabic-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 108,
+        "X": 0
+      },
+      "shapedRows": 108,
+      "source": "tests/lite/compute/milestones.test.ts#batch ordering and lengths"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2048,
+        "X": 0
+      },
+      "shapedRows": 2048,
+      "source": "tests/lite/compute/milestones.test.ts#completes every run and six fields in a natural Latin50 batch of 2048"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 3,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/milestones.test.ts#fail-closed corpus"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 106,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 106,
+      "source": "tests/lite/compute/kernel.test.ts#preserves original independent blocks and activates non-leading composition/context witnesses"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 41,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 41,
+      "source": "tests/lite/compute/kernel.test.ts#finishes proven nominal/pair runs without executing the complete mutation kernel and retains contextual fallback"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 2,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/kernel.test.ts#refreshes root presence after a nested Arabic substitution activates positioning"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/kernel.test.ts#derives initial scalar-index clusters from compact bulk input including supplementary and empty runs"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/long-run.test.ts#preserves long RTL clusters and ordered mark attachment"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 2,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/ordered-parallel.test.ts#preserves RTL ordering and stacked-mark offsets with bounded and global scratch"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 2,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/parallel-refresh.test.ts#retains RTL order and mark offsets in both scratch variants"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 2,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/resident.test.ts#resident RTL/scalar repertoire: NotoSansHebrew-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 4,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/resident.test.ts#resident RTL/scalar repertoire: NotoSansArabic-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/resident.test.ts#resident RTL/scalar repertoire: NotoSansGothic-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/resident.test.ts#resident RTL/scalar repertoire: NotoSansSC-Regular-subset.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 4,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/resident.test.ts#rejection clears every indirect word and recovery keeps the caller atlas"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 8,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 12,
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#matches text-shaper for Roboto Latin and executable Inter kerning and marks"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 6,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 9,
+      "source": "lab/lite/src/lite/compute-text-shaper-test.ts#run"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 6,
+        "X": 0
+      },
+      "shapedRows": 6,
+      "source": "tests/lite/compute/kernel.test.ts#proves disjoint pair commits but preserves nonzero second-advance ordering: pair-first"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 6,
+        "X": 0
+      },
+      "shapedRows": 6,
+      "source": "tests/lite/compute/resident.test.ts#packs correct resident advances for disjoint and overlapping pair commits: pair-first"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 6,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 6,
+      "source": "tests/lite/compute/kernel.test.ts#proves disjoint pair commits but preserves nonzero second-advance ordering: pair-second"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 6,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 6,
+      "source": "tests/lite/compute/resident.test.ts#packs correct resident advances for disjoint and overlapping pair commits: pair-second"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 6,
+        "X": 0
+      },
+      "shapedRows": 6,
+      "source": "tests/lite/compute/kernel.test.ts#retains original root-first rejection priority across independently positioned glyphs"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/kernel.test.ts#executes complete bounded shaping when optional pair metadata would exceed the device program limit"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/kernel.test.ts#actual WGSL mode multiple"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 2,
+        "N-proof": 2,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/kernel.test.ts#actual WGSL mode mark-ligature"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/kernel.test.ts#actual WGSL mode adjust"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/kernel.test.ts#actual WGSL mode context"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/kernel.test.ts#understood alternate is rejected when matched, never a mode-5 noop"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 1,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/kernel.test.ts#GPOS point-anchor rejection identifies its table and original run after empty-run filtering"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/kernel.test.ts#shares bounded cooperative scratch within a run and executes the complete global fallback for larger runs"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/kernel.test.ts#sizes cooperative storage to power-of-two capacity and reuses the warm variant until growth"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/kernel.test.ts#reuses warm public bind groups while repacking changed glyphs and counts"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/kernel.test.ts#submits public shaping and its completion copy together without publishing mapped views"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/kernel.test.ts#reuses the loaded executor before warm input submission without another module-resolution yield"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/kernel.test.ts#materializes the published glyph count without repeated output-array growth"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/kernel.test.ts#submits an already prepared owned schedule without an extra asynchronous preparation turn"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/kernel.test.ts#allocates compact mutable input capacity and reuses it for shorter and changed revisions"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/kernel.test.ts#storage/buffer/workgroup exact boundaries use real device limits without near-OOM allocation"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/long-run.test.ts#retains cooperative/ordered actions and the complete failed-proof candidate mask: pair-first"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 3,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/long-run.test.ts#retains cooperative/ordered actions and the complete failed-proof candidate mask: pair-second"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/long-run.test.ts#retains cooperative/ordered actions and the complete failed-proof candidate mask: multiple"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/long-run.test.ts#retains cooperative/ordered actions and the complete failed-proof candidate mask: context"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/long-run.test.ts#retains cooperative/ordered actions and the complete failed-proof candidate mask: transitive"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 3,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/long-run.test.ts#retains cooperative/ordered actions and the complete failed-proof candidate mask: mark-ligature"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/ordered-parallel.test.ts#keeps failed selections, skipped components, insertion cursors and inherited attachment fields exact: backtrack"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 3,
+        "H": 0,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/ordered-parallel.test.ts#keeps failed selections, skipped components, insertion cursors and inherited attachment fields exact: ligature-ignore-marks"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/ordered-parallel.test.ts#keeps failed selections, skipped components, insertion cursors and inherited attachment fields exact: multiple"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 3,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/ordered-parallel.test.ts#keeps failed selections, skipped components, insertion cursors and inherited attachment fields exact: mark-ligature"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 3,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/ordered-parallel.test.ts#keeps failed selections, skipped components, insertion cursors and inherited attachment fields exact: mark-mark"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/ordered-parallel.test.ts#keeps failed selections, skipped components, insertion cursors and inherited attachment fields exact: context"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/ordered-parallel.test.ts#alternates snapshot reuse and forced re-selection after contextual writes"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/parallel-refresh.test.ts#compacts dense real GSUB ligatures at chunk and tile boundaries"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 11,
+        "X": 0
+      },
+      "shapedRows": 11,
+      "source": "tests/lite/compute/parallel-refresh.test.ts#rescans cooperative id changes, gaining and losing later roots in both scratch variants"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 12,
+        "X": 0
+      },
+      "shapedRows": 12,
+      "source": "tests/lite/compute/parallel-refresh.test.ts#fences serial short-run refresh in oversized global scratch"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Inter.ttf#480/english"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Inter.ttf#480/natural"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Inter.ttf#480/extra"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Inter.ttf#1000/english"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Inter.ttf#1000/natural"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Inter.ttf#1000/extra"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Roboto-Regular.ttf#480/english"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Roboto-Regular.ttf#480/natural"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Roboto-Regular.ttf#480/extra"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Roboto-Regular.ttf#1000/english"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Roboto-Regular.ttf#1000/natural"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#matches whole-run output and oracle at 480/1000 glyphs for all corpora: Roboto-Regular.ttf#1000/extra"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 7,
+        "X": 0
+      },
+      "shapedRows": 7,
+      "source": "tests/lite/compute/segment.test.ts#preserves logical slots across mixed Latin/Greek groups and unsplittable/short runs"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 3,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/segment.test.ts#includes an RTL fallback group alongside long Latin segments"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 5,
+        "X": 0
+      },
+      "shapedRows": 5,
+      "source": "tests/lite/compute/segment.test.ts#tiles actual non-stage segmented callers above 64 segments through overlapping varying-size updates"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/segment.test.ts#propagates a rejecting segment to logical status 1 and suppresses all instances"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/segment.test.ts#reuses warm segmented bindings, rebuilds transitions and disposes all new buffers"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 5,
+        "X": 0
+      },
+      "shapedRows": 5,
+      "source": "tests/lite/compute/resident.test.ts#groups decoded input records directly without allocating a second per-run descriptor"
+    },
+    {
+      "categories": {
+        "A": 1,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 6,
+        "X": 0
+      },
+      "shapedRows": 7,
+      "source": "tests/lite/compute/resident.test.ts#keeps immutable compilation and pipelines warm while updating words, counts, selections and capacities"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/resident.test.ts#retains source order across prefix tiers, multiple plan groups and empty-run transitions"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 5,
+        "X": 0
+      },
+      "shapedRows": 5,
+      "source": "tests/lite/compute/resident.test.ts#reuses admitted immutable outlines and component lists across warm closure revisions, including empty glyphs"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/resident.test.ts#reuses resident shape and pack bind groups until buffer identities grow"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/resident.test.ts#copies checked warm nominal mappings directly while decoding current inputs and verifying all records"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/resident.test.ts#submits resident shaping, useful packing and its four-byte completion copy together"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/resident.test.ts#decodes checked warm nominal vectors into the scalar slab and collects closure seeds without retraversing each glyph vector"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/resident.test.ts#owns one disjoint batch input slab per update instead of one backing allocation per run"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/resident.test.ts#packs independent runs in parallel after ordered visible-count prefixing, preserving the exact output ABI"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/resident.test.ts#fuses lane-striped resident counts, prefixing and packing into one small-batch dispatch"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/resident.test.ts#retains the guaranteed 256-lane fused count entry while keeping every large-batch record and packed instance"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/resident.test.ts#scales counting over multiple workgroups above the fused tier without truncating any resident run"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/resident.test.ts#packs mutable resident input words once per plan group, not again to calculate capacity"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/resident.test.ts#passes the current unique repertoire to closure, not one copied seed per input glyph"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 53,
+        "X": 0
+      },
+      "shapedRows": 54,
+      "source": "tests/lite/compute/resident.test.ts#shared atlas and independent blocks: closure, cold growth, cross-font ownership and 100 blocks"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/resident.test.ts#packs a complete resident batch of 512 with exact counts and ABI"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/resident.test.ts#packs a complete resident batch of 1024 with exact counts and ABI"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/resident.test.ts#packs a complete resident batch of 2048 with exact counts and ABI"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/resident.test.ts#transitive selected GSUB closure installs empty-outline outputs, never phantom instances"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 512,
+        "X": 0
+      },
+      "shapedRows": 512,
+      "source": "tests/lite/compute/milestones.test.ts#completes every run and six fields in a natural Latin50 batch of 512"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1024,
+        "X": 0
+      },
+      "shapedRows": 1024,
+      "source": "tests/lite/compute/milestones.test.ts#completes every run and six fields in a natural Latin50 batch of 1024"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/lifecycle.test.ts#busy rejection, disposal during an actual pipeline request, and fresh shaper recreation"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/lifecycle.test.ts#device.destroy resolves real device.lost during pending work; independent engines survive"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 5,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 7,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#reuses bounded flag windows while native output and exact backing ownership match fresh layout: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 5,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 7,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#reuses bounded flag windows while native output and exact backing ownership match fresh layout: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 7,
+        "X": 0
+      },
+      "shapedRows": 7,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#reuses bounded flag windows while native output and exact backing ownership match fresh layout: NotoSansGothic-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 5,
+        "X": 0
+      },
+      "shapedRows": 5,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#budgets optional capacity, counts growth rebuilds, and rejects only required overflow without drawing"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#retains clean multi-paragraph slots with a budgeted pool and compacts when insertion headroom is exhausted"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 7,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 9,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#matches oracle records, lines, instances and status-only readback: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 2,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#preserves whole-paragraph clusters after segmented shaping: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 3,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 5,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#aligns hanging and overflowing lines, with custom height and paragraph spacing: Inter.ttf"
+    },
+    {
+      "categories": {
+        "A": 1,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 7,
+        "X": 0
+      },
+      "shapedRows": 9,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#matches oracle records, lines, instances and status-only readback: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 3,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#preserves whole-paragraph clusters after segmented shaping: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 5,
+        "X": 0
+      },
+      "shapedRows": 5,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#aligns hanging and overflowing lines, with custom height and paragraph spacing: Roboto-Regular.ttf"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 6,
+        "X": 0
+      },
+      "shapedRows": 6,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#shapes/stitches a nonzero-base dirty batch across several script groups"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#uses actual tiled stitch Y for long paragraph stages while shaped/layout/placement stay exact"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 4,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#scans spans of more than 256 paragraphs, preserving line and instance bases across plan groups"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 2,
+        "X": 0
+      },
+      "shapedRows": 2,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#uses scalar-indexed flags and line source indices for supplementary LTR text"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 4,
+        "X": 0
+      },
+      "shapedRows": 5,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#reuses warm buffers and bindings, resizes dispatches without rebinding, and alternates both update APIs"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#rejects busy and disposed data synchronously with paragraph-specific diagnostics"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#reports GPU-detected failures through paragraph-prefixed completion and recovers on the next update"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#clears all indirect words on synchronous admission failure without changing the atlas"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#retains original paragraph completion semantics across a later plain update"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/paragraph-layout.test.ts#releases the cached stage on the block's terminal device-loss path"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/paragraph-chunks.test.ts#renders a real paragraph beyond required Stage1 line storage with default device limits"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 6,
+        "N-proof": 0,
+        "U": 3,
+        "X": 0
+      },
+      "shapedRows": 9,
+      "source": "tests/lite/plumbing/compute-text-shaper.spec.ts#compute text shaper matches text-shaper on a real WebGPU device"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/plumbing/compute-text-shaper.spec.ts#compute text shaper matches text-shaper on a real WebGPU device#replacement-required rejection witness"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 1,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "lab/lite/src/lite/compute-text-shaper-test.ts#run#replacement-required rejection witness"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#returns empty results without dispatching and publishes reference records"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/unit/compute-text-shaper.test.ts#shapes a character string without a caller-built plan or shaper"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 9,
+        "N-proof": 0,
+        "U": 0,
+        "X": 0
+      },
+      "shapedRows": 9,
+      "source": "tests/lite/unit/compute-text-program.test.ts#admits Inter design values for zero default device deltas and keeps nested ligatures fail-closed"
+    },
+    {
+      "categories": {
+        "A": 0,
+        "A-attach": 0,
+        "G0": 0,
+        "H": 0,
+        "N-proof": 0,
+        "U": 1,
+        "X": 0
+      },
+      "shapedRows": 1,
+      "source": "tests/lite/compute/resident.test.ts#kernel failure statuses (internal slot injection, not public admission)"
+    }
+  ],
+  "remaining": [],
+  "sourceAccounting": {
+    "lab/lite/src/lite/compute-text-shaper-test.ts": {
+      "labels": 2,
+      "sha256": "be28bf2d2f8186c33dd17c88f0fb4c7482302e5c6b9a8b93db4cc0fc99296791"
+    },
+    "tests/lite/compute/kernel.test.ts": {
+      "labels": 26,
+      "sha256": "52ccae9dd4b807b6b7dfa7075cf6c462643db8336bacf3a2baa326168198710f"
+    },
+    "tests/lite/compute/lifecycle.test.ts": {
+      "labels": 4,
+      "sha256": "d55f3e480c3ac426b3ae19a1df00b7719c5bfbd2c6ccadbe8fc31397bd617eea"
+    },
+    "tests/lite/compute/long-run.test.ts": {
+      "labels": 16,
+      "sha256": "4003ad47d18ab848e757505ac13b36dbb7c9a9ac6bf585a981b87c8ef137d98f"
+    },
+    "tests/lite/compute/milestones.test.ts": {
+      "labels": 15,
+      "sha256": "5e4d636807a311681604fbe2df66c4cb03cd8288438ab5d851edcafb44a576b2"
+    },
+    "tests/lite/compute/ordered-parallel.test.ts": {
+      "labels": 12,
+      "sha256": "2451910ba2da8b6074a28f2fb5ca520aedfb16b8d7a1c95e6f92d2fd403e9341"
+    },
+    "tests/lite/compute/paragraph-chunks.test.ts": {
+      "labels": 37,
+      "sha256": "d82b97be878c4a2106430de21221223c49bbaf8dc3c73441b3a90f1c1c49918c"
+    },
+    "tests/lite/compute/paragraph-layout.test.ts": {
+      "labels": 54,
+      "sha256": "2895d4607511089b0c7d015526abd37da1aee467737572a78da8f294d75986bc"
+    },
+    "tests/lite/compute/parallel-refresh.test.ts": {
+      "labels": 19,
+      "sha256": "e57fe34a5dd219430872a9fed732938ef70ab73551abd1726ed406e9579fb22a"
+    },
+    "tests/lite/compute/resident.test.ts": {
+      "labels": 33,
+      "sha256": "a88358fa4c56f600c8811d276803d859d31330fd82bf5393981dd23c343e925d"
+    },
+    "tests/lite/compute/segment.test.ts": {
+      "labels": 17,
+      "sha256": "7dd6da048e26dd1ba36601d261bb3618fe4d3f18871abac82ef1478f058c06b7"
+    },
+    "tests/lite/compute/stitch-routing.test.ts": {
+      "labels": 9,
+      "sha256": "8c0e5944258bd75ae2609cf8759de3ef7195bd3773acb644470f266ed3e98a36"
+    },
+    "tests/lite/compute/stitch-tiling.test.ts": {
+      "labels": 11,
+      "sha256": "5c9bb168e0b44ad49f76c1f5c1e292c2620b677ab4b35f87f946e0ac00492020"
+    },
+    "tests/lite/plumbing/compute-text-shaper.spec.ts": {
+      "labels": 2,
+      "sha256": "86c4eca09eafbd664c99e07174508f372363bdde57f6bb697a86048d85e90314"
+    },
+    "tests/lite/unit/compute-text-plan.test.ts": {
+      "labels": 6,
+      "sha256": "41dfc7e68da81e0ad38c9754c3feb351d1fc084b284a3256a64d3c08119aa342"
+    },
+    "tests/lite/unit/compute-text-program.test.ts": {
+      "labels": 17,
+      "sha256": "75856cfce2dc8766238acdb9ffc469f81d0d6a3e22bac7c93d5b4766692f0ccf"
+    },
+    "tests/lite/unit/compute-text-shaper.test.ts": {
+      "labels": 24,
+      "sha256": "97513d2fbe5b155d0682fdaea86e023d1a3fe1c96a871d2069060e0dee7d3e92"
+    }
+  },
+  "sourceAccountingComplete": true,
+  "status": "Fixed source accounting complete; R1 differential contracts include all runtime-derived edits"
+}

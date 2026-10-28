@@ -7,13 +7,17 @@ import { readStorageBuffer } from "../../../packages/babylon-lite/src/resource/s
 import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/compute-text-plan";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 import { computeTextShapeCapacity } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape";
+import { compileComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import * as shapeWords from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape";
 import * as dispatchSizes from "../../../packages/babylon-lite/src/compute/compute-dispatch";
 import * as resident from "../../../packages/babylon-lite/src/text/_gpu/compute-text-resident";
-import { fixture, oracleFields } from "./fixtures";
+import { fixture, expectedFields } from "./fixtures";
 import type { Fixture } from "./fixtures";
 import { assertNativeClean, nativeHarness } from "./native";
 import type { NativeHarness } from "./native";
+import { syntheticFont } from "./synthetic";
+import { analyzeComputeTextSegmentation } from "../../../packages/babylon-lite/src/text/compute-text-segment";
+import { shapeComputeText } from "../../../packages/babylon-lite/src/text/compute-text-shaper";
 
 const english =
     "The quick brown fox jumps over the lazy dog. Every letter belongs to a flowing English paragraph with ordinary spaces and punctuation. AV To are adjacent pairs; office and affinity remain ordered shaping controls. ";
@@ -62,7 +66,7 @@ describe("native bit-exact segment shape and stitch", () => {
         const a = new Int32Array(await readStorageBuffer(candidate._shaped));
         const b = new Int32Array(await readStorageBuffer(baseline._shaped));
         for (let run = 0; run < texts.length; run++) {
-            const expected = oracleFields(font, texts[run]!);
+            const expected = expectedFields(font, texts[run]!);
             const start = run * stride;
             expect([...a.slice(start, start + 2)]).toEqual([0, expected.length]);
             expect([...a.slice(start, start + 2)]).toEqual([...b.slice(start, start + 2)]);
@@ -95,6 +99,85 @@ describe("native bit-exact segment shape and stitch", () => {
                 await exact(font, candidate, baseline, texts);
             }
         }
+    });
+
+    it("Inter nested-ligature contexts: segmented equals unsegmented", async () => {
+        const font = fixture("Inter.ttf");
+        const plan = createComputeTextPlan(font.font, selectComputeTextRun("A"));
+        const program = compileComputeTextProgram(plan);
+        const targets = program.lookups
+            .filter((lookup) => lookup.table === "GSUB" && [6, 9, 48].includes(lookup.lookupIndex))
+            .flatMap((lookup) =>
+                lookup.rules.flatMap((rule, ruleIndex) =>
+                    rule.action.kind === "context" &&
+                    rule.action.lookups.some((record) =>
+                        program.lookups.find((child) => child.table === "GSUB" && child.lookupIndex === record.lookupIndex)!.rules.some((child) => child.action.kind === "ligature")
+                    )
+                        ? [{ lookup: lookup.lookupIndex, ruleIndex, predicates: [...rule.backtrack].reverse().concat(rule.input, rule.lookahead) }]
+                        : []
+                )
+            );
+        expect(targets).toHaveLength(4);
+        const predicates = targets.flatMap((target) => target.predicates);
+        expect(predicates.every((predicate) => predicate.kind === "glyphs")).toBe(true);
+        const wanted = new Set(predicates.flatMap((predicate) => predicate.ids));
+        const inverse = new Map<number, number>();
+        const outsideAdmission = new Map<number, number[]>();
+        for (let scalar = 0; scalar <= 0x10ffff; scalar++) {
+            if (scalar >= 0xd800 && scalar <= 0xdfff) {
+                continue;
+            }
+            const text = String.fromCodePoint(scalar);
+            const glyph = font.oracle.glyphId(scalar);
+            if (!/^[\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]$/u.test(text)) {
+                if (wanted.has(glyph)) {
+                    const scalars = outsideAdmission.get(glyph) ?? [];
+                    scalars.push(scalar);
+                    outsideAdmission.set(glyph, scalars);
+                }
+                continue;
+            }
+            if (wanted.has(glyph) && !inverse.has(glyph)) {
+                inverse.set(glyph, scalar);
+            }
+            if (predicates.every((predicate) => predicate.ids.some((glyph) => inverse.has(glyph)))) {
+                break;
+            }
+        }
+        const mapped = targets.map((target) => ({
+            lookup: target.lookup,
+            ruleIndex: target.ruleIndex,
+            glyphs: target.predicates.map((predicate) => predicate.ids),
+            scalars: target.predicates.map((predicate) => predicate.ids.map((glyph) => inverse.get(glyph)).find((scalar) => scalar !== undefined)),
+        }));
+        const unmappable = mapped.filter((target) => target.scalars.some((scalar) => scalar === undefined));
+        console.warn("Inter nested-ligature context cmap witnesses", JSON.stringify({ mapped, unmappable, outsideAdmission: [...outsideAdmission] }));
+        // Some predicates have only cmap entries outside admission. Report them explicitly;
+        // do not invent an input scalar or widen public admission to exercise them.
+        const nominalTargets = mapped.filter((target) => target.scalars.every((scalar) => scalar !== undefined));
+        for (const root of [6, 9, 48]) {
+            expect(
+                nominalTargets.some((target) => target.lookup === root),
+                `root ${root} has a nominal cmap witness`
+            ).toBe(true);
+        }
+        const tokens = nominalTargets.map((target) => String.fromCodePoint(...(target.scalars as number[])));
+        const text = english.repeat(2) + tokens.join(" plain ") + " " + natural;
+        expect([...text].length).toBeGreaterThanOrEqual(256);
+        expect(selectComputeTextRun(text).script).toBe("latn");
+        const candidate = block(font);
+        const baseline = block(font, true);
+        const prepare = vi.spyOn(shapeWords, "prepareComputeTextShapeWords");
+        await update(candidate, [text]);
+        expect(prepare.mock.calls.some((call) => call[1].length > 1)).toBe(true);
+        prepare.mockRestore();
+        await update(baseline, [text]);
+        const a = new Int32Array(await readStorageBuffer(candidate._shaped));
+        const b = new Int32Array(await readStorageBuffer(baseline._shaped));
+        expect(Array.from(a.slice(0, 4))).toEqual(Array.from(b.slice(0, 4)));
+        expect(a[0]).toBe(0);
+        expect(a[1]).toBeGreaterThan(0);
+        expect(Array.from(a.slice(4, 4 + a[1]! * 6))).toEqual(Array.from(b.slice(4, 4 + b[1]! * 6)));
     });
 
     it("preserves logical slots across mixed Latin/Greek groups and unsplittable/short runs", async () => {
@@ -150,21 +233,29 @@ describe("native bit-exact segment shape and stitch", () => {
     });
 
     it("propagates a rejecting segment to logical status 1 and suppresses all instances", async () => {
-        const font = fixture("Inter.ttf");
+        // The bounded real-font query found no rejected lookup in a segmentation-
+        // proved fixture. This pinned font has a class-0 space and Alternate(A).
+        const font = syntheticFont("segment-reject");
+        const plan = createComputeTextPlan(font.font, selectComputeTextRun("A B"));
+        expect(analyzeComputeTextSegmentation(compileComputeTextProgram(plan))).not.toBeNull();
         const candidate = block(font);
         const baseline = block(font, true);
-        const ok = [english.repeat(3).slice(0, 480)];
+        const ok = ["", "B", "B ".repeat(240)];
         await update(candidate, ok);
         await update(baseline, ok);
-        const texts = ["a ".repeat(60) + "<-" + " b".repeat(100)];
+        expect(new Uint32Array(await readStorageBuffer(candidate._indirect))[1]).toBeGreaterThan(0);
+        expect(new Uint32Array(await readStorageBuffer(baseline._indirect))[1]).toBeGreaterThan(0);
+        const texts = ["", "B", "B ".repeat(60) + "A" + " B".repeat(100)];
         const prepared = vi.spyOn(shapeWords, "prepareComputeTextShapeWords");
         const failed = await updateComputeTextData(candidate, texts);
-        expect(prepared.mock.calls[0]![1].length).toBeGreaterThan(1);
+        expect(prepared.mock.calls.flatMap(([, runs]) => runs).length).toBeGreaterThan(texts.length);
         prepared.mockRestore();
-        await expect(failed.completed).rejects.toThrow("unsupported lookup");
-        await expect(update(baseline, texts)).rejects.toThrow("unsupported lookup");
-        expect(new Int32Array(await readStorageBuffer(candidate._shaped))[0]).toBe(1);
-        expect(new Int32Array(await readStorageBuffer(baseline._shaped))[0]).toBe(1);
+        await expect(failed.completed).rejects.toThrow("updateComputeTextData: unsupported lookup");
+        await expect(update(baseline, texts)).rejects.toThrow("updateComputeTextData: unsupported lookup");
+        await expect(shapeComputeText(native.engine, font.font, texts)).rejects.toThrow(/run 2 unsupported GSUB 0/);
+        const stride = 4 + computeTextShapeCapacity(plan, [{ scalars: Uint32Array.from(texts[2]!, (char) => char.codePointAt(0)!) }]) * 6;
+        expect(new Int32Array(await readStorageBuffer(candidate._shaped))[2 * stride]).toBe(1);
+        expect(new Int32Array(await readStorageBuffer(baseline._shaped))[2 * stride]).toBe(1);
         expect([...new Uint32Array(await readStorageBuffer(candidate._indirect))]).toEqual([6, 0, 0, 0]);
         expect(new Uint8Array(await readStorageBuffer(candidate._instances))).toEqual(new Uint8Array(await readStorageBuffer(baseline._instances)));
     });

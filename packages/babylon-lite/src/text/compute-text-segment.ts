@@ -5,14 +5,19 @@
  * d*S non-free nominal range overapproximate every slot, including skipped and
  * ligature-interior glyphs. S bounds spans by induction over ordered GSUB roots:
  * each pass reads pre-pass spans, never its own outputs. Nested records compose
- * in order at their context root; span-preserving closure covers overlapping
- * contexts. Excluding all such windows then proves independence by induction
- * over lookups. A non-mark first right glyph prevents cross-space attachment;
+ * in order at their context root. Growing children are admitted only when their
+ * outputs match none of that root's context predicates or child input predicates,
+ * excluding re-consumption during the root pass. Child windows are enumerated as
+ * rules too; finite span closure covers overlapping contexts. Excluding all such windows then proves independence by induction
+ * over lookups. Filtering sets and masks never certify a boundary: full predicate
+ * windows and every possibly-skippable mark are conservatively retained.
+ * A non-mark first right glyph prevents cross-space attachment;
  * rejection stays local and one expanding lookup bounds overflow.
  */
 
 import { ensureComputeFontLayout, mapComputeFontScalars } from "./compute-font.js";
 import type { ComputeTextPlan } from "./compute-text-plan.js";
+import { profileSupport } from "./compute-text-plan.js";
 import type { ComputeGlyphPredicate, ComputeProgramRule, ComputeTextProgram } from "./compute-text-program.js";
 import {
     compileComputeTextProgram,
@@ -37,6 +42,7 @@ export const SEGMENT_TARGET = 64;
 export interface SegmentAnalysis {
     readonly space: number;
     readonly span: number;
+    readonly maxD: number;
     readonly crossings: number;
     readonly markBaseHit: boolean;
     readonly safeAfter: (glyphIds: Uint32Array, spaceIndex: number) => boolean;
@@ -117,6 +123,13 @@ export function analyzeComputeTextSegmentation(program: ComputeTextProgram): Seg
 
 function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     const font = program.plan.font;
+    // Indic normalization expands/contracts nominal slots before the lookup
+    // proof's producer-span induction begins. Space locality alone cannot
+    // certify that induction: retain exact whole-run execution until those
+    // producers are represented. No limit or existing-script proof is relaxed.
+    if (program.plan._profile === "indic") {
+        return null;
+    }
     if (program.plan.direction !== "ltr") {
         return null;
     }
@@ -266,7 +279,7 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
         return changed;
     };
     let span = 1;
-    const applyRules = (rules: readonly ComputeProgramRule[], before: ReadonlyMap<number, number>, nested = false): Map<number, number> | null => {
+    const applyRules = (rules: readonly ComputeProgramRule[], before: ReadonlyMap<number, number>, nested = false, admitGrowing = false): Map<number, number> | null => {
         const after = new Map(before);
         for (const r of rules) {
             if (r.action.kind === "context") {
@@ -276,7 +289,7 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
                 let branch = new Map(before);
                 for (const record of r.action.lookups) {
                     const child = program.lookups.find((l) => l.table === "GSUB" && l.lookupIndex === record.lookupIndex)!;
-                    const next = applyRules(child.rules, branch, true);
+                    const next = applyRules(child.rules, branch, true, admitGrowing);
                     if (!next) {
                         return null;
                     }
@@ -288,9 +301,9 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
             if (r.action.kind !== "ligature" && r.action.kind !== "substitute" && r.action.kind !== "multiple") {
                 continue;
             }
-            // The supported depth-1 single children preserve spans. Growing
-            // children need a separate bound on repeated overlapping invocations.
-            if (nested && (r.action.kind === "ligature" || (r.action.kind === "multiple" && r.action.glyphs.length !== 1))) {
+            // The root-local predicate-disjointness proof excludes re-consumption.
+            // Compose child spans from the current branch exactly as at top level.
+            if (nested && !admitGrowing && (r.action.kind === "ligature" || (r.action.kind === "multiple" && r.action.glyphs.length > 1))) {
                 return null;
             }
             const value = r.action.kind === "ligature" ? r.input.reduce((v, p) => v + sourceSpan(p, before), 0) : sourceSpan(r.input[0]!, before);
@@ -314,18 +327,27 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
         if (lookup.table !== "GSUB") {
             continue;
         }
-        const after = applyRules(lookup.rules, spans);
+        const contexts = lookup.rules.filter((r) => r.action.kind === "context");
+        const childRules = contexts.flatMap((r) =>
+            r.action.kind === "context" ? r.action.lookups.flatMap((record) => program.lookups.find((l) => l.table === "GSUB" && l.lookupIndex === record.lookupIndex)!.rules) : []
+        );
+        const predicates = [...contexts.flatMap((r) => [...r.backtrack, ...r.input, ...r.lookahead]), ...childRules.flatMap((r) => r.input)];
+        const growingOutputs = childRules.flatMap((r) => (r.action.kind === "ligature" || (r.action.kind === "multiple" && r.action.glyphs.length > 1) ? outputs(r) : []));
+        const admitGrowing = !growingOutputs.some((glyph) => predicates.some((p) => matches(p, glyph)));
+        if (!admitGrowing) {
+            return null;
+        }
+        const after = applyRules(lookup.rules, spans, false, admitGrowing);
         if (!after) {
             return null;
         }
         spans = after;
-        const contexts = lookup.rules.filter((r) => r.action.kind === "context");
         if (contexts.length) {
             // Non-leading nested targets may be visited by later context matches
-            // in this same root pass. This finite closure only transfers spans;
-            // it cannot increase their maximum or revisit a ligature/multiple root.
+            // in this same root pass. Growing outputs cannot be re-consumed:
+            // the root-local proof above makes this a finite, capped closure.
             for (;;) {
-                const next = applyRules(contexts, spans);
+                const next = applyRules(contexts, spans, false, admitGrowing);
                 if (!next) {
                     return null;
                 }
@@ -395,7 +417,11 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     // Only boundaries whose first right glyph can become a mark need the mark-base scan.
     const hitsMarkBase = () =>
         (markBaseHit ??= program.lookups.some((l) =>
-            l.rules.some((r) => (r.action.kind === "mark-base" || r.action.kind === "mark-mark") && r.action.bases.some((b) => inB[b.glyphId] === 1))
+            l.rules.some((r) =>
+                r.action.kind === "mark-ligature"
+                    ? r.action.ligatures.some((b) => inB[b.glyphId] === 1)
+                    : (r.action.kind === "mark-base" || r.action.kind === "mark-mark") && r.action.bases.some((b) => inB[b.glyphId] === 1)
+            )
         ));
     if (maxD * span > 64) {
         return null;
@@ -600,6 +626,7 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     return {
         space,
         span,
+        maxD,
         crossings: crossings.length,
         get markBaseHit() {
             return hitsMarkBase();
@@ -636,14 +663,18 @@ export function segmentComputeTextRuns(
             if (n > SEGMENT_TARGET && analysis === undefined) {
                 analysis = analyzeComputeTextSegmentation(compileComputeTextProgram(group.plan));
             }
+            const joiningType = group.plan._profile === "arabic" ? profileSupport("arabic")?.joiningType : undefined;
+            if (group.plan._profile === "arabic" && !joiningType) {
+                throw new Error("segmentComputeTextRuns: Arabic profile is not loaded");
+            }
             while (analysis && n - start > SEGMENT_TARGET) {
                 let s = start + SEGMENT_TARGET - 1;
-                while (s > start && !analysis.safeAfter(run.glyphIds, s)) {
+                while (s > start && (!analysis.safeAfter(run.glyphIds, s) || (joiningType !== undefined && joiningType(run.scalars[s]!) !== 0))) {
                     s--;
                 }
                 if (s === start) {
                     s = start + SEGMENT_TARGET;
-                    while (s < n - 1 && !analysis.safeAfter(run.glyphIds, s)) {
+                    while (s < n - 1 && (!analysis.safeAfter(run.glyphIds, s) || (joiningType !== undefined && joiningType(run.scalars[s]!) !== 0))) {
                         s++;
                     }
                     if (s === n - 1) {

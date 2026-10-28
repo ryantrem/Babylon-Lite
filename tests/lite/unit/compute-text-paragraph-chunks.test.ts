@@ -50,7 +50,7 @@ describe("bounded paragraph source planning", () => {
         expect("_scalars" in scanComputeTextRun(text)).toBe(false);
     });
 
-    it.each(["Aא", "\u0308", "A\u200dB", "A\nB", "\u2066A", "\ud800A", "A\u200d\ud800", "अ", "A\ufe0f", "A\udc00"])(
+    it.each(["Aא", "\u0308", "A\u200dB", "A\nB", "\u2066A", "\ud800A", "A\u200d\ud800", "অ", "A\ufe0f", "A\udc00"])(
         "retains selection rejection precedence and witnesses: %j",
         (text) => {
             let expected: unknown;

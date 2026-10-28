@@ -180,7 +180,9 @@ stages:
                           tests/lite/plumbing/dispose.spec.ts \
                           tests/lite/plumbing/material-swap.spec.ts \
                           tests/lite/plumbing/memory-leak.spec.ts \
-                          tests/lite/plumbing/picking.spec.ts
+                          tests/lite/plumbing/picking.spec.ts \
+                          tests/lite/plumbing/compute-text-shaper.spec.ts \
+                          tests/lite/plumbing/compute-text-resident.spec.ts
                   displayName: "Run plumbing tests"
                   env:
                       HEADLESS: "true"

@@ -1,0 +1,643 @@
+{
+  "cases": [
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": "C1",
+      "description": "Mark attachment offsets are relative to the current pen, not the base origin.",
+      "discriminates": [
+        "C1"
+      ],
+      "expected": "positive",
+      "fontSha256": "c4b4d3ab5e36ecf752257284879eeb184e27f17074f778b9a4f32e97ae1851fd",
+      "id": "c1-mark-base-0",
+      "kind": "c1-mark-base",
+      "lookupTrace": [
+        [
+          "GPOS",
+          0,
+          "mark"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 100, 0, 0, 0],
+        [4, 1, 0, 0, 20, 40]
+      ],
+      "records": [
+        [1, 0, 100, 0, 0, 0],
+        [4, 1, 0, 0, -80, 40]
+      ],
+      "text": "A"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": "C1",
+      "description": "Mark attachment offsets are relative to the current pen, not the base origin.",
+      "discriminates": [
+        "C1"
+      ],
+      "expected": "positive",
+      "fontSha256": "c4b4d3ab5e36ecf752257284879eeb184e27f17074f778b9a4f32e97ae1851fd",
+      "id": "c1-mark-base-1",
+      "kind": "c1-mark-base",
+      "lookupTrace": [
+        [
+          "GPOS",
+          0,
+          "mark"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 100, 0, 0, 0],
+        [2, 1, 200, 0, 0, 0],
+        [4, 2, 0, 0, 40, 60]
+      ],
+      "records": [
+        [1, 0, 100, 0, 0, 0],
+        [2, 1, 200, 0, 0, 0],
+        [4, 2, 0, 0, -160, 60]
+      ],
+      "text": "AB"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": "C1",
+      "description": "Attachment chains propagate after the final pair adjustment changes the root advance.",
+      "discriminates": [
+        "C1"
+      ],
+      "expected": "positive",
+      "fontSha256": "8cc22a4e2b6b00d46455863b10775222ff29599c728fcacefb44ba3ab5bf5e1f",
+      "id": "c1-mark-mark-chain-0",
+      "kind": "c1-mark-mark-chain",
+      "lookupTrace": [
+        [
+          "GPOS",
+          0,
+          "kern"
+        ],
+        [
+          "GPOS",
+          1,
+          "kern"
+        ],
+        [
+          "GPOS",
+          2,
+          "kern"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 113, 0, 0, 0],
+        [4, 1, 0, 0, 20, 40],
+        [5, 2, 0, 0, 40, 80],
+        [2, 3, 200, 0, 0, 0]
+      ],
+      "records": [
+        [1, 0, 113, 0, 0, 0],
+        [4, 1, 0, 0, -93, 40],
+        [5, 2, 0, 0, -73, 80],
+        [2, 3, 200, 0, 0, 0]
+      ],
+      "text": "AB"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": "C2",
+      "description": "MarkMark skips an excluded mark to an included target; zero-advance marks avoid C1/C3 confounding.",
+      "discriminates": [
+        "C2"
+      ],
+      "expected": "positive",
+      "fontSha256": "9a497bf9ea577d1dfb7b5be869ffcd5c6e63781a5b2ea06bdf91d7232df5c39b",
+      "id": "c2-filter-set-0",
+      "kind": "c2-filter-set",
+      "lookupTrace": [
+        [
+          "GPOS",
+          0,
+          "mkmk"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 100, 0, 0, 0],
+        [4, 1, 0, 0, 0, 0],
+        [5, 2, 0, 0, 0, 0],
+        [4, 3, 0, 0, 0, 0]
+      ],
+      "records": [
+        [1, 0, 100, 0, 0, 0],
+        [4, 1, 0, 0, 0, 0],
+        [5, 2, 0, 0, 0, 0],
+        [4, 3, 0, 0, 20, 40]
+      ],
+      "text": "A"
+    },
+    {
+      "coExercised": [],
+      "controls": [
+        "C2"
+      ],
+      "correction": "C2",
+      "description": "MarkMark skips an excluded mark to an included target; zero-advance marks avoid C1/C3 confounding.",
+      "discriminates": [],
+      "expected": "positive",
+      "fontSha256": "9a497bf9ea577d1dfb7b5be869ffcd5c6e63781a5b2ea06bdf91d7232df5c39b",
+      "id": "c2-filter-set-1",
+      "kind": "c2-filter-set",
+      "lookupTrace": [
+        [
+          "GPOS",
+          0,
+          "mkmk"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 100, 0, 0, 0],
+        [4, 1, 0, 0, 0, 0],
+        [4, 2, 0, 0, 20, 40]
+      ],
+      "records": [
+        [1, 0, 100, 0, 0, 0],
+        [4, 1, 0, 0, 0, 0],
+        [4, 2, 0, 0, 20, 40]
+      ],
+      "text": "A"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": "C3",
+      "description": "Full value1 placement is applied and valueFormat2=0 permits the overlapping next pair.",
+      "discriminates": [
+        "C3"
+      ],
+      "expected": "positive",
+      "fontSha256": "494651468307ac327fee3580fcf3932299084f432d044476c0e38e52197eb67e",
+      "id": "c3-pair-placement-0",
+      "kind": "c3-pair-placement",
+      "lookupTrace": [
+        [
+          "GPOS",
+          0,
+          "kern"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 113, 0, 0, 0],
+        [2, 1, 213, 0, 0, 0],
+        [3, 2, 300, 0, 0, 0]
+      ],
+      "records": [
+        [1, 0, 113, 0, 11, 17],
+        [2, 1, 213, 0, 11, 17],
+        [3, 2, 300, 0, 0, 0]
+      ],
+      "text": "ABC"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": "C3",
+      "description": "The source contains all four value2 fields; HarfBuzz applies horizontal advances only, and continuation skips the second glyph.",
+      "discriminates": [
+        "C3"
+      ],
+      "expected": "positive",
+      "fontSha256": "c0531f86b22a898f32b46fbebd74e62b5dda59ab11bd3bdb832c704730a0d4a8",
+      "id": "c3-pair-value2-0",
+      "kind": "c3-pair-value2",
+      "lookupTrace": [
+        [
+          "GPOS",
+          0,
+          "kern"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 113, 0, 0, 0],
+        [2, 1, 213, 0, 0, 0],
+        [3, 2, 300, 0, 0, 0]
+      ],
+      "records": [
+        [1, 0, 113, 0, 0, 0],
+        [2, 1, 229, 0, 19, 23],
+        [3, 2, 300, 0, 0, 0]
+      ],
+      "text": "ABC"
+    },
+    {
+      "coExercised": [
+        "C7"
+      ],
+      "controls": [],
+      "correction": "C4",
+      "description": "A nested ligature acts at the matched B after the skipped mark, not at raw index+1.",
+      "discriminates": [
+        "C4"
+      ],
+      "expected": "positive",
+      "fontSha256": "7a189ad14801729001ecda14fd2ce7e7fa10c7bd7d64bcf12ce5e4860ca3e0bc",
+      "id": "c4-nested-ligature-0",
+      "kind": "c4-nested-ligature",
+      "lookupTrace": [
+        [
+          "GSUB",
+          0,
+          "ccmp"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 100, 0, 0, 0],
+        [4, 1, 0, 0, 0, 0],
+        [2, 2, 200, 0, 0, 0],
+        [3, 3, 300, 0, 0, 0]
+      ],
+      "records": [
+        [1, 0, 100, 0, 0, 0],
+        [4, 1, 0, 0, 0, 0],
+        [6, 2, 400, 0, 0, 0]
+      ],
+      "text": "ABC"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": "C4",
+      "description": "After A expands to 7/8, the later sequence-index-2 Single applies to B in the modified sequence, not original C; clusters are inherited without an extra context merge.",
+      "discriminates": [
+        "C4"
+      ],
+      "expected": "positive",
+      "fontSha256": "34324ca40d12005e4f5672f23a9054604411a065e142a6b49f90ca7a7c1b16d5",
+      "id": "c4-nested-multiple-0",
+      "kind": "c4-nested-multiple",
+      "lookupTrace": [
+        [
+          "GSUB",
+          0,
+          "ccmp"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 100, 0, 0, 0],
+        [2, 1, 200, 0, 0, 0],
+        [9, 2, 130, 0, 0, 0]
+      ],
+      "records": [
+        [7, 0, 110, 0, 0, 0],
+        [8, 0, 120, 0, 0, 0],
+        [9, 1, 130, 0, 0, 0],
+        [3, 2, 300, 0, 0, 0]
+      ],
+      "text": "ABC"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": "C5",
+      "description": "An all-format-3 Context lookup executes its nested Single.",
+      "discriminates": [
+        "C5"
+      ],
+      "expected": "positive",
+      "fontSha256": "8cfff666c1a3a561394783980458edf3f6ea0c2a0071c3b3bcbba95e99031341",
+      "id": "c5-context-format3-0",
+      "kind": "c5-context-format3",
+      "lookupTrace": [
+        [
+          "GSUB",
+          0,
+          "ccmp"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 100, 0, 0, 0],
+        [2, 1, 200, 0, 0, 0]
+      ],
+      "records": [
+        [1, 0, 100, 0, 0, 0],
+        [7, 1, 110, 0, 0, 0]
+      ],
+      "text": "AB"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": "C6",
+      "description": "Contextual GPOS executes a nested full SinglePos.",
+      "discriminates": [
+        "C6"
+      ],
+      "expected": "positive",
+      "fontSha256": "5db4de9a28b10448d654807625f5d460ad974cc39eaeffa4a5bf0195d4492128",
+      "id": "c6-context-pos-0",
+      "kind": "c6-context-pos",
+      "lookupTrace": [
+        [
+          "GPOS",
+          0,
+          "kern"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 100, 0, 0, 0],
+        [2, 1, 213, 19, 11, 17]
+      ],
+      "records": [
+        [1, 0, 100, 0, 0, 0],
+        [2, 1, 213, 0, 11, 17]
+      ],
+      "text": "AB"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": "C7",
+      "description": "The skipped mark joins the entire ligature span's minimum cluster.",
+      "discriminates": [
+        "C7"
+      ],
+      "expected": "positive",
+      "fontSha256": "af77d13e090033eed030e0b1f81ea6d576d5e93cbd907bc47ad5d974e57f5ca9",
+      "id": "c7-ligature-across-mark-0",
+      "kind": "c7-ligature-across-mark",
+      "lookupTrace": [
+        [
+          "GSUB",
+          0,
+          "ccmp"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [6, 0, 400, 0, 0, 0],
+        [4, 1, 0, 0, 0, 0]
+      ],
+      "records": [
+        [6, 0, 400, 0, 0, 0],
+        [4, 0, 0, 0, 0, 0]
+      ],
+      "text": "AB"
+    },
+    {
+      "coExercised": [
+        "C1",
+        "C7"
+      ],
+      "controls": [
+        "C8"
+      ],
+      "correction": "C8",
+      "description": "Ligature component metadata selects anchors, including a last-component control.",
+      "discriminates": [],
+      "expected": "positive",
+      "fontSha256": "6c96fa1d7f6826a77164e162f9c9fdbdf932ebcd3d4d26e49788d969a1f29664",
+      "id": "c8-mark-ligature-0",
+      "kind": "c8-mark-ligature",
+      "lookupTrace": [
+        [
+          "GSUB",
+          0,
+          "ccmp"
+        ],
+        [
+          "GPOS",
+          0,
+          "mark"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [6, 0, 400, 0, 0, 0],
+        [4, 1, 0, 0, 20, 40],
+        [5, 3, 0, 0, 110, 130]
+      ],
+      "records": [
+        [6, 0, 400, 0, 0, 0],
+        [4, 0, 0, 0, -380, 40],
+        [5, 3, 0, 0, -290, 130]
+      ],
+      "text": "AB"
+    },
+    {
+      "coExercised": [
+        "C1",
+        "C7"
+      ],
+      "controls": [],
+      "correction": "C8",
+      "description": "Ligature component metadata selects anchors, including a last-component control.",
+      "discriminates": [
+        "C8"
+      ],
+      "expected": "positive",
+      "fontSha256": "6c96fa1d7f6826a77164e162f9c9fdbdf932ebcd3d4d26e49788d969a1f29664",
+      "id": "c8-mark-ligature-1",
+      "kind": "c8-mark-ligature",
+      "lookupTrace": [
+        [
+          "GSUB",
+          0,
+          "ccmp"
+        ],
+        [
+          "GPOS",
+          0,
+          "mark"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [6, 0, 400, 0, 0, 0],
+        [4, 2, 0, 0, 20, 40],
+        [5, 3, 0, 0, 110, 130]
+      ],
+      "records": [
+        [6, 0, 400, 0, 0, 0],
+        [4, 2, 0, 0, -280, 140],
+        [5, 3, 0, 0, -290, 130]
+      ],
+      "text": "AB"
+    },
+    {
+      "coExercised": [
+        "C7"
+      ],
+      "controls": [],
+      "correction": "C8",
+      "description": "MarkMark rejects different components and accepts a same-component control.",
+      "discriminates": [
+        "C8"
+      ],
+      "expected": "positive",
+      "fontSha256": "1e92c16815adb240b0dec38f68f01b76caa5011e1f0abc0367ff0b8c5ffbe4c6",
+      "id": "c8-mark-mark-components-0",
+      "kind": "c8-mark-mark-components",
+      "lookupTrace": [
+        [
+          "GSUB",
+          0,
+          "ccmp"
+        ],
+        [
+          "GPOS",
+          0,
+          "mkmk"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [6, 0, 400, 0, 0, 0],
+        [4, 1, 0, 0, 0, 0],
+        [5, 3, 0, 0, 20, 40]
+      ],
+      "records": [
+        [6, 0, 400, 0, 0, 0],
+        [4, 0, 0, 0, 0, 0],
+        [5, 3, 0, 0, 0, 0]
+      ],
+      "text": "AB"
+    },
+    {
+      "coExercised": [
+        "C7"
+      ],
+      "controls": [
+        "C8"
+      ],
+      "correction": "C8",
+      "description": "MarkMark rejects different components and accepts a same-component control.",
+      "discriminates": [],
+      "expected": "positive",
+      "fontSha256": "1e92c16815adb240b0dec38f68f01b76caa5011e1f0abc0367ff0b8c5ffbe4c6",
+      "id": "c8-mark-mark-components-1",
+      "kind": "c8-mark-mark-components",
+      "lookupTrace": [
+        [
+          "GSUB",
+          0,
+          "ccmp"
+        ],
+        [
+          "GPOS",
+          0,
+          "mkmk"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [6, 0, 400, 0, 0, 0],
+        [4, 2, 0, 0, 0, 0],
+        [5, 3, 0, 0, 20, 40]
+      ],
+      "records": [
+        [6, 0, 400, 0, 0, 0],
+        [4, 2, 0, 0, 0, 0],
+        [5, 3, 0, 0, 20, 40]
+      ],
+      "text": "AB"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": null,
+      "description": "ReverseChain GSUB remains deliberately unsupported.",
+      "discriminates": [],
+      "errorCategory": "unsupported GSUB 0",
+      "expected": "negative",
+      "fontSha256": "e3236a4a6a220646407088f07fb94450b6e7323270a4eea0e2a1b988748c97a2",
+      "id": "reverse-chain-0",
+      "info_only": [
+        [7, 0, 110, 0, 0, 0],
+        [2, 1, 200, 0, 0, 0]
+      ],
+      "kind": "reverse-chain",
+      "lookupTrace": [
+        [
+          "GSUB",
+          0,
+          "ccmp"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [7, 0, 110, 0, 0, 0],
+        [2, 1, 200, 0, 0, 0]
+      ],
+      "text": "AB"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": null,
+      "description": "Cursive GPOS remains deliberately unsupported.",
+      "discriminates": [],
+      "errorCategory": "unsupported GPOS 0",
+      "expected": "negative",
+      "fontSha256": "263947aa040a5916747a80b64a8d7a5d25b5583d7b7ca808a3f7d987942280c3",
+      "id": "cursive-0",
+      "info_only": [
+        [1, 0, 45, 0, 0, 0],
+        [1, 1, 75, 0, -25, 20]
+      ],
+      "kind": "cursive",
+      "lookupTrace": [
+        [
+          "GPOS",
+          0,
+          "kern"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 100, 0, 0, 0],
+        [1, 1, 100, 0, 0, 20]
+      ],
+      "text": "AA"
+    },
+    {
+      "coExercised": [],
+      "controls": [],
+      "correction": null,
+      "description": "Nested contextual lookups remain deliberately unsupported.",
+      "discriminates": [],
+      "errorCategory": "not executable",
+      "expected": "negative",
+      "fontSha256": "8ee2568abb9b5d0ad11199180bc543677cc99a9924d01c49ed3c33ce732c479b",
+      "id": "nested-context-0",
+      "info_only": [
+        [1, 0, 100, 0, 0, 0],
+        [7, 1, 110, 0, 0, 0]
+      ],
+      "kind": "nested-context",
+      "lookupTrace": [
+        [
+          "GSUB",
+          0,
+          "ccmp"
+        ]
+      ],
+      "oldTextShaperRecords": [
+        [1, 0, 100, 0, 0, 0],
+        [2, 1, 200, 0, 0, 0]
+      ],
+      "text": "AB"
+    }
+  ],
+  "clusterLevel": 1,
+  "cmap": [65, 66, 67, 57344, 57345],
+  "configurationMatched": true,
+  "direction": "ltr",
+  "disabledFeatures": {
+    "abvm": 0,
+    "blwm": 0,
+    "clig": 0,
+    "curs": 0,
+    "dist": 0,
+    "locl": 0,
+    "ltra": 0,
+    "ltrm": 0,
+    "rclt": 0,
+    "rlig": 0,
+    "rvrn": 0
+  },
+  "language": "und",
+  "script": "Latn"
+}

@@ -20,7 +20,7 @@ export interface ComputeTextClosure {
 let outputsByFont: WeakMap<ComputeFont, Map<string, Map<number, readonly number[]>>> | null = null;
 
 /** Glyph ids that must be installed before a resident shape/pack dispatch. */
-export function closeComputeTextGlyphs(font: ComputeFont, plans: readonly ComputeTextPlan[], seeds: readonly number[]): ComputeTextClosure {
+export function closeComputeTextGlyphs(font: ComputeFont, plans: readonly ComputeTextPlan[], seeds: readonly number[], extraSeeds?: readonly number[]): ComputeTextClosure {
     const selected = new Set<number>();
     for (const plan of plans) {
         if (plan.font !== font) {
@@ -57,7 +57,7 @@ export function closeComputeTextGlyphs(font: ComputeFont, plans: readonly Comput
 
     const closure = new Set<number>();
     const queue: number[] = [];
-    for (const seed of seeds) {
+    for (const seed of extraSeeds?.length ? [...seeds, ...extraSeeds] : seeds) {
         requireGlyph(font, seed, "cmap seed");
         if (!closure.has(seed)) {
             closure.add(seed);

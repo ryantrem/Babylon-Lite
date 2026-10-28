@@ -11,13 +11,14 @@ import type { ComputeTask } from "../../compute/compute-task.js";
 import { computeStorageBufferBinding } from "../../compute/compute-storage-buffer-binding.js";
 import { ensureComputeFontLayout, readComputeFontAdvance } from "../compute-font.js";
 import { compileComputeTextProgram } from "../compute-text-program.js";
-import type { ComputeTextPlan } from "../compute-text-plan.js";
+import type { ComputeTextKernelFragments, ComputeTextPlan, ComputeTextProfileId } from "../compute-text-plan.js";
+import { profileSupport } from "../compute-text-plan.js";
 import type { ComputeTextGlyph, ComputeTextShaper } from "../compute-text-shaper.js";
 import type { GlyphClassDef } from "../font-parser/opentype-layout.js";
-import { glyphClass } from "../font-parser/opentype-layout.js";
+import { coverageGlyphs, glyphClass } from "../font-parser/opentype-layout.js";
 import { createStorageBuffer, disposeStorageBuffer, updateStorageBuffer } from "../../resource/storage-buffer.js";
 import type { StorageBuffer } from "../../resource/storage-buffer.js";
-import { COMPUTE_TEXT_INPUT_PREDICATES, COMPUTE_TEXT_PREDICATES } from "./compute-text-predicates.js";
+import { computeTextInputPredicates, COMPUTE_TEXT_PREDICATES } from "./compute-text-predicates.js";
 import { computeTextSimpleSource } from "./compute-text-simple-wgsl.js";
 import { prepareSimplePairWords } from "./compute-text-pair-program.js";
 
@@ -26,6 +27,13 @@ const STATUS_UNSUPPORTED = 1;
 const STATUS_OVERFLOW = 2;
 const RECORD_WORDS = 6;
 const HEADER_WORDS = 4;
+const GDEF_MARK_CLASS = 3;
+/** Run header bit: no nominal glyph is a GDEF mark, so the kernel may ignore mark filtering sets. */
+const RUN_MARK_FREE = 0x80000000;
+/** @internal Record word 7: GDEF class 0..4, then an unsigned backward distance. */
+export const RECORD_CLASS_MASK = 0x7;
+/** @internal Keep attachment-class lookup data in tables, not in the glyph record. */
+export const ATTACH_SHIFT = 3;
 
 /** @internal Shaped-record header words. Resident packing reads the same layout and does not map it. */
 export const COMPUTE_TEXT_HEADER_WORDS = HEADER_WORDS;
@@ -38,16 +46,54 @@ export const COMPUTE_TEXT_STATUS_UNSUPPORTED = STATUS_UNSUPPORTED;
 /** @internal */
 export const COMPUTE_TEXT_STATUS_OVERFLOW = STATUS_OVERFLOW;
 
+/** @internal Compile-time execution footprint and optional script hooks. Semantics stay shared. */
+export interface ComputeTextKernelVariant {
+    readonly id: ComputeTextProfileId;
+    readonly glyphWords: 8 | 16;
+    readonly masked: boolean;
+    readonly fragments?: ComputeTextKernelFragments;
+    readonly planes: number;
+    readonly auxBytes?: (capacity: number) => number;
+}
+
+/** @internal */
+export function computeTextPlanVariant(plan: ComputeTextPlan): ComputeTextKernelVariant {
+    const support = profileSupport(plan._profile);
+    if (plan._profile === "arabic" && !support) {
+        throw new Error("prepareComputeTextShapeWords: Arabic profile is not loaded");
+    }
+    return {
+        id: plan._profile,
+        glyphWords: support?.glyphWords ?? 8,
+        masked: support?.masked ?? false,
+        fragments: support?.fragments,
+        planes: support?.planes ?? 1,
+        auxBytes: support?.auxBytes,
+    };
+}
+
+/** @internal Includes the actual memory tier, not the reference implementation. */
+export function computeTextVariantKey(variant: ComputeTextKernelVariant, tier: number): string {
+    return `${variant.id}:${variant.glyphWords}:${tier}`;
+}
+
+/** @internal Conservative workgroup budget including shared interpreter arrays/latches. */
+export function computeTextVariantTier(capacity: number, variant: ComputeTextKernelVariant, storageLimit = 16384, retained = 0): number {
+    const tier = computeTextScratchCapacity(capacity, retained, variant.glyphWords);
+    const bytes = tier * (variant.glyphWords * 4 * variant.planes + 12) + (variant.auxBytes?.(tier) ?? 0) + 1024 + (variant.id === "arabic" ? 256 : 0);
+    return bytes > storageLimit ? 0 : tier;
+}
+
 export const COMPUTE_TEXT_KERNEL_SOURCE = /* @__PURE__ */ kernelSource(0);
 
-function cooperativeSource(localScratch: boolean, storageFence: string): string {
+function cooperativeSource(localScratch: boolean, storageFence: string, masked = false): string {
     const slot = localScratch ? "index" : "slot";
     const selection = `
 for (var ${slot} = lane; ${slot} < ${localScratch ? "count" : "tileCount"}; ${slot} += 32u) {
 ${localScratch ? "" : "let index = tile + slot;"}
 selected[${slot}] = 0u;
 if (!live(base, index, count, flag)) { continue; }
-if (capability == 1u) {
+${masked ? "if ((glyphMask(glyphAt(base, index)) & rootMask) == 0u) { continue; }\n" : ""}if (capability == 1u) {
 let entry = directory + u32(scratch[glyphAt(base, index)]) * 2u;
 if (program[entry + 1u] == 0u) { continue; }
 let ruleAt = ruleOrigin + program[program[entry]] * 16u;
@@ -103,7 +149,7 @@ let applied = applySelected(base, length, index, flag, chosen - 1u, out, lookupI
 if (terminal != 0u) { break; }
 frontier = max(frontier, applied.y);
 wrote = true;
-length += applied.x - 1u;
+length = u32(i32(length) + actionDelta);
 orderedCursor += applied.x;
 }`;
     const refresh = `
@@ -156,41 +202,85 @@ if (lane == 0u) { ${refresh} }
 `;
 }
 
-function kernelSource(scratchCapacity: number): string {
+/** Presence scans share matching/addressing; only the general scan publishes all words. */
+function presenceSource(name: "activeRoots" | "activeRootsProbe", mode: "all-words" | "word0-probe", localScratch: boolean): string {
+    const allWords = mode === "all-words";
+    const offset = allWords ? " + word" : "";
+    const value = allWords ? "present" : "first";
+    const scan = `  for (var index = 0u; index < count; index++) {
+    let at = glyphAt(base, index);
+    if (nominalSource || (scratch[at + 6] & 1) == 0) {
+      let glyph = readGlyph(base, index);
+      let ${value} = program[masks + glyph * width${offset}];
+      bits |= ${value};
+      ${localScratch ? (allWords ? "if (nominalSource && word == 0u) { nominalMasks[index] = present; }" : "if (nominalSource) { nominalMasks[index] = first; }") : ""}
+      witnesses |= program[masks + params.glyphCount * width + glyph * width${offset}];
+    }
+  }`;
+    return `fn ${name}(base:u32, count:u32)->u32 {
+  let masks = params.programWords + params.rootCount * 4u;
+  let width = program[13u];
+${allWords ? "  var first = 0u;\n  for (var word = 0u; word < width; word++) {\n" : ""}  var bits = 0u;
+  var witnesses = 0u;
+${scan}
+${allWords ? "  rootPresence[word] = bits & witnesses;\n  if (word == 0u) { first = bits & witnesses; }\n  }\n  return first;" : "  return bits & witnesses;"}
+}`;
+}
+
+export function kernelSource(scratchCapacity: number, variant?: ComputeTextKernelVariant): string {
+    const glyphWords = variant?.glyphWords ?? 8;
+    const fragments = variant?.fragments;
+    const masked = variant?.masked ?? false;
+    const profileGates = !!fragments?.gates;
+    const simpleEnabled = !masked;
+    if (masked && !fragments?.glyphMask) {
+        throw new Error("compute text masked variant has no glyphMask hook");
+    }
+    const loadGlyph = (word: string): string => (fragments?.loadGlyph ? `loadGlyph(${word})` : word);
     const localScratch = scratchCapacity > 0;
+    const splitFastState = simpleEnabled && localScratch;
     const storageFence = localScratch ? "" : "storageBarrier();";
     return `
-struct Params { runCount:u32, capacity:u32, direction:u32, glyphCount:u32, rootCount:u32, programWords:u32, outputRun:u32 }
+struct Params { runCount:u32, capacity:u32, direction:u32, glyphCount:u32, rootCount:u32, programWords:u32, outputRun:u32, profile:u32 }
 @group(0) @binding(0) var<storage, read> params: Params;
 @group(0) @binding(1) var<storage, read> program: array<u32>;
 @group(0) @binding(2) var<storage, read> tables: array<u32>;
 @group(0) @binding(3) var<storage, read> runs: array<u32>;
-${localScratch ? `var<workgroup> scratch:array<i32,${scratchCapacity * 8}>;` : "@group(0) @binding(4) var<storage, read_write> scratch: array<i32>;"}
+${localScratch ? `var<workgroup> scratch:array<i32,${scratchCapacity * glyphWords * (variant?.planes ?? 1) + (variant?.auxBytes?.(scratchCapacity) ?? 0) / 4}>;` : "@group(0) @binding(4) var<storage, read_write> scratch: array<i32>;"}
 @group(0) @binding(5) var<storage, read_write> output: array<i32>;
-const GLYPH_WORDS: u32 = 8u;
+const GLYPH_WORDS: u32 = ${glyphWords}u;
+const RECORD_CLASS_MASK: u32 = ${RECORD_CLASS_MASK}u;
+const ATTACH_SHIFT: u32 = ${ATTACH_SHIFT}u;
 var<workgroup> length:u32;
 var<workgroup> terminal:u32;
 var<workgroup> rootCount:u32;
 var<workgroup> gsubCount:u32;
-var<workgroup> rootPresence:u32;
+var<workgroup> rootPresence:array<u32,8>;
 var<workgroup> idsChanged:atomic<u32>;
 var<workgroup> selected:array<u32,${scratchCapacity || 256}>;
 var<workgroup> seconds:array<u32,${scratchCapacity || 256}>;
 var<workgroup> indexBits:array<atomic<u32>,8>;
 var<workgroup> refreshFlags:u32;
 var<workgroup> refreshStart:u32;
-var<workgroup> presenceBits:atomic<u32>;
-var<workgroup> presenceWitnesses:atomic<u32>;
+var<workgroup> presenceBits:array<atomic<u32>,8>;
+var<workgroup> presenceWitnesses:array<atomic<u32>,8>;
+var<workgroup> matchPositions:array<u32,64>;
+var<workgroup> nextLigature:u32;
 var<private> removed:bool;
 var<private> nominalSource:bool;
 var<private> selecting:bool;
 var<private> trackReads:bool;
 var<private> lowRead:u32;
-${localScratch ? `var<workgroup> nominalMasks:array<u32,${scratchCapacity}>;` : ""}
-${COMPUTE_TEXT_PREDICATES}
-fn glyphAt(base:u32, index:u32)->u32 { return base + index * GLYPH_WORDS; }
+var<private> recordMatches:bool;
+var<private> actionDelta:i32;
+var<private> mergeLength:u32;
+${masked ? "var<private> rootMask:u32;\n" : ""}${localScratch ? `var<workgroup> nominalMasks:array<u32,${scratchCapacity}>;` : ""}
+${fragments?.profilePrepass ? `fn profileBarrier() { ${storageFence} workgroupBarrier(); }\n` : ""}${Object.values(fragments ?? {}).join("\n")}${COMPUTE_TEXT_PREDICATES}
+${fragments?.glyphAddress ? "" : "fn glyphAt(base:u32, index:u32)->u32 { return base + index * GLYPH_WORDS; }\n"}fn recordProperties(cls:u32, distance:u32)->i32 { return bitcast<i32>((cls & RECORD_CLASS_MASK) | (distance << ATTACH_SHIFT)); }
+fn recordClass(at:u32)->u32 { return u32(scratch[at + 7u]) & RECORD_CLASS_MASK; }
+fn attachDistance(at:u32)->u32 { return u32(scratch[at + 7u]) >> ATTACH_SHIFT; }
 fn readGlyph(base:u32, index:u32)->u32 {
-if (nominalSource) { return runs[base + 1u + index]; }
+if (nominalSource) { return ${loadGlyph("runs[base + 1u + index]")}; }
 observeRead(index);
 return u32(scratch[glyphAt(base, index)]);
 }
@@ -209,7 +299,7 @@ ${
     localScratch
         ? ""
         : `fn nominalMask(base:u32, index:u32)->u32 {
-return program[params.programWords + params.rootCount * 2u + readGlyph(base, index)];
+return program[params.programWords + params.rootCount * 4u + readGlyph(base, index) * program[13u]];
 }`
 }
 fn live(base:u32, index:u32, count:u32, flag:u32)->bool {
@@ -217,44 +307,34 @@ fn live(base:u32, index:u32, count:u32, flag:u32)->bool {
   if (nominalSource) { return !skipped(flag, readGlyph(base, index)); }
   observeRead(index);
   let at = glyphAt(base, index);
-  return scratch[at + 6] == 0 && !skipped(flag, u32(scratch[at]));
+  return (scratch[at + 6] & 1) == 0 && !skipped(flag, u32(scratch[at]));
 }
-fn activeRoots(base:u32, count:u32)->u32 {
-  let masks = params.programWords + params.rootCount * 2u;
-  var bits = 0u;
-  var witnesses = 0u;
-  for (var index = 0u; index < count; index++) {
-    let at = glyphAt(base, index);
-    if (nominalSource || scratch[at + 6] == 0) {
-      let glyph = readGlyph(base, index);
-      let first = program[masks + glyph];
-      bits |= first;
-      ${localScratch ? "if (nominalSource) { nominalMasks[index] = first; }" : ""}
-      witnesses |= program[masks + params.glyphCount + glyph];
-    }
-  }
-  return bits & witnesses;
-}
+${presenceSource("activeRoots", "all-words", localScratch)}${splitFastState ? "\n" + presenceSource("activeRootsProbe", "word0-probe", localScratch) : ""}
 ${
     localScratch
         ? ""
         : `fn activeRootsParallel(base:u32, count:u32, lane:u32) {
-let masks = params.programWords + params.rootCount * 2u;
+let masks = params.programWords + params.rootCount * 4u;
+let width = program[13u];
+for (var word = 0u; word < width; word++) {
 var bits = 0u;
 var witnesses = 0u;
 for (var index = lane; index < count; index += 32u) {
 let glyph = readGlyph(base, index);
-let first = program[masks + glyph];
+let first = program[masks + glyph * width + word];
 bits |= first;
-witnesses |= program[masks + params.glyphCount + glyph];
+witnesses |= program[masks + params.glyphCount * width + glyph * width + word];
 }
-atomicOr(&presenceBits, bits);
-atomicOr(&presenceWitnesses, witnesses);
+atomicOr(&presenceBits[word], bits);
+atomicOr(&presenceWitnesses[word], witnesses);
+}
 workgroupBarrier();
-if (lane == 0u) { rootPresence = atomicLoad(&presenceBits) & atomicLoad(&presenceWitnesses); }
+if (lane == 0u) { for (var word = 0u; word < width; word++) { rootPresence[word] = atomicLoad(&presenceBits[word]) & atomicLoad(&presenceWitnesses[word]); } }
 }`
 }
 fn replaceGlyph(at:u32, id:u32) {
+  scratch[at + 6u] |= 0x400000;
+  scratch[at + 7u] = recordProperties(gdefOf(id), 0u);
   if (scratch[at] != i32(id)) {
     scratch[at] = i32(id);
     scratch[at + 2] = advanceOf(id);
@@ -270,29 +350,30 @@ fn main(@builtin(workgroup_id) group:vec3u, @builtin(local_invocation_index) lan
   let stride = ${HEADER_WORDS}u + capacity * ${RECORD_WORDS}u;
   let out = run * stride;
   let inputOrigin = runs[local];
-  let base = ${localScratch ? "0u" : "local * capacity * GLYPH_WORDS"};
-  nominalSource = true;
+  let base = ${localScratch ? "0u" : variant?.auxBytes ? `local * (capacity * GLYPH_WORDS * ${variant.planes}u + capacity * ${variant.auxBytes(1) / 4}u)` : `local * capacity * GLYPH_WORDS${(variant?.planes ?? 1) > 1 ? ` * ${variant!.planes}u` : ""}`};
+${fragments?.recordInit ? "  profileInit(base, out, lane);\n" : ""}  nominalSource = true;
   if (lane == 0u) {
     output[out + 2] = 0;
     output[out + 3] = 0;
     output[out] = 0;
     output[out + 1] = 0;
-    length = runs[inputOrigin];
+    length = runs[inputOrigin] & 0x7fffffffu;
     terminal = 0u;
-    atomicStore(&idsChanged, 0u);
+${splitFastState ? "" : "    nextLigature = 0u;\n"}    atomicStore(&idsChanged, 0u);
     rootCount = params.rootCount;
     gsubCount = program[2u];
     if (length > capacity) { output[out] = ${STATUS_OVERFLOW}; terminal = 1u; }
     if (terminal == 0u${localScratch ? "" : " && length <= 256u"}) {
-rootPresence = activeRoots(inputOrigin, length);
-simpleRoots = proveSimpleRun(inputOrigin, length, rootPresence);
+${simpleEnabled ? `let present = ${splitFastState ? "activeRootsProbe" : "activeRoots"}(inputOrigin, length);\nsimpleRoots = proveSimpleRun(inputOrigin, length, present);` : "simpleRoots = vec2u(0u);"}
 ${localScratch ? "atomicStore(&firstFailure, 0xffffffffu);" : ""}
 }
 ${
-    localScratch
+    localScratch || !simpleEnabled
         ? ""
-        : `atomicStore(&presenceBits, 0u);
-atomicStore(&presenceWitnesses, 0u);
+        : `for (var word = 0u; word < 8u; word++) {
+atomicStore(&presenceBits[word], 0u);
+atomicStore(&presenceWitnesses[word], 0u);
+}
 atomicStore(&firstFailureIndex, 0xffffffffu);`
 }
 ${localScratch ? "" : "atomicStore(&firstFailure, 0xffffffffu);"}
@@ -302,21 +383,29 @@ ${localScratch ? "" : "atomicStore(&firstFailure, 0xffffffffu);"}
   if (workgroupUniformLoad(&terminal) != 0u) { return; }
   let scalarCount = workgroupUniformLoad(&length);
   ${
-      localScratch
+      localScratch || !simpleEnabled
           ? ""
           : `if (scalarCount > 256u) {
 activeRootsParallel(inputOrigin, scalarCount, lane);
-let candidates = workgroupUniformLoad(&rootPresence);
+let candidates = workgroupUniformLoad(&rootPresence[0u]);
 let proved = proveSimpleRunParallel(inputOrigin, scalarCount, candidates, lane);
 if (lane == 0u) { simpleRoots = proved; }
 }`
   }
   let simple = workgroupUniformLoad(&simpleRoots);
-if (simple.y != 0u) { finishSimpleRun(inputOrigin, scalarCount, simple.x, out, lane); return; }
-nominalSource = false;
+${simpleEnabled ? "if (simple.y != 0u) {\nif (simple.y == 1u) { finishSimpleRun(inputOrigin, scalarCount, simple.x, out, lane); } else { finishSimpleRunLean(inputOrigin, scalarCount, simple.x, out, lane); }\nreturn;\n}\n" : ""}${
+        splitFastState
+            ? `if (lane == 0u) {
+let generalPresence = activeRoots(inputOrigin, scalarCount);
+nextLigature = 0u;
+}
+workgroupBarrier();
+`
+            : ""
+    }nominalSource = false;
   for (var i = lane; i < scalarCount; i += 32u) {
     let at = glyphAt(base, i);
-    let id = runs[inputOrigin + 1u + i];
+    let id = ${loadGlyph("runs[inputOrigin + 1u + i]")};
     scratch[at] = i32(id);
     scratch[at + 1] = i32(i);
     scratch[at + 2] = advanceOf(id);
@@ -324,45 +413,58 @@ nominalSource = false;
     scratch[at + 4] = 0;
     scratch[at + 5] = 0;
     scratch[at + 6] = 0;
-    scratch[at + 7] = i32(gdefOf(id) & 0xffffu);
-  }
+    scratch[at + 7] = recordProperties(gdefOf(id), 0u);
+${glyphWords > 8 ? `for (var word = 8u; word < GLYPH_WORDS; word++) { scratch[at + word] = 0; }\n` : ""}  }
   ${storageFence}
   workgroupBarrier();
-  let rootOrigin = 8u;
+${fragments?.profilePrepass ? `  mergeLength = scalarCount;\n  profilePrepass(inputOrigin, base, scalarCount, lane);\n${fragments.recordInit ? "  if (workgroupUniformLoad(&terminal) != 0u) { return; }\n" : ""}  if (lane == 0u) { let present = activeRoots(base, length); }\n  ${storageFence}\n  workgroupBarrier();\n` : !simpleEnabled ? `  if (lane == 0u) { let present = activeRoots(base, length); }\n  ${storageFence}\n  workgroupBarrier();\n` : ""}  let rootOrigin = 8u;
   let roots = workgroupUniformLoad(&rootCount);
   let substitutions = workgroupUniformLoad(&gsubCount);
-  var candidates = simple.x;
-  for (var root = 0u; root < roots; root++) {
-    if (root < 32u && (candidates & (1u << root)) == 0u) { continue; }
-    let tableBit = program[program[rootOrigin] + root * 2u];
-    let lookupIndex = program[program[rootOrigin] + root * 2u + 1u];
-    let descBase = select(program[4u], program[5u], tableBit == 1u) + lookupIndex * 8u;
+  let stageOrigin = program[10u];
+  for (var stage = 0u; stage < program[12u]; stage++) {
+  let stageAt = stageOrigin + stage * 4u;
+  let endRoot = program[stageAt + 1u] + program[stageAt + 2u];
+  for (var root = program[stageAt + 1u]; root < endRoot; root++) {
+    if (root < 256u && (workgroupUniformLoad(&rootPresence[root / 32u]) & (1u << (root % 32u))) == 0u) { continue; }
+    let encoded = program[program[rootOrigin] + root * 4u];
+    let tableBit = encoded >> 16u;
+    let lookupIndex = encoded & 0xffffu;
+${masked ? "    rootMask = program[program[rootOrigin] + root * 4u + 1u];\n" : ""}${profileGates ? "    profileRoot(program[program[rootOrigin] + root * 4u + 2u], tableBit);\n" : ""}    let descBase = select(program[4u], program[5u], tableBit == 1u) + lookupIndex * 8u;
     let flag = program[descBase + 1u];
     let ruleOrigin = program[descBase + 3u];
     let directory = program[descBase + 6u];
     let isGpos = tableBit == 1u;
     let count = workgroupUniformLoad(&length);
+    mergeLength = count;
     let capability = program[descBase + 2u];
-    let cooperative = capability != 0u${localScratch ? " && capacity <= 256u" : ""};
+    let cooperative = capability != 0u${profileGates ? " && capability == 1u" : ""}${localScratch ? " && capacity <= 256u" : ""};
     let orderedEligibility = program[descBase + 7u];
     let orderedEligible = (orderedEligibility & 3u) ${localScratch ? "!= 0u" : "== 1u"};
     let orderedForward = (orderedEligibility & 4u) != 0u;
     let orderedParallel = count > 32u && orderedEligible && !cooperative;
     trackReads = orderedParallel && !isGpos && !orderedForward;
-    ${cooperativeSource(localScratch, storageFence)}
+    ${cooperativeSource(localScratch, storageFence, masked)}
     ${storageFence}
     let flags = workgroupUniformLoad(&refreshFlags);
     refreshRun(base, lane, flags);
     if ((flags & 4u) != 0u) { return; }
-    if (root < substitutions) { candidates = workgroupUniformLoad(&rootPresence); }
   }
+${fragments?.pauses ? `  mergeLength = workgroupUniformLoad(&length);\n  profilePause(base, program[stageAt + 3u], lane);\n  if (workgroupUniformLoad(&terminal) != 0u) { return; }\n  if (lane == 0u) { let present = activeRoots(base, length); }\n  ${storageFence}\n  workgroupBarrier();\n` : ""}  }
+  let positionedCount = workgroupUniformLoad(&length);
+  for (var i = lane; i < positionedCount; i += 32u) {
+    let at = glyphAt(base, i);
+    if (attachDistance(at) != 0u) { scratch[at + 2u] = 0; scratch[at + 3u] = 0; }
+  }
+  ${storageFence}
+  workgroupBarrier();
   if (lane == 0u) {
+    propagateAttachments(base, length);
     if (params.direction == 1u) { reverseRun(base, length); }
     output[out + 1] = i32(length);
   }
   ${storageFence}
   workgroupBarrier();
-  let count = workgroupUniformLoad(&length);
+${fragments?.postprocess ? "  profileFinish(base, positionedCount, lane);\n" : ""}  let count = workgroupUniformLoad(&length);
   for (var i = lane; i < count; i += 32u) {
     let at = glyphAt(base, i);
     let dst = out + ${HEADER_WORDS}u + i * ${RECORD_WORDS}u;
@@ -377,7 +479,7 @@ fn rejectRun(out:u32, lookup:u32, index:u32) {
 }
 fn selectPair(base:u32, index:u32, second:u32, count:u32, ruleOrigin:u32, directory:u32)->u32 {
   if (second >= count) { return 0u; }
-  return selectPairIds(readGlyph(base, index), readGlyph(base, second), ruleOrigin, directory);
+${masked ? "  if ((glyphMask(glyphAt(base, second)) & rootMask) == 0u) { return 0u; }\n" : ""}  return selectPairIds(readGlyph(base, index), readGlyph(base, second), ruleOrigin, directory);
 }
 fn executeRoot(base:u32, inputCount:u32, flag:u32, ruleOrigin:u32, directory:u32, out:u32, lookup:u32)->u32 {
     removed = false;
@@ -385,11 +487,12 @@ fn executeRoot(base:u32, inputCount:u32, flag:u32, ruleOrigin:u32, directory:u32
     var index = 0u;
     loop {
       if (index >= count) { break; }
+      actionDelta = 0;
       let selectedRule = selectRule(base, count, index, flag, ruleOrigin, directory);
       var applied = vec2u(1u, index);
       if (selectedRule != 0u) { applied = applySelected(base, count, index, flag, selectedRule - 1u, out, lookup); }
       if (terminal != 0u) { return count; }
-      count += applied.x - 1u;
+      count = u32(i32(count) + actionDelta);
       index += applied.x;
     }
     return count;
@@ -409,9 +512,9 @@ fn selectCandidate(base:u32, count:u32, index:u32, flag:u32, ruleOrigin:u32, dir
       for (var candidate = 0u; candidate < candidateCount; candidate++) {
         var ruleAt = ruleOrigin + program[candidates + candidate] * 16u;
         let row = program[ruleAt + 10u];
-        if (row != 0u) {
+        if (${profileGates ? "false && " : ""}row != 0u) {
           candidate += program[ruleAt + 13u] - 1u;
-          let second = pairSecond(base, count, index, flag);
+          let second = ${profileGates ? "profilePairSecond(base, count, index, flag, ruleAt)" : "pairSecond(base, count, index, flag)"};
           if (second >= count) { continue; }
           let cls = classOf(program[ruleAt + 11u], readGlyph(base, second));
           if (cls >= program[ruleAt + 12u]) { continue; }
@@ -427,10 +530,10 @@ fn selectCandidate(base:u32, count:u32, index:u32, flag:u32, ruleOrigin:u32, dir
         } else if (mode == 11u) {
           if (program[action] != 0u) { return ruleAt + 1u; }
         } else if (mode == 3u || mode == 4u) {
-          let second = pairSecond(base, count, index, flag);
+          let second = ${profileGates ? "profilePairSecond(base, count, index, flag, ruleAt)" : "pairSecond(base, count, index, flag)"};
           if (second < count && (mode == 4u || program[action] == readGlyph(base, second))) { return ruleAt + 1u; }
         } else if (mode == 7u || mode == 8u) {
-          if (probeMark(base, index, action, mode).x != 0u) { return ruleAt + 1u; }
+          if (probeMark(base, index, flag, action, mode).x != 0u) { return ruleAt + 1u; }
         } else if (mode == 1u || mode == 2u || mode == 5u || mode == 9u || mode == 10u) {
           return ruleAt + 1u;
         }
@@ -441,7 +544,7 @@ fn compactRun(base:u32, count:u32)->u32 {
   var write = 0u;
   for (var i = 0u; i < count; i++) {
     let at = glyphAt(base, i);
-    if (scratch[at + 6] == 0) {
+    if ((scratch[at + 6] & 1) == 0) {
       if (write != i) {
         let dst = glyphAt(base, write);
         for (var word = 0u; word < GLYPH_WORDS; word++) { scratch[dst + word] = scratch[at + word]; }
@@ -458,14 +561,16 @@ let parallelRefresh = count > 32u;
 if (!parallelRefresh) {
 if (lane == 0u) {
 if ((flags & 1u) != 0u) { length = compactRun(base, count); }
-if ((flags & 2u) != 0u) { rootPresence = activeRoots(base, length); }
+if ((flags & 2u) != 0u) { let present = activeRoots(base, length); }
 }
 ${storageFence}
 return;
 }
 if (lane == 0u) {
-atomicStore(&presenceBits, 0u);
-atomicStore(&presenceWitnesses, 0u);
+for (var word = 0u; word < 8u; word++) {
+atomicStore(&presenceBits[word], 0u);
+atomicStore(&presenceWitnesses[word], 0u);
+}
 }
 if ((flags & 1u) != 0u) {
 var writeBase = 0u;
@@ -475,7 +580,7 @@ let chunks = (tileCount + 31u) / 32u;
 if (lane < 8u) { atomicStore(&indexBits[lane], 0u); }
 workgroupBarrier();
 for (var index = lane; index < tileCount; index += 32u) {
-if (scratch[glyphAt(base, tile + index) + 6u] == 0) { atomicOr(&indexBits[index / 32u], 1u << (index % 32u)); }
+if ((scratch[glyphAt(base, tile + index) + 6u] & 1) == 0) { atomicOr(&indexBits[index / 32u], 1u << (index % 32u)); }
 }
 workgroupBarrier();
 if (lane == 0u) {
@@ -489,7 +594,7 @@ refreshStart++;
 }
 let start = workgroupUniformLoad(&refreshStart);
 var prefix = writeBase + start * 32u;
-var current:array<i32,8>;
+var current:array<i32,${glyphWords}>;
 if (start < chunks) {
 let bitmap = atomicLoad(&indexBits[start]);
 let index = tile + start * 32u + lane;
@@ -502,7 +607,7 @@ for (var word = 0u; word < GLYPH_WORDS; word++) { current[word] = scratch[at + w
 for (var chunk = start; chunk < chunks; chunk++) {
 let bitmap = atomicLoad(&indexBits[chunk]);
 let nextPrefix = prefix + countOneBits(bitmap);
-var next:array<i32,8>;
+var next:array<i32,${glyphWords}>;
 if (chunk + 1u < chunks) {
 let nextBits = atomicLoad(&indexBits[chunk + 1u]);
 let index = tile + (chunk + 1u) * 32u + lane;
@@ -533,20 +638,23 @@ if (lane == 0u) { length = writeBase; }
 }
 if ((flags & 2u) != 0u) {
 let liveCount = workgroupUniformLoad(&length);
-let masks = params.programWords + params.rootCount * 2u;
+let masks = params.programWords + params.rootCount * 4u;
+let width = program[13u];
+for (var word = 0u; word < width; word++) {
 var bits = 0u;
 var witnesses = 0u;
 for (var index = lane; index < liveCount; index += 32u) {
 let at = glyphAt(base, index);
-if (scratch[at + 6u] != 0) { continue; }
+if ((scratch[at + 6u] & 1) != 0) { continue; }
 let glyph = u32(scratch[at]);
-bits |= program[masks + glyph];
-witnesses |= program[masks + params.glyphCount + glyph];
+bits |= program[masks + glyph * width + word];
+witnesses |= program[masks + params.glyphCount * width + glyph * width + word];
 }
-atomicOr(&presenceBits, bits);
-atomicOr(&presenceWitnesses, witnesses);
+atomicOr(&presenceBits[word], bits);
+atomicOr(&presenceWitnesses[word], witnesses);
+}
 workgroupBarrier();
-if (lane == 0u) { rootPresence = atomicLoad(&presenceBits) & atomicLoad(&presenceWitnesses); }
+if (lane == 0u) { for (var word = 0u; word < width; word++) { rootPresence[word] = atomicLoad(&presenceBits[word]) & atomicLoad(&presenceWitnesses[word]); } }
 }
 }
 fn reverseRun(base:u32, count:u32) {
@@ -562,6 +670,16 @@ fn reverseRun(base:u32, count:u32) {
   }
 }
 fn applySelected(base:u32, count:u32, index:u32, flag:u32, ruleAt:u32, out:u32, lookup:u32)->vec2u {
+  actionDelta = 0;
+  recordMatches = true;
+  let matched = matchInput(base, count, index, flag, ruleAt);
+  recordMatches = false;
+  if (!matched) { return vec2u(1u, index); }
+  if (program[ruleAt + 8u] == 2u) { return applyContext(base, count, index, flag, ruleAt, out, lookup); }
+  return applyNonContext(base, count, index, flag, ruleAt, out, lookup);
+}
+fn applyNonContext(base:u32, count:u32, index:u32, flag:u32, ruleAt:u32, out:u32, lookup:u32)->vec2u {
+  actionDelta = 0;
   let mode = program[ruleAt + 8u];
   let action = program[ruleAt + 6u];
   if (mode == 5u) { rejectRun(out, lookup, index); }
@@ -569,62 +687,120 @@ fn applySelected(base:u32, count:u32, index:u32, flag:u32, ruleAt:u32, out:u32, 
   if (mode == 11u) {
     let produced = applyMultiple(base, count, index, action);
     if (produced == 0xffffffffu) { output[out] = ${STATUS_OVERFLOW}; terminal = 1u; return vec2u(1u, 0xffffffffu); }
+    actionDelta = i32(produced) - 1;
     return vec2u(produced, 0xffffffffu);
   }
   if (mode == 1u) { replaceGlyph(glyphAt(base, index), program[action + 1u]); }
-  if (mode == 2u) { return vec2u(1u, applyContext(base, count, index, action)); }
   if (mode == 9u) { return vec2u(1u, applyLigature(base, count, index, flag, ruleAt, action)); }
   if (mode == 3u || mode == 4u) {
-    let second = pairSecond(base, count, index, flag);
+    let second = ${profileGates ? "profilePairSecond(base, count, index, flag, ruleAt)" : "pairSecond(base, count, index, flag)"};
     commitPair(base, index, second, action, mode);
-    return vec2u(1u, second);
+    let values = action + select(1u, 2u, mode == 4u);
+    return vec2u(second - index + select(0u, 1u, program[values + 8u] != 0u), second);
   }
-  if (mode == 8u || mode == 7u) { applyMark(base, count, index, action, mode); }
+  if (mode == 8u || mode == 7u) { applyMark(base, count, index, flag, action, mode); }
   if (mode == 10u) {
     let at = glyphAt(base, index);
     scratch[at + 4] += bitcast<i32>(program[action]);
     scratch[at + 5] += bitcast<i32>(program[action + 1u]);
     scratch[at + 2] += bitcast<i32>(program[action + 2u]);
-    scratch[at + 3] += bitcast<i32>(program[action + 3u]);
   }
   return vec2u(1u, index);
 }
-fn applyContext(base:u32, count:u32, index:u32, action:u32)->u32 {
-  let nested = program[action];
+// OpenType SequenceLookupRecord bookkeeping, independently implemented.
+// Behavioural reference: HarfBuzz 11.0.1 (MIT, HarfBuzz authors).
+// A single action has no subsequent SequenceLookupRecord that could observe a
+// rewritten sequence. Keep its original boundary and apply the same child/delta
+// and capacity rules, without constructing or filtering an unused sequence.
+fn applyContextSingle(base:u32, count:u32, index:u32, parent:u32, out:u32, parentLookup:u32)->vec2u {
+  actionDelta = 0;
+  let action = program[parent + 6u];
+  let seqCount = program[parent + 1u];
+  var boundary = index + 1u;
+  if (seqCount != 0u) { boundary = matchPositions[seqCount - 1u] + 1u; }
+  let k = program[action + 1u];
   var high = index;
-  for (var i = 0u; i < nested; i++) {
-    let at = index + program[action + 1u + i * 2u];
-    let lookup = program[action + 2u + i * 2u];
-    if (at >= count) { continue; }
-    high = max(high, at);
-    let desc = program[4u] + lookup * 8u;
-    let ruleOrigin = program[desc + 3u];
-    let glyph = u32(scratch[glyphAt(base, at)]);
-    let entry = program[desc + 6u] + glyph * 2u;
-    let candidates = program[entry];
-    for (var candidate = 0u; candidate < program[entry + 1u]; candidate++) {
-      let ruleAt = ruleOrigin + program[candidates + candidate] * 16u;
-      if (program[ruleAt + 8u] == 5u) {
-        return high;
-      }
-      if (program[ruleAt + 8u] == 1u) {
-        replaceGlyph(glyphAt(base, at), program[program[ruleAt + 6u] + 1u]);
-        break;
+  if (k < seqCount) {
+    let lookup = program[action + 2u];
+    let desc = select(program[4u], program[5u], (lookup >> 16u) != 0u) + (lookup & 0xffffu) * 8u;
+    let childFlag = program[desc + 1u];
+    let at = matchPositions[k];
+    let chosen = selectRule(base,count,at,childFlag,program[desc + 3u],program[desc + 6u]);
+    if (chosen != 0u) {
+      let applied = applyNonContext(base,count,at,childFlag,chosen - 1u,out,lookup);
+      high = max(high,applied.y);
+      if (terminal != 0u) { return vec2u(1u,high); }
+      if (actionDelta > 0) {
+        let extra = u32(actionDelta);
+        if (seqCount + extra > 64u) { rejectRun(out,parentLookup,index); return vec2u(1u,high); }
+        boundary += extra;
       }
     }
   }
-  return high;
+  var advance = 1u;
+  if (boundary > index) { advance = max(1u,boundary - index); }
+  return vec2u(advance,high);
+}
+fn applyContext(base:u32, count:u32, index:u32, flag:u32, parent:u32, out:u32, parentLookup:u32)->vec2u {
+  let action = program[parent + 6u];
+  let nested = program[action];
+  if (nested == 1u) { return applyContextSingle(base,count,index,parent,out,parentLookup); }
+  var seqCount = program[parent + 1u];
+  var currentCount = count;
+  var boundary = index + 1u;
+  if (seqCount != 0u) { boundary = matchPositions[seqCount - 1u] + 1u; }
+  var high = index;
+  for (var i = 0u; i < nested; i++) {
+    let k = program[action + 1u + i * 2u];
+    if (k >= seqCount) { continue; }
+    let at = matchPositions[k];
+    let lookup = program[action + 2u + i * 2u];
+    let desc = select(program[4u], program[5u], (lookup >> 16u) != 0u) + (lookup & 0xffffu) * 8u;
+    let ruleOrigin = program[desc + 3u];
+    let childFlag = program[desc + 1u];
+    let chosen = selectRule(base, currentCount, at, childFlag, ruleOrigin, program[desc + 6u]);
+    if (chosen == 0u) { continue; }
+    let ruleAt = chosen - 1u;
+    let mode = program[ruleAt + 8u];
+    let applied = applyNonContext(base, currentCount, at, childFlag, ruleAt, out, lookup);
+    high = max(high, applied.y);
+    if (terminal != 0u) { return vec2u(1u, high); }
+    if (actionDelta > 0) {
+      let extra = u32(actionDelta);
+      if (seqCount + extra > 64u) { rejectRun(out, parentLookup, index); return vec2u(1u, high); }
+      var p = seqCount;
+      while (p > k + 1u) { p--; matchPositions[p + extra] = matchPositions[p] + extra; }
+      for (var j = 1u; j <= extra; j++) { matchPositions[k + j] = at + j; }
+      seqCount += extra;
+      currentCount += extra;
+      boundary += extra;
+    } else if (mode == 9u) {
+      // A root retains physical tombstone coordinates until refresh. Drop
+      // consumed sequence elements, but never move records or renumber indexes.
+      var kept = 0u;
+      for (var p = 0u; p < seqCount; p++) {
+        if ((scratch[glyphAt(base, matchPositions[p]) + 6u] & 1) == 0) {
+          matchPositions[kept] = matchPositions[p];
+          kept++;
+        }
+      }
+      seqCount = kept;
+    }
+  }
+  actionDelta = i32(currentCount) - i32(count);
+  var advance = 1u;
+  if (boundary > index) { advance = max(1u, boundary - index); }
+  return vec2u(advance, high);
 }
 fn probeMarkLigature(base:u32, index:u32, action:u32)->vec3u {
   var lig = -1;
-  var between = 0;
   for (var i = 0u; i < index; i++) {
     observeRead(i);
-    let cls = scratch[glyphAt(base, i) + 7];
-    if (cls == 0 || cls == 1 || cls == 2) { lig = i32(i); between = 0; }
-    else if (cls == 3 && lig >= 0) { between++; }
+    let cls = recordClass(glyphAt(base, i));
+    if ((scratch[glyphAt(base, i) + 6u] & 1) != 0) { continue; }
+${profileGates ? "    if (profileHidden(glyphAt(base, i))) { continue; }\n" : ""}    if (cls != 3) { lig = i32(i); }
   }
-  if (lig < 0 || scratch[glyphAt(base, u32(lig)) + 7] != 2) { return vec3u(0u); }
+  if (lig < 0) { return vec3u(0u); }
   let ligId = readGlyph(base, u32(lig));
   var cursor = action + 3u;
   let ligatures = program[action + 2u];
@@ -635,7 +811,10 @@ fn probeMarkLigature(base:u32, index:u32, action:u32)->vec3u {
     cursor += 3u;
     if (glyphId == ligId) {
       if (componentCount == 0u) { return vec3u(0u); }
-      let component = min(u32(between), componentCount - 1u);
+      let props = u32(scratch[glyphAt(base, index) + 6u]);
+      let ligProps = u32(scratch[glyphAt(base, u32(lig)) + 6u]);
+      let same = ((props >> 8u) & 255u) != 0u && ((props >> 8u) & 255u) == ((ligProps >> 8u) & 255u);
+      let component = select(componentCount - 1u, min(((props >> 16u) & 15u) - 1u, componentCount - 1u), same && ((props >> 16u) & 15u) != 0u);
       for (var a = 0u; a < anchorCount; a++) {
         let at = cursor + a * 4u;
         if (program[at] == component) {
@@ -654,10 +833,9 @@ fn applyMarkLigature(base:u32, index:u32, action:u32)->u32 {
   if (probe.z != 0u) { return 2u; }
   let mark = glyphAt(base, index);
   let baseAt = glyphAt(base, probe.x - 1u);
-  scratch[mark + 4] = bitcast<i32>(program[probe.y + 2u]) - bitcast<i32>(program[action]) + scratch[baseAt + 4];
-  scratch[mark + 5] = bitcast<i32>(program[probe.y + 3u]) - bitcast<i32>(program[action + 1u]) + scratch[baseAt + 5];
-  scratch[mark + 2] = 0;
-  scratch[mark + 3] = 0;
+  scratch[mark + 4] = bitcast<i32>(program[probe.y + 2u]) - bitcast<i32>(program[action]);
+  scratch[mark + 5] = bitcast<i32>(program[probe.y + 3u]) - bitcast<i32>(program[action + 1u]);
+  scratch[mark + 7u] = recordProperties(recordClass(mark), index - (probe.x - 1u));
   return 1u;
 }
 fn applyMultiple(base:u32, count:u32, index:u32, action:u32)->u32 {
@@ -675,10 +853,12 @@ fn applyMultiple(base:u32, count:u32, index:u32, action:u32)->u32 {
   }
   let at = glyphAt(base, index);
   let cluster = scratch[at + 1];
+  let profileFlags = scratch[at + 6u] & 0x0f000000;
   let first = program[action + 1u];
   replaceGlyph(at, first);
   if (produced > 1u) { atomicStore(&idsChanged, 1u); }
-  scratch[at + 7] = i32(gdefOf(first) & 0xffffu);
+  scratch[at + 7] = recordProperties(gdefOf(first), 0u);
+  scratch[at + 6u] = profileFlags | 0x600000 | (1 << 16);
   for (var step = 1u; step < produced; step++) {
     let dst = glyphAt(base, index + step);
     let id = program[action + 1u + step];
@@ -688,48 +868,86 @@ fn applyMultiple(base:u32, count:u32, index:u32, action:u32)->u32 {
     scratch[dst + 3] = 0;
     scratch[dst + 4] = 0;
     scratch[dst + 5] = 0;
-    scratch[dst + 6] = 0;
-    scratch[dst + 7] = i32(gdefOf(id) & 0xffffu);
-  }
+    scratch[dst + 6] = profileFlags | 0x600000 | i32(min(step + 1u, 15u) << 16u);
+    scratch[dst + 7] = recordProperties(gdefOf(id), 0u);
+${glyphWords > 8 ? "for (var word = 8u; word < GLYPH_WORDS; word++) { scratch[dst + word] = scratch[at + word]; }\n" : ""}  }
+  mergeLength = count + extra;
   return produced;
 }
 fn applyLigature(base:u32, count:u32, index:u32, flag:u32, ruleAt:u32, action:u32)->u32 {
   let inputCount = program[ruleAt + 1u];
+  nextLigature = nextLigature % 7u + 1u;
   var cursor = index;
-  var cluster = scratch[glyphAt(base, index) + 1];
-  for (var step = 0u; step < inputCount; step++) {
-    if (step > 0u) { cursor = nextLive(base, count, cursor + 1u, flag, 1); }
-    cluster = min(cluster, scratch[glyphAt(base, cursor) + 1]);
-    if (step > 0u) { scratch[glyphAt(base, cursor) + 6] = 1; }
+${profileGates ? "  var inputWord = program[ruleAt];\n" : ""}  for (var step = 0u; step < inputCount; step++) {
+    if (step > 0u) {
+${profileGates ? "      inputWord += predicateSize(inputWord);\n" : ""}      let next = ${profileGates ? "profileInputNext(base, count, cursor + 1u, flag, 1, inputWord, false)" : "nextLive(base, count, cursor + 1u, flag, 1)"};
+      for (var mark = cursor + 1u; mark < next; mark++) { tagLigatureMark(base, mark, nextLigature, step); }
+      cursor = next;
+      scratch[glyphAt(base, cursor) + 6] |= 1;
+    }
+  }
+  mergeClusters(base, index, cursor + 1u);
+  var high = cursor;
+  for (var mark = cursor + 1u; mark < count; mark++) {
+    if (recordClass(glyphAt(base, mark)) != 3u) { break; }
+    tagLigatureMark(base, mark, nextLigature, inputCount);
+    high = mark;
   }
   let at = glyphAt(base, index);
   replaceGlyph(at, program[action + 1u]);
-  scratch[at + 1] = cluster;
+  scratch[at + 6u] = (scratch[at + 6u] & 0x0f000000) | 0x500000 | i32(nextLigature << 8u);
   removed = true;
   atomicStore(&idsChanged, 1u);
-  return cursor;
+  return high;
+}
+fn tagLigatureMark(base:u32, index:u32, id:u32, component:u32) {
+  let at = glyphAt(base, index);
+  if (recordClass(at) == 3u) {
+    scratch[at + 6u] = (scratch[at + 6u] & i32(0xfff000ffu)) | i32((id << 8u) | (min(component, 15u) << 16u));
+  }
+}
+fn mergeClusters(base:u32, start:u32, end:u32) {
+  var a = start;
+  var b = end;
+  while (a > 0u && scratch[glyphAt(base, a - 1u) + 1u] == scratch[glyphAt(base, a) + 1u]) { a--; }
+  while (b < mergeLength && scratch[glyphAt(base, b - 1u) + 1u] == scratch[glyphAt(base, b) + 1u]) { b++; }
+  var minimum = scratch[glyphAt(base, a) + 1u];
+  for (var i = a + 1u; i < b; i++) { minimum = min(minimum, scratch[glyphAt(base, i) + 1u]); }
+  for (var i = a; i < b; i++) { scratch[glyphAt(base, i) + 1u] = minimum; }
 }
 fn commitPairFirst(base:u32, index:u32, action:u32, mode:u32) {
-  scratch[glyphAt(base, index) + 2] += bitcast<i32>(program[action + select(1u, 2u, mode == 4u)]);
+  scratch[glyphAt(base, index) + 2] += bitcast<i32>(program[action + select(3u, 4u, mode == 4u)]);
 }
 fn commitPair(base:u32, index:u32, second:u32, action:u32, mode:u32) {
-  commitPairFirst(base, index, action, mode);
-  let applySecond = program[action + select(3u, 4u, mode == 4u)];
-  if (applySecond != 0u) { scratch[glyphAt(base, second) + 2] += bitcast<i32>(program[action + select(2u, 3u, mode == 4u)]); }
+  let values = action + select(1u, 2u, mode == 4u);
+  commitValue(glyphAt(base, index), values);
+  commitValue(glyphAt(base, second), values + 4u);
 }
-fn probeMark(base:u32, index:u32, action:u32, mode:u32)->vec2u {
+fn commitValue(at:u32, value:u32) {
+  scratch[at + 4u] += bitcast<i32>(program[value]);
+  scratch[at + 5u] += bitcast<i32>(program[value + 1u]);
+  scratch[at + 2u] += bitcast<i32>(program[value + 2u]);
+}
+fn probeMark(base:u32, index:u32, flag:u32, action:u32, mode:u32)->vec2u {
   var baseIndex = -1;
   if (mode == 7u) {
     if (index == 0u) { return vec2u(0u); }
-    observeRead(index - 1u);
-    if (scratch[glyphAt(base, index - 1u) + 7] != 3) { return vec2u(0u); }
-    baseIndex = i32(index) - 1;
+    let previous = nextLive(base, index, index - 1u, flag, -1);
+    if (previous >= index || recordClass(glyphAt(base, previous)) != 3u) { return vec2u(0u); }
+    let props = u32(scratch[glyphAt(base, index) + 6u]);
+    let other = u32(scratch[glyphAt(base, previous) + 6u]);
+    if (((props >> 8u) & 255u) != ((other >> 8u) & 255u)) { return vec2u(0u); }
+    if (((props >> 8u) & 255u) != 0u && ((props >> 16u) & 15u) != ((other >> 16u) & 15u)) { return vec2u(0u); }
+    baseIndex = i32(previous);
   } else {
     var i = index;
     while (i > 0u) {
       i--;
       observeRead(i);
-      if (scratch[glyphAt(base, i) + 7] != 3) { baseIndex = i32(i); break; }
+      let props = u32(scratch[glyphAt(base, i) + 6u]);
+      if ((props & 1u) != 0u) { continue; }
+${profileGates ? "      if (profileHidden(glyphAt(base, i))) { continue; }\n" : ""}      if ((props & 0x200000u) != 0u && ((props >> 16u) & 15u) > 1u) { continue; }
+      if (recordClass(glyphAt(base, i)) != 3u) { baseIndex = i32(i); break; }
     }
     if (baseIndex < 0) { return vec2u(0u); }
   }
@@ -747,30 +965,50 @@ fn probeMark(base:u32, index:u32, action:u32, mode:u32)->vec2u {
   if (program[anchor] != baseId) { return vec2u(0u); }
   return vec2u(u32(baseIndex) + 1u, anchor);
 }
-fn applyMark(base:u32, count:u32, index:u32, action:u32, mode:u32)->bool {
-  let probe = probeMark(base, index, action, mode);
+fn applyMark(base:u32, count:u32, index:u32, flag:u32, action:u32, mode:u32)->bool {
+  let probe = probeMark(base, index, flag, action, mode);
   if (probe.x == 0u) { return false; }
   let anchor = probe.y;
   let ax = bitcast<i32>(program[anchor + 1u]);
   let ay = bitcast<i32>(program[anchor + 2u]);
   let at = glyphAt(base, index);
   let baseAt = glyphAt(base, probe.x - 1u);
-  scratch[at + 4] = ax - bitcast<i32>(program[action + 1u]) + scratch[baseAt + 4];
-  scratch[at + 5] = ay - bitcast<i32>(program[action + 2u]) + scratch[baseAt + 5];
-  if (mode == 8u) { scratch[at + 2] = 0; scratch[at + 3] = 0; }
+  scratch[at + 4] = ax - bitcast<i32>(program[action + 1u]);
+  scratch[at + 5] = ay - bitcast<i32>(program[action + 2u]);
+  scratch[at + 7u] = recordProperties(recordClass(at), index - (probe.x - 1u));
   return true;
 }
-${COMPUTE_TEXT_INPUT_PREDICATES}
-${computeTextSimpleSource(!localScratch)}
+fn propagateAttachments(base:u32, count:u32) {
+  for (var i = 0u; i < count; i++) {
+    let at = glyphAt(base, i);
+    let distance = attachDistance(at);
+    if (distance == 0u) { continue; }
+    let parent = i - distance;
+    let parentAt = glyphAt(base, parent);
+    scratch[at + 4u] += scratch[parentAt + 4u];
+    scratch[at + 5u] += scratch[parentAt + 5u];
+    let begin = select(parent, parent + 1u, params.direction == 1u);
+    let end = select(i, i + 1u, params.direction == 1u);
+    let sign = select(-1, 1, params.direction == 1u);
+    for (var j = begin; j < end; j++) {
+      scratch[at + 4u] += sign * scratch[glyphAt(base, j) + 2u];
+      scratch[at + 5u] += sign * scratch[glyphAt(base, j) + 3u];
+    }
+    scratch[at + 7u] = recordProperties(recordClass(at), 0u);
+  }
+}
+${computeTextInputPredicates(masked, profileGates, splitFastState)}
+${simpleEnabled ? computeTextSimpleSource(!localScratch, splitFastState ? "matchInputProbe" : "matchInput") : "var<workgroup> simpleRoots:vec2u;\nvar<workgroup> firstFailure:atomic<u32>;\nvar<workgroup> firstFailureIndex:atomic<u32>;"}
 `;
 }
 
 /** @internal Zero selects global scratch; a sufficient bounded variant survives shrinking. */
-export function computeTextScratchCapacity(capacity: number, retained = 0): number {
-    if (capacity > 256) {
+export function computeTextScratchCapacity(capacity: number, retained = 0, glyphWords: 8 | 16 = 8): number {
+    const maximum = glyphWords === 16 ? 128 : 256;
+    if (capacity > maximum) {
         return 0;
     }
-    let size = Math.max(1, retained);
+    let size = Math.max(1, Math.min(maximum, retained));
     while (size < capacity) {
         size *= 2;
     }
@@ -778,10 +1016,13 @@ export function computeTextScratchCapacity(capacity: number, retained = 0): numb
 }
 
 /** @internal One shared kernel constructor for readback and resident execution. */
-export function createComputeTextShapeShader(engine: EngineContext, capacity: number): ReturnType<typeof createComputeShader> {
+export function createComputeTextShapeShader(engine: EngineContext, capacity: number, variant?: ComputeTextKernelVariant): ReturnType<typeof createComputeShader> {
     return createComputeShader(engine, {
         name: "compute-text-shape",
-        computeSource: kernelSource(computeTextScratchCapacity(capacity)),
+        computeSource: kernelSource(
+            variant ? computeTextVariantTier(capacity, variant, engine._device.limits.maxComputeWorkgroupStorageSize) : computeTextScratchCapacity(capacity),
+            variant
+        ),
         bindings: [
             computeStorageBufferBinding("params", { group: 0, binding: 0 }),
             computeStorageBufferBinding("program", { group: 0, binding: 1 }),
@@ -796,6 +1037,7 @@ export function createComputeTextShapeShader(engine: EngineContext, capacity: nu
 interface GpuCache {
     readonly device: GPUDevice;
     readonly plan: ComputeTextPlan;
+    variantKey: string;
     runCapacity: number;
     glyphCapacity: number;
     scratchCapacity: number;
@@ -830,16 +1072,17 @@ function prepareImmutable(plan: ComputeTextPlan): ComputeTextPreparation {
     }
     const program = compileComputeTextProgram(plan);
     const roots = packRoots(program);
-    const simpleOrigin = program.words.length + roots.length + plan.font.glyphCount * 2;
+    const presenceWords = program.words[13]!;
+    const simpleOrigin = program.words.length + roots.length + plan.font.glyphCount * presenceWords * 2;
     const simpleWords = prepareSimplePairWords(program, simpleOrigin);
     const programWords = new Uint32Array(simpleOrigin + simpleWords.length);
     programWords.set(program.words);
     programWords.set(roots, program.words.length);
     programWords[8] = program.words.length;
     const masks = program.words.length + roots.length;
-    programWords.set(program.rootWitnesses, masks + plan.font.glyphCount);
+    programWords.set(program.rootWitnesses, masks + plan.font.glyphCount * presenceWords);
     programWords.set(simpleWords, simpleOrigin);
-    program.rootOrder.slice(0, 32).forEach((index, root) => {
+    program.rootOrder.slice(0, 256).forEach((index, root) => {
         const lookup = program.lookups[index]!;
         const descriptor = program.words[lookup.table === "GSUB" ? 4 : 5]! + lookup.lookupIndex * 8;
         const directory = program.words[descriptor + 6]!;
@@ -848,7 +1091,8 @@ function prepareImmutable(plan: ComputeTextPlan): ComputeTextPreparation {
         }
         for (let glyph = 0; glyph < plan.font.glyphCount; glyph++) {
             if (program.words[directory + glyph * 2 + 1]! > 0) {
-                programWords[masks + glyph] = (programWords[masks + glyph]! | (1 << root)) >>> 0;
+                const at = masks + glyph * presenceWords + (root >>> 5);
+                programWords[at] = (programWords[at]! | (1 << (root % 32))) >>> 0;
             }
         }
     });
@@ -873,6 +1117,7 @@ export interface ComputeTextShapeWords {
     readonly scratchBytes: number;
     readonly program: ReturnType<typeof compileComputeTextProgram>;
     readonly simpleWordCount: number;
+    readonly variant: ComputeTextKernelVariant;
 }
 
 /** @internal Required stride capacity without allocating mutable dispatch input. */
@@ -880,23 +1125,26 @@ export function computeTextShapeCapacity(plan: ComputeTextPlan, runs: readonly {
     const expansion = Math.max(1, prepareImmutable(plan).program.maxExpansion);
     let capacity = 1;
     for (const run of runs) {
-        capacity = Math.max(capacity, run.scalars.length * expansion);
+        capacity = Math.max(capacity, plan._profileData?.capacity?.(run.scalars) ?? run.scalars.length * expansion);
     }
     return capacity;
 }
 
-/** @internal Pack one plan's runs. Pass `capacityOverride` when several dispatches share one record stride. */
+/** @internal Pack one plan's runs. Pass `capacityOverride` when several dispatches share one record stride.
+ *  `nominalGlyphs`, when given, must contain every glyph in `runs`; it lets packing prove runs mark-free without scanning them. */
 export function prepareComputeTextShapeWords(
     plan: ComputeTextPlan,
     runs: readonly { readonly scalars: Uint32Array; readonly glyphIds: Uint32Array }[],
     outputRun = 0,
     capacityOverride?: number,
-    limits?: Pick<GPUSupportedLimits, "maxBufferSize" | "maxStorageBufferBindingSize">
+    limits?: Pick<GPUSupportedLimits, "maxBufferSize" | "maxStorageBufferBindingSize">,
+    nominalGlyphs?: ReadonlySet<number>
 ): ComputeTextShapeWords {
     const immutable = prepareImmutable(plan);
     const program = immutable.program;
     const needed = computeTextShapeCapacity(plan, runs);
     const capacity = capacityOverride ?? needed;
+    const variant = computeTextPlanVariant(plan);
     if (!Number.isSafeInteger(capacity) || capacity < needed) {
         throw new Error("shapeComputeText: shared capacity is smaller than this plan's expansion");
     }
@@ -904,13 +1152,23 @@ export function prepareComputeTextShapeWords(
     const programWords = immutable.programWords.byteLength <= limit ? immutable.programWords : immutable.baseProgramWords;
     return {
         capacity,
-        params: new Uint32Array([runs.length, capacity, plan.direction === "rtl" ? 1 : 0, plan.font.glyphCount, program.rootOrder.length, program.words.length, outputRun]),
+        params: new Uint32Array([
+            runs.length,
+            capacity,
+            plan.direction === "rtl" ? 1 : 0,
+            plan.font.glyphCount,
+            program.rootOrder.length,
+            program.words.length,
+            outputRun,
+            ["default", "arabic", "hebrew", "indic"].indexOf(variant.id),
+        ]),
         programWords,
         tables: immutable.tables,
-        runs: packRuns(runs),
-        scratchBytes: Math.max(runs.length, 1) * capacity * 8 * 4,
+        runs: packRuns(runs, plan, immutable.tables, nominalGlyphs),
+        scratchBytes: Math.max(runs.length, 1) * (capacity * variant.glyphWords * 4 * variant.planes + (variant.auxBytes?.(capacity) ?? 0)),
         program,
         simpleWordCount: programWords === immutable.programWords ? immutable.simpleWordCount : 0,
+        variant,
     };
 }
 
@@ -945,16 +1203,77 @@ export async function executeComputeTextShape(
 
 /** Check packed allocation arithmetic against the executing device before creating buffers. */
 export function checkComputeTextShapeBounds(limits: GPUSupportedLimits, prepared: ComputeTextShapeWords): void {
-    const runCount = prepared.params[0]!;
+    const capacity = prepared.capacity,
+        runCount = prepared.params[0]!;
+    const sizes = [
+        (prepared.params[6]! + prepared.params[0]!) * (HEADER_WORDS + prepared.capacity * RECORD_WORDS) * 4,
+        prepared.scratchBytes,
+        prepared.params.byteLength,
+        prepared.programWords.byteLength,
+        prepared.tables.byteLength,
+        prepared.runs.byteLength,
+    ];
+    if (capacity > 0x1fffffff) {
+        throw new Error("shapeComputeText: capacity exceeds u32 record addressing");
+    }
     if (runCount > limits.maxComputeWorkgroupsPerDimension) {
         throw new Error("shapeComputeText: run count exceeds device maxComputeWorkgroupsPerDimension");
     }
-    const outputBytes = (prepared.params[6]! + runCount) * (HEADER_WORDS + prepared.capacity * RECORD_WORDS) * 4;
-    for (const bytes of [outputBytes, prepared.scratchBytes, prepared.params.byteLength, prepared.programWords.byteLength, prepared.tables.byteLength, prepared.runs.byteLength]) {
-        if (!Number.isSafeInteger(bytes) || bytes > limits.maxBufferSize) {
+    // Keep platform reads at their original first-use/short-circuit positions.
+    let maxBufferSize: number | undefined, maxStorageBufferBindingSize: number | undefined;
+    for (const bytes of sizes) {
+        if (!Number.isSafeInteger(bytes) || bytes > (maxBufferSize ??= limits.maxBufferSize)) {
             throw new Error(`shapeComputeText: buffer of ${bytes} bytes exceeds device maxBufferSize`);
         }
-        if (bytes > limits.maxStorageBufferBindingSize) {
+        if (bytes > (maxStorageBufferBindingSize ??= limits.maxStorageBufferBindingSize)) {
+            throw new Error(`shapeComputeText: binding of ${bytes} bytes exceeds device maxStorageBufferBindingSize`);
+        }
+    }
+}
+
+/** @internal Resident preflight before atlas mutation. Reuses immutable font/program
+ * preparation; mutable run/scalar vectors are packed only by the actual executor.
+ * @param scalarCount - Total scalar count of the logical (unsegmented) group; invariant under segmentation.
+ */
+export function checkComputeTextPlanBounds(
+    limits: GPUSupportedLimits,
+    plan: ComputeTextPlan,
+    runs: readonly { readonly scalars: Uint32Array }[],
+    capacity: number,
+    outputRun: number,
+    scalarCount: number
+): void {
+    const immutable = prepareImmutable(plan),
+        variant = computeTextPlanVariant(plan);
+    const maxBufferSize = limits.maxBufferSize,
+        maxStorageBufferBindingSize = limits.maxStorageBufferBindingSize;
+    const limit = Math.min(maxBufferSize, maxStorageBufferBindingSize);
+    const programBytes = (immutable.programWords.byteLength <= limit ? immutable.programWords : immutable.baseProgramWords).byteLength;
+    const runWords = 2 * runs.length + (variant.id === "indic" ? 2 : 1) * scalarCount;
+    const runCount = runs.length;
+    const sizes = [
+        (outputRun + runs.length) * (HEADER_WORDS + capacity * RECORD_WORDS) * 4,
+        Math.max(runs.length, 1) * (capacity * variant.glyphWords * 4 * variant.planes + (variant.auxBytes?.(capacity) ?? 0)),
+        32,
+        programBytes,
+        immutable.tables.byteLength,
+        runWords * 4,
+    ];
+    if (capacity > 0x1fffffff) {
+        throw new Error("shapeComputeText: capacity exceeds u32 record addressing");
+    }
+    if (runCount > limits.maxComputeWorkgroupsPerDimension) {
+        throw new Error("shapeComputeText: run count exceeds device maxComputeWorkgroupsPerDimension");
+    }
+    checkShapeSizes(maxBufferSize, maxStorageBufferBindingSize, sizes);
+}
+
+function checkShapeSizes(maxBufferSize: number, maxStorageBufferBindingSize: number, sizes: readonly number[]): void {
+    for (const bytes of sizes) {
+        if (!Number.isSafeInteger(bytes) || bytes > maxBufferSize) {
+            throw new Error(`shapeComputeText: buffer of ${bytes} bytes exceeds device maxBufferSize`);
+        }
+        if (bytes > maxStorageBufferBindingSize) {
             throw new Error(`shapeComputeText: binding of ${bytes} bytes exceeds device maxStorageBufferBindingSize`);
         }
     }
@@ -966,46 +1285,52 @@ function ensureCache(
     plan: ComputeTextPlan,
     runCount: number,
     glyphCapacity: number,
-    prepared: Pick<ComputeTextPreparation, "programWords" | "tables">
+    prepared: Pick<ComputeTextShapeWords, "programWords" | "tables" | "variant" | "scratchBytes">
 ): GpuCache {
     const existing = caches?.get(shaper);
     const previous = existing && existing.device === engine._device && existing.plan === plan ? existing : undefined;
-    const scratchCapacity = computeTextScratchCapacity(glyphCapacity, previous?.scratchCapacity);
+    const scratchCapacity = computeTextVariantTier(glyphCapacity, prepared.variant, engine._device.limits.maxComputeWorkgroupStorageSize, previous?.scratchCapacity);
+    const variantKey = computeTextVariantKey(prepared.variant, scratchCapacity);
     if (previous && previous.runCapacity >= runCount && previous.glyphCapacity >= glyphCapacity) {
-        if (previous.scratchCapacity !== scratchCapacity) {
+        if (previous.variantKey !== variantKey) {
             disposeComputeShader(previous.shader);
             previous.task.dispose();
-            previous.shader = createComputeTextShapeShader(engine, glyphCapacity);
+            previous.shader = createComputeTextShapeShader(engine, glyphCapacity, prepared.variant);
             previous.scratchCapacity = scratchCapacity;
+            previous.variantKey = variantKey;
             Object.assign(previous, createShapeSchedule(engine, previous.shader, previous, runCount));
         }
         return previous;
     }
     const limits = engine._device.limits;
     const outputBytes = runCount * (HEADER_WORDS + glyphCapacity * RECORD_WORDS) * 4;
-    const scratchBytes = runCount * glyphCapacity * 8 * 4;
+    const scratchBytes = prepared.scratchBytes;
     for (const bytes of [outputBytes, scratchBytes, prepared.programWords.byteLength]) {
         if (bytes > limits.maxBufferSize) {
             throw new Error(`shapeComputeText: buffer of ${bytes} bytes exceeds device maxBufferSize`);
         }
     }
-    const shader = previous?.scratchCapacity === scratchCapacity ? previous.shader : createComputeTextShapeShader(engine, glyphCapacity);
+    const shader = previous?.variantKey === variantKey ? previous.shader : createComputeTextShapeShader(engine, glyphCapacity, prepared.variant);
     if (existing && existing.shader !== shader) {
         disposeComputeShader(existing.shader);
     }
     existing?.task.dispose();
     disposeBuffers(existing, !!previous);
     const buffers = {
-        params: previous?.params ?? createStorageBuffer(engine, 28, { label: "compute-text-params" }),
+        params: previous?.params ?? createStorageBuffer(engine, 32, { label: "compute-text-params" }),
         program: previous?.program ?? createStorageBuffer(engine, prepared.programWords, { label: "compute-text-program" }),
         tables: previous?.tables ?? createStorageBuffer(engine, prepared.tables, { label: "compute-text-tables" }),
-        runs: createStorageBuffer(engine, Math.max(4, runCount * (glyphCapacity + 2) * 4), { label: "compute-text-runs", writable: false }),
+        runs: createStorageBuffer(engine, Math.max(4, runCount * (glyphCapacity * (prepared.variant.id === "indic" ? 2 : 1) + 2) * 4), {
+            label: "compute-text-runs",
+            writable: false,
+        }),
         scratch: createStorageBuffer(engine, Math.max(4, scratchBytes), { label: "compute-text-scratch", writable: true }),
         output: createStorageBuffer(engine, Math.max(4, outputBytes), { label: "compute-text-output", writable: true }),
     };
     const cache: GpuCache = {
         device: engine._device,
         plan,
+        variantKey,
         runCapacity: runCount,
         glyphCapacity,
         scratchCapacity,
@@ -1047,13 +1372,7 @@ export function createShapeSchedule(
 }
 
 function packRoots(program: ReturnType<typeof compileComputeTextProgram>): Uint32Array {
-    const words = new Uint32Array(program.rootOrder.length * 2);
-    program.rootOrder.forEach((index, at) => {
-        const lookup = program.lookups[index];
-        words[at * 2] = lookup?.table === "GPOS" ? 1 : 0;
-        words[at * 2 + 1] = lookup?.lookupIndex ?? 0;
-    });
-    return words;
+    return program.words.slice(program.words[8], program.words[8]! + program.rootOrder.length * 4);
 }
 
 function packTables(plan: ComputeTextPlan, classTables: readonly GlyphClassDef[]): Uint32Array {
@@ -1063,12 +1382,15 @@ function packTables(plan: ComputeTextPlan, classTables: readonly GlyphClassDef[]
     const gdef = ensureComputeFontLayout(plan.font).gdef;
     for (let id = 0; id < glyphCount; id++) {
         advances[id] = readComputeFontAdvance(plan.font, id);
-        const cls = glyphClass(gdef?.glyphClassDef ?? null, id);
+        const rawClass = glyphClass(gdef?.glyphClassDef ?? null, id);
+        const cls = rawClass > 4 ? 0 : rawClass;
         const attach = glyphClass(gdef?.markAttachClassDef ?? null, id);
         gdefWords[id] = cls | (attach << 16);
     }
-    const header = 6 + classTables.length;
-    const classOrigin = header + advances.length + gdefWords.length;
+    const markSetWords = Math.ceil((gdef?.markGlyphSetCount ?? 0) / 32);
+    const header = 8 + classTables.length;
+    const markSetOrigin = header + advances.length + gdefWords.length;
+    const classOrigin = markSetOrigin + glyphCount * markSetWords;
     const words = new Uint32Array(classOrigin + classTables.length * glyphCount);
     words[0] = glyphCount;
     words[1] = header;
@@ -1076,11 +1398,21 @@ function packTables(plan: ComputeTextPlan, classTables: readonly GlyphClassDef[]
     words[3] = header + advances.length + gdefWords.length;
     words[4] = gdef ? 1 : 0;
     words[5] = classTables.length;
+    words[6] = markSetOrigin;
+    words[7] = markSetWords;
     words.set(advances, header);
     words.set(gdefWords, header + advances.length);
+    gdef?.markGlyphSets.forEach((coverage, set) => {
+        if (!coverage) {
+            return;
+        }
+        for (const glyph of coverageGlyphs(coverage, glyphCount)) {
+            words[markSetOrigin + glyph * markSetWords + (set >>> 5)]! |= 1 << (set % 32);
+        }
+    });
     classTables.forEach((table, index) => {
         const origin = classOrigin + index * glyphCount;
-        words[6 + index] = origin;
+        words[8 + index] = origin;
         for (let glyph = 0; glyph < glyphCount; glyph++) {
             words[origin + glyph] = glyphClass(table, glyph);
         }
@@ -1088,19 +1420,71 @@ function packTables(plan: ComputeTextPlan, classTables: readonly GlyphClassDef[]
     return words;
 }
 
-function packRuns(runs: readonly { readonly scalars: Uint32Array; readonly glyphIds: Uint32Array }[]): Uint32Array {
+function isGdefMark(tables: Uint32Array, gdefOrigin: number, glyph: number): boolean {
+    return ((tables[gdefOrigin + glyph] ?? 0) & 0xffff) === GDEF_MARK_CLASS;
+}
+
+/** Run header: scalar count, plus RUN_MARK_FREE (selects `finishSimpleRunLean`).
+ *  `nominalGlyphs`, when given, must contain every glyph in `runs`; if none is a GDEF mark, it proves every run mark-free without per-run scans. */
+function packRuns(
+    runs: readonly { readonly scalars: Uint32Array; readonly glyphIds: Uint32Array }[],
+    plan: ComputeTextPlan,
+    tables: Uint32Array,
+    nominalGlyphs?: ReadonlySet<number>
+): Uint32Array {
+    const gdefOrigin = tables[4] ? tables[2]! : 0;
+    let scan = gdefOrigin !== 0;
+    if (scan && nominalGlyphs) {
+        scan = false;
+        for (const glyph of nominalGlyphs) {
+            if (isGdefMark(tables, gdefOrigin, glyph)) {
+                scan = true;
+                break;
+            }
+        }
+    }
     let length = runs.length;
     for (const run of runs) {
-        length += 1 + run.glyphIds.length;
+        length += 1 + run.glyphIds.length + (plan._profile === "indic" ? run.scalars.length : 0);
     }
     const words = new Uint32Array(length);
     let cursor = runs.length;
     runs.forEach((run, index) => {
         words[index] = cursor;
-        words[cursor] = run.scalars.length;
+        let markFree = RUN_MARK_FREE;
+        for (let i = 0; scan && i < run.glyphIds.length; i++) {
+            if (isGdefMark(tables, gdefOrigin, run.glyphIds[i]!)) {
+                markFree = 0;
+                break;
+            }
+        }
+        words[cursor] = (run.scalars.length | markFree) >>> 0;
         cursor++;
-        words.set(run.glyphIds, cursor);
+        if (plan._profile === "arabic") {
+            const support = profileSupport("arabic");
+            if (!support?.joiningType || !support.markClass || !support.isMcm) {
+                throw new Error("prepareComputeTextShapeWords: Arabic profile is not loaded");
+            }
+            for (let i = 0; i < run.glyphIds.length; i++) {
+                const glyph = run.glyphIds[i]!;
+                if (glyph >= 65536) {
+                    throw new Error("prepareComputeTextShapeWords: Arabic glyph exceeds the OpenType glyph-id field");
+                }
+                const scalar = run.scalars[i]!;
+                words[cursor + i] =
+                    glyph |
+                    (support.inputProperties
+                        ? support.inputProperties(scalar)
+                        : (support.joiningType(scalar) << 16) | (Number(support.isMcm(scalar)) << 19) | (support.markClass(scalar) << 24));
+            }
+        } else {
+            words.set(run.glyphIds, cursor);
+        }
         cursor += run.glyphIds.length;
+        if (plan._profile === "indic") {
+            words.set(run.scalars, cursor);
+            cursor += run.scalars.length;
+        }
     });
     return words;
 }

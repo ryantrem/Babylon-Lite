@@ -22,8 +22,10 @@ import {
     checkComputeTextShapeBounds,
     prepareComputeTextShapeWords,
     createComputeTextShapeShader,
-    computeTextScratchCapacity,
+    computeTextVariantKey,
+    computeTextVariantTier,
 } from "./compute-text-shape.js";
+import type { ComputeTextKernelVariant } from "./compute-text-shape.js";
 
 const STATUS_MISSING = 3;
 const COUNT_LANES = 256;
@@ -507,12 +509,20 @@ export interface ResidentPackStage {
     release(): void;
 }
 
+interface ResidentShapeVariant {
+    readonly shader: ComputeShader;
+    readonly scratchCapacity: number;
+    task?: ComputeTask;
+    dispatch?: ComputeDispatch;
+    boundOutput?: StorageBuffer;
+}
+
 interface ResidentShaders {
     readonly device: GPUDevice;
     readonly statusBuffers: GPUBuffer[];
     readonly freeStatusBuffers: GPUBuffer[];
     released: boolean;
-    shape: ComputeShader;
+    readonly shapes: Map<string, ResidentShapeVariant>;
     pack: ComputeShader;
     small: ComputeShader;
     countParallel: ComputeShader;
@@ -534,15 +544,11 @@ interface ResidentShaders {
     segmentTable?: StorageBuffer;
     stitchParams?: StorageBuffer;
     stitchDispatch?: ComputeDispatch;
-    boundShapeOutput?: StorageBuffer;
     segmented?: boolean;
     boundSegmentOutput?: StorageBuffer;
     boundSegmentTable?: StorageBuffer;
     boundStitchParams?: StorageBuffer;
     uploadedPlan: ComputeTextPlan | null;
-    scratchCapacity: number;
-    shapeTask?: ComputeTask;
-    shapeDispatch?: ComputeDispatch;
     packTask?: ComputeTask;
     packMode?: "small" | "parallel" | "wide";
     packCountDispatch?: ComputeDispatch;
@@ -555,7 +561,8 @@ interface ResidentShaders {
 
 let shadersByToken: WeakMap<object, ResidentShaders> | null = null;
 
-/** Record shape, pack and status copy. Returns after admission, with a separate status promise. */
+/** Record shape, pack and status copy. Returns after admission, with a separate status promise.
+ *  `nominalGlyphs`, when given, must contain every glyph in `groups`; see `prepareComputeTextShapeWords`. */
 export async function executeResidentComputeText(
     token: object,
     engine: EngineContext,
@@ -569,13 +576,14 @@ export async function executeResidentComputeText(
     assertLive: () => void,
     segments?: ComputeTextSegments | null,
     stage?: ResidentPackStage,
-    runBase = 0
+    runBase = 0,
+    nominalGlyphs?: ReadonlySet<number>
 ): Promise<{ readonly status: Promise<number> }> {
     assertLive();
     engine._flushPendingWork?.(engine);
     const shapeCapacity = segments?.capacity ?? capacity;
     const preparedGroups = groups.map((group) =>
-        prepareComputeTextShapeWords(group.plan, group.runs, group.outputRun + (segments ? 0 : runBase), shapeCapacity, engine._device.limits)
+        prepareComputeTextShapeWords(group.plan, group.runs, group.outputRun + (segments ? 0 : runBase), shapeCapacity, engine._device.limits, nominalGlyphs)
     );
     for (const prepared of preparedGroups) {
         checkComputeTextShapeBounds(engine._device.limits, prepared);
@@ -591,7 +599,16 @@ export async function executeResidentComputeText(
         scratchBytes = Math.max(scratchBytes, prepared.scratchBytes);
     }
     if (preparedGroups.length > 0) {
-        ensureResidentShaderCapacity(token, engine, scratchBytes, programBytes, tableBytes, runBytes, shapeCapacity);
+        ensureResidentShaderCapacity(
+            token,
+            engine,
+            scratchBytes,
+            programBytes,
+            tableBytes,
+            runBytes,
+            shapeCapacity,
+            preparedGroups.map((prepared) => prepared.variant)
+        );
     }
     const shaders = ensureShaders(token, engine);
     if (segments) {
@@ -626,6 +643,11 @@ export async function executeResidentComputeText(
         }
         setComputeDispatchSize(shaders.packDispatch!, { x: shaders.packMode === "small" ? 1 : packGroups });
     }
+    let lastShape: ComputeTask | undefined;
+    let lastShapeIndex = groups.length - 1;
+    while (lastShapeIndex >= 0 && groups[lastShapeIndex]!.runs.length === 0) {
+        lastShapeIndex--;
+    }
     for (let index = 0; index < preparedGroups.length; index++) {
         const prepared = preparedGroups[index]!;
         const group = groups[index]!;
@@ -639,11 +661,14 @@ export async function executeResidentComputeText(
             shaders.uploadedPlan = group.plan;
         }
         updateStorageBuffer(engine, shaders.runs, prepared.runs);
-        setComputeDispatchSize(shaders.shapeDispatch!, { x: group.runs.length });
-        await prepareComputeTask(shaders.shapeTask!);
+        const shape = residentShape(shaders, prepared.variant, shapeCapacity, engine._device.limits.maxComputeWorkgroupStorageSize)!;
+        setComputeDispatchSize(shape.dispatch!, { x: group.runs.length });
+        await prepareComputeTask(shape.task!);
         assertLive();
-        if (index < preparedGroups.length - 1) {
-            submitComputeTasks([shaders.shapeTask!]);
+        if (index < lastShapeIndex) {
+            submitComputeTasks([shape.task!]);
+        } else {
+            lastShape = shape.task;
         }
     }
     if (!stage) {
@@ -658,7 +683,7 @@ export async function executeResidentComputeText(
     }
     await prepareComputeTask(shaders.packTask!);
     assertLive();
-    const tasks = preparedGroups.length > 0 && groups[groups.length - 1]!.runs.length > 0 ? [shaders.shapeTask!, shaders.packTask!] : [shaders.packTask!];
+    const tasks = lastShape ? [lastShape, shaders.packTask!] : [shaders.packTask!];
     let staging = shaders.freeStatusBuffers.pop();
     if (!staging) {
         staging = engine._device.createBuffer({ label: "compute-text-status-readback", size: 4, usage: BU.COPY_DST | BU.MAP_READ });
@@ -706,7 +731,10 @@ export function releaseResidentComputeText(token: object, keepPendingStatus = fa
     }
     shaders.statusBuffers.length = retained;
     shaders.freeStatusBuffers.length = 0;
-    disposeComputeShader(shaders.shape);
+    for (const shape of shaders.shapes.values()) {
+        shape.task?.dispose();
+        disposeComputeShader(shape.shader);
+    }
     disposeComputeShader(shaders.pack);
     disposeComputeShader(shaders.small);
     disposeComputeShader(shaders.countParallel);
@@ -719,7 +747,6 @@ export function releaseResidentComputeText(token: object, keepPendingStatus = fa
     if (shaders.stitchBaseline) {
         disposeComputeShader(shaders.stitchBaseline);
     }
-    shaders.shapeTask?.dispose();
     shaders.packTask?.dispose();
     for (const buffer of [
         shaders.params,
@@ -765,7 +792,6 @@ function ensureShaders(token: object, engine: EngineContext): ResidentShaders {
     if (existing) {
         releaseResidentComputeText(token);
     }
-    const shape = createComputeTextShapeShader(engine, 1);
     const pack = createPackShader(engine, "main");
     const small = createPackShader(engine, "packSmall");
     const countParallel = createPackShader(engine, "countParallel");
@@ -777,14 +803,14 @@ function ensureShaders(token: object, engine: EngineContext): ResidentShaders {
         statusBuffers: [],
         freeStatusBuffers: [],
         released: false,
-        shape,
+        shapes: new Map(),
         pack,
         small,
         countParallel,
         prefix,
         countWide,
         placeWide,
-        params: createStorageBuffer(engine, 28, { label: "compute-text-resident-params" }),
+        params: createStorageBuffer(engine, 32, { label: "compute-text-resident-params" }),
         program: createStorageBuffer(engine, 256, { label: "compute-text-resident-program" }),
         tables: createStorageBuffer(engine, 256, { label: "compute-text-resident-tables" }),
         runs: createStorageBuffer(engine, 256, { label: "compute-text-resident-runs" }),
@@ -792,7 +818,6 @@ function ensureShaders(token: object, engine: EngineContext): ResidentShaders {
         packParams: createStorageBuffer(engine, 20, { label: "compute-text-resident-pack-params" }),
         packOffsets: createStorageBuffer(engine, 8, { label: "compute-text-pack-offsets", writable: true }),
         uploadedPlan: null,
-        scratchCapacity: 1,
     };
     shadersByToken.set(token, created);
     return created;
@@ -867,21 +892,23 @@ function ensureSchedules(
             ? "parallel"
             : "small";
     const shapeOutput = segmented ? shaders.segmentOutput! : buffers.shaped;
-    if (!shaders.shapeTask || shaders.boundShapeOutput !== shapeOutput) {
-        shaders.shapeTask?.dispose();
-        const bindings = createComputeBindingSet(shaders.shape, {
-            params: shaders.params,
-            program: shaders.program,
-            tables: shaders.tables,
-            runs: shaders.runs,
-            scratch: shaders.scratch,
-            output: shapeOutput,
-        });
-        shaders.shapeDispatch = createComputeDispatch(shaders.shape, bindings, { size: { x: 1 } });
-        shaders.shapeTask = createComputeTask(engine, "compute-text-resident-shape");
-        addComputeDispatch(shaders.shapeTask, shaders.shapeDispatch);
-        shaders.shapeTask.record();
-        shaders.boundShapeOutput = shapeOutput;
+    for (const shape of shaders.shapes.values()) {
+        if (!shape.task || shape.boundOutput !== shapeOutput) {
+            shape.task?.dispose();
+            const bindings = createComputeBindingSet(shape.shader, {
+                params: shaders.params,
+                program: shaders.program,
+                tables: shaders.tables,
+                runs: shaders.runs,
+                scratch: shaders.scratch,
+                output: shapeOutput,
+            });
+            shape.dispatch = createComputeDispatch(shape.shader, bindings, { size: { x: 1 } });
+            shape.task = createComputeTask(engine, "compute-text-resident-shape");
+            addComputeDispatch(shape.task, shape.dispatch);
+            shape.task.record();
+            shape.boundOutput = shapeOutput;
+        }
     }
     if (
         !shaders.packTask ||
@@ -954,29 +981,40 @@ export function ensureResidentShaderCapacity(
     programBytes: number,
     tableBytes: number,
     runBytes: number,
-    capacity = 1
+    capacity = 1,
+    variants: readonly ComputeTextKernelVariant[] = [{ id: "default", glyphWords: 8, masked: false, planes: 1 }]
 ): void {
     const shaders = ensureShaders(token, engine);
-    const scratchCapacity = computeTextScratchCapacity(capacity, shaders.scratchCapacity);
-    if (shaders.scratchCapacity !== scratchCapacity) {
-        disposeComputeShader(shaders.shape);
-        shaders.shape = createComputeTextShapeShader(engine, capacity);
-        shaders.scratchCapacity = scratchCapacity;
-        shaders.shapeTask?.dispose();
-        shaders.shapeTask = undefined;
+    for (const variant of variants) {
+        const scratchCapacity = computeTextVariantTier(capacity, variant, engine._device.limits.maxComputeWorkgroupStorageSize);
+        const key = computeTextVariantKey(variant, scratchCapacity);
+        if (!residentShape(shaders, variant, capacity, engine._device.limits.maxComputeWorkgroupStorageSize)) {
+            shaders.shapes.set(key, { shader: createComputeTextShapeShader(engine, capacity, variant), scratchCapacity });
+        }
     }
     if (shaders.program.byteLength < programBytes || shaders.tables.byteLength < tableBytes) {
         shaders.uploadedPlan = null;
     }
     if (shaders.program.byteLength < programBytes || shaders.tables.byteLength < tableBytes || shaders.runs.byteLength < runBytes || shaders.scratch.byteLength < scratchBytes) {
-        shaders.shapeTask?.dispose();
-        shaders.shapeTask = undefined;
+        for (const shape of shaders.shapes.values()) {
+            shape.task?.dispose();
+            shape.task = undefined;
+        }
     }
     shaders.program = grow(engine, shaders.program, programBytes, { label: "compute-text-resident-program" });
     shaders.tables = grow(engine, shaders.tables, tableBytes, { label: "compute-text-resident-tables" });
     shaders.runs = grow(engine, shaders.runs, runBytes, { label: "compute-text-resident-runs" });
     shaders.scratch = grow(engine, shaders.scratch, scratchBytes, { label: "compute-text-resident-scratch", writable: true });
     shadersByToken?.set(token, shaders);
+}
+
+function residentShape(shaders: ResidentShaders, variant: ComputeTextKernelVariant, capacity: number, storageLimit: number): ResidentShapeVariant | undefined {
+    for (const [key, shape] of shaders.shapes) {
+        if (key.startsWith(`${variant.id}:${variant.glyphWords}:`) && computeTextVariantTier(capacity, variant, storageLimit, shape.scratchCapacity) === shape.scratchCapacity) {
+            return shape;
+        }
+    }
+    return undefined;
 }
 
 function grow(engine: EngineContext, buffer: StorageBuffer, bytes: number, options: { label: string; writable?: boolean }): StorageBuffer {
