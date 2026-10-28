@@ -30,6 +30,9 @@ function workgroupBytes(source: string): number {
         if (type === "vec2u") {
             return 8;
         }
+        if (type === "vec4u") {
+            return 16;
+        }
         const array = /^array<(.+),(\d+)>$/.exec(type);
         if (!array) {
             throw new Error(`Unknown test workgroup declaration: ${type}`);
@@ -81,7 +84,7 @@ describe("shared compute text profiles and memory variants", () => {
         }
         // B2 retains tombstone coordinates; one-record contexts eliminate only unobserved sequence bookkeeping.
         expect(createHash("sha256").update(COMPUTE_TEXT_KERNEL_SOURCE.replace(", profile:u32", "")).digest("hex")).toBe(
-            "1f0501598c4373e12ac5515fe4287c5026594f71d6baba1acf671e75aa07fd1d"
+            "be005eb187a4c23f3d7b600f051594934a04b3dbdbc949039fc50d89c6205ccf"
         );
     });
 

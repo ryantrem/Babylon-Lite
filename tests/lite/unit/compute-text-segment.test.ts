@@ -14,10 +14,12 @@ import {
     COMPUTE_RULE_MODE_POSITION,
 } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import type { ComputeGlyphPredicate, ComputeProgramLookup, ComputeProgramRule, ComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
+import { computeTextParagraphFlags } from "../../../packages/babylon-lite/src/text/compute-text-paragraphs";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 import {
     analyzeComputeTextSegmentation,
     clearComputeTextSegmentationCache,
+    SAFE_SPACE_FLAG,
     segmentComputeTextRuns,
     SEGMENT_TARGET,
 } from "../../../packages/babylon-lite/src/text/compute-text-segment";
@@ -585,6 +587,34 @@ describe("safe logical-run segmentation", () => {
         const result = segmentComputeTextRuns([group(p, ["a ".repeat(SEGMENT_TARGET)], 1), group(p, ["a b"], 0)], limits, layout)!;
         expect([...result.table.slice(0, 4)]).toEqual([2, 1, 0, 2]);
         expect(result.groups.map((g) => g.outputRun)).toEqual([0, 2]);
+    });
+
+    it("reuses paragraph safe-space flags with identical boundaries and analyzes only uncovered positions", () => {
+        const p = program();
+        const analysis = analyzeComputeTextSegmentation(p)!;
+        const texts = [(paragraph + phrases.join("") + extra).repeat(6), ("a  b" + "c".repeat(70) + " ").repeat(8), "a b"];
+        const source = group(p, texts);
+        const flags = source.runs.map((run) => computeTextParagraphFlags(run.scalars, run.glyphIds, analysis));
+        const expected = segmentComputeTextRuns([source], limits, layout)!;
+        const safeAfter = vi.spyOn(analysis, "safeAfter");
+        try {
+            const hinted = segmentComputeTextRuns([source], limits, layout, [flags])!;
+            expect([...hinted.table]).toEqual([...expected.table]);
+            expect(hinted.groups[0]!.runs.map((run) => run.scalars.length)).toEqual(expected.groups[0]!.runs.map((run) => run.scalars.length));
+            const covered = safeAfter.mock.calls.filter(([glyphIds, s]) => {
+                const run = source.runs.find((r) => r.glyphIds === glyphIds)!;
+                return run.scalars[s] === 0x20 && s + 1 < run.scalars.length && run.scalars[s + 1] !== 0x20;
+            });
+            expect(covered).toHaveLength(0);
+            expect(safeAfter.mock.calls.length).toBeGreaterThan(0);
+            safeAfter.mockClear();
+            const forged = flags.map((f) => f.map((v) => (v === SAFE_SPACE_FLAG ? 1 : v)));
+            expect(segmentComputeTextRuns([source], limits, layout, [forged])?.table).not.toEqual(expected.table);
+            const mismatched = segmentComputeTextRuns([source], limits, layout, [[flags[0]!.subarray(1), ...flags.slice(1)]])!;
+            expect([...mismatched.table]).toEqual([...expected.table]);
+        } finally {
+            safeAfter.mockRestore();
+        }
     });
 
     it("markBaseHit is false for Inter and Roboto English programs", () => {

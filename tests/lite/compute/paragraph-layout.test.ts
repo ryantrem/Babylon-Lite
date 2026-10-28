@@ -11,7 +11,11 @@ import {
 } from "../../../packages/babylon-lite/src/index";
 import type { ComputeTextData, ComputeTextParagraphLayout, GlyphStorage } from "../../../packages/babylon-lite/src/index";
 import { createStorageBuffer, disposeStorageBuffer, readStorageBuffer, updateStorageBuffer } from "../../../packages/babylon-lite/src/resource/storage-buffer";
-import { createComputeTextParagraphStage, getComputeTextParagraphStage } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
+import {
+    computeTextParagraphSplitStages,
+    createComputeTextParagraphStage,
+    getComputeTextParagraphStage,
+} from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
 import { addComputeDispatch, createComputeTask, prepareComputeTask, submitComputeTasks } from "../../../packages/babylon-lite/src/compute/compute-task";
 import { mapComputeFontScalars } from "../../../packages/babylon-lite/src/text/compute-font";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
@@ -327,9 +331,14 @@ describe("native GPU paragraph wrapping and placement", () => {
             expect(first._flags).toHaveLength(3);
             const clean = first._flags![1];
             const entries = first._flags!.filter((entry) => entry !== undefined);
-            expect(entries.every((entry) => entry.scalars.buffer !== entry.glyphIds.buffer)).toBe(true);
+            // Entries view the submit slab only when it is at most twice their run bytes; otherwise they own exact copies.
+            for (const entry of entries) {
+                const runBytes = entry.scalars.byteLength + entry.glyphIds.byteLength;
+                const shared = entry.scalars.buffer === entry.glyphIds.buffer;
+                expect(shared ? entry.scalars.buffer.byteLength <= 2 * runBytes : entry.scalars.buffer.byteLength === entry.scalars.byteLength).toBe(true);
+            }
             const buffers = new Set(entries.flatMap((entry) => [entry.scalars.buffer, entry.glyphIds.buffer, entry.flags.buffer]));
-            expect([...buffers].reduce((sum, buffer) => sum + buffer.byteLength, 0)).toBe(entries.reduce((sum, entry) => sum + entry.scalars.length * 9, 0));
+            expect([...buffers].reduce((sum, buffer) => sum + buffer.byteLength, 0)).toBeLessThanOrEqual(entries.reduce((sum, entry) => sum + entry.scalars.length * 17, 0));
             const original = paragraphs[0]!;
             const at = Math.floor(original.length / 2);
             const scalarAt = file.includes("Gothic") && original.charCodeAt(at) >= 0xdc00 && original.charCodeAt(at) <= 0xdfff ? at - 1 : at;
@@ -345,6 +354,66 @@ describe("native GPU paragraph wrapping and placement", () => {
             expect(getComputeTextParagraphStage(data)!._cache!._flags).toHaveLength(4);
         }
     );
+
+    it("reuses plain prior decodes across chained edits while output and seed-driven atlas order match fresh layout", async () => {
+        const face = fixture("Inter.ttf");
+        const data = block(face, "selection-reuse");
+        const original = "The editor reviews a clear paragraph, checks its meaning, and shares the revised text. ".repeat(8);
+        let paragraphs = [original, "short", original];
+        const layout = { maxWidthPx: 240.5, lineHeightPx: 30 };
+        await update(data, face, paragraphs, layout);
+        const mid = Math.floor(original.length / 2);
+        const cold = original.slice(0, mid) + "őq" + original.slice(mid + 2, -1) + ",";
+        const edits = [
+            original.slice(0, mid) + "a" + original.slice(mid),
+            original,
+            // Cold nominal pages miss, so this decode is not plain and leaves no record for the next edit.
+            original.slice(0, mid) + "őq" + original.slice(mid + 2),
+            cold,
+            cold.slice(0, mid) + "qő" + cold.slice(mid + 2),
+            cold.slice(0, mid) + "qő" + cold.slice(mid + 2, -1) + ".",
+        ];
+        expect(face.font._nominalPages?.[1]?.[0x51] ?? 0xffffffff).toBe(0xffffffff);
+        const reused: boolean[] = [];
+        for (const text of edits) {
+            paragraphs = [text, paragraphs[1]!, paragraphs[2]!];
+            await update(data, face, paragraphs, layout);
+            await compareFresh(data, face, paragraphs, layout);
+            const entry = getComputeTextParagraphStage(data)!._cache!._flags![0]!;
+            reused.push(entry.reuse?.firsts !== undefined);
+            if (entry.reuse) {
+                expect(entry.reuse.scalars).toBe(entry.scalars);
+                expect(entry.reuse.text).toBe(text);
+            }
+        }
+        // The first layout decoded cold pages, so it left no record.
+        expect(reused).toEqual([false, true, false, false, true, true]);
+    });
+
+    it("uploads only dirty flag words, ignores stale flag bytes past a shrunk paragraph, and copies runs only out of oversized slabs", async () => {
+        const face = fixture("Inter.ttf");
+        const data = block(face, "flag-upload-trim");
+        const long = "office affinity, the editor reviews a clear paragraph. ".repeat(12);
+        const layout = { maxWidthPx: 210.5, lineHeightPx: 30 };
+        let paragraphs = [long, "ok", long];
+        await update(data, face, paragraphs, layout);
+        const initial = getComputeTextParagraphStage(data)!._cache!._flags!;
+        // The first layout's slab holds every paragraph, so the short paragraph owns a copy.
+        expect(initial[1]!.scalars.buffer.byteLength).toBe(initial[1]!.scalars.byteLength);
+        for (const text of ["office ok", long.slice(0, -7) + "affinity", "ok office"]) {
+            paragraphs = [paragraphs[0]!, paragraphs[1]!, text];
+            await update(data, face, paragraphs, layout);
+            await compareFresh(data, face, paragraphs, layout);
+            const stage = getComputeTextParagraphStage(data)!;
+            expect(stage._uploadRanges).toHaveLength(3);
+            const [first, end] = stage._uploadRanges[2]!;
+            expect(end - first).toBe(Math.ceil(text.length / 4));
+            expect(end - first).toBeLessThan(stage._words[12]!);
+            const entry = stage._cache!._flags![2]!;
+            expect(entry.glyphIds.buffer).toBe(entry.scalars.buffer);
+            expect(entry.scalars.buffer.byteLength).toBeLessThanOrEqual(2 * (entry.scalars.byteLength + entry.glyphIds.byteLength));
+        }
+    });
 
     it("invalidates flag entries with ready admission errors and never publishes a busy-rejected candidate", async () => {
         const face = fixture("Inter.ttf");
@@ -614,8 +683,9 @@ describe("native GPU paragraph wrapping and placement", () => {
         expect(textures).not.toHaveBeenCalled();
         expect(writes.mock.calls.some(([buffer]) => buffer === data._slots._buffer)).toBe(false);
         const inputWrites = writes.mock.calls.filter(([buffer]) => buffer === stage._input!._buffer);
-        expect(inputWrites.map((call) => call[4])).toEqual([64, stage._words[12]! * 4]);
-        expect(writes.mock.calls.reduce((bytes, call) => bytes + (call[4] as number), 0)).toBeLessThan(8 * paragraphs[57]!.length + stage._words[12]! * 4 + 256);
+        // Only the dirty paragraph's flag words upload, not its whole flag stride.
+        expect(inputWrites.map((call) => call[4])).toEqual([64, Math.ceil(paragraphs[57]!.length / 4) * 4]);
+        expect(writes.mock.calls.reduce((bytes, call) => bytes + (call[4] as number), 0)).toBeLessThan(9 * paragraphs[57]!.length + 256);
         expect(prepare).toHaveBeenCalledTimes(1);
         const tasks = submit.mock.calls.at(-1)![0];
         const dispatches = tasks.flatMap((task) => task.dispatches);
@@ -1245,272 +1315,283 @@ describe("native GPU paragraph wrapping and placement", () => {
         }
     });
 
-    it("matches serial WGSL bit-for-bit for blocked scans, candidate events, fallback, failures and incremental reuse (seed 0x31415926)", async () => {
-        let seed = 0x31415926;
-        const random = (limit: number) => {
-            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-            return seed % limit;
-        };
-        const capacity = 4097;
-        const counts = [0, 1, 257, 2049, 4097, 513, 900, 300, 30, 70, 256, 258, 60, 500, 900, 100];
-        const words = layoutWords(counts.length, capacity);
-        words[2] = bits(0.02343751);
-        words[4] = bits(41.37);
-        words[5] = bits(31.12345);
-        words[6] = bits(7.12345);
-        const records = new Int32Array(counts.length * (4 + capacity * 6));
-        counts.forEach((count, p) => {
-            const head = p * (4 + capacity * 6);
-            records[head + 1] = count;
-            let c = 0;
-            for (let i = 0; i < count; i++) {
-                if (i && random(4)) {
-                    c++;
-                }
-                const at = head + 4 + i * 6;
-                const flags = p === 6 ? 4 : p === 7 ? 0 : random(8);
-                const flagAt = 16 + words[11]! + p * words[12]! + Math.floor(c / 4);
-                words[flagAt] = (words[flagAt]! & ~(255 << ((c % 4) * 8))) | (flags << ((c % 4) * 8));
-                records.set([random(2), c, random(90), random(31) - 15, random(70) - 35, random(70) - 35], at);
-            }
-        });
-        // Entirely unbreakable, entirely space, negative advance, and signed-prefix overflow.
-        for (let i = 0; i < counts[8]!; i++) {
-            records[8 * (4 + capacity * 6) + 5 + i * 6] = 0;
-        }
-        words.fill(0x01010101, 16 + words[11]! + 9 * words[12]!, 16 + words[11]! + 10 * words[12]!);
-        records[10 * (4 + capacity * 6) + 6 + 130 * 6] = -300;
-        records[11 * (4 + capacity * 6) + 6] = 0x7fffffff;
-        const shared = {
-            shaped: createStorageBuffer(native.engine, records, { writable: true }),
-            slots: createStorageBuffer(native.engine, Uint32Array.of(13, 0xfffffffe, 0xffffffff)),
-        };
-        const stages = [0, 1].map(() => createComputeTextParagraphStage({}, native.engine, words.slice()));
-        const tasks = [0, 1].map((i) => createComputeTask(native.engine, `parallel-serial-${i}`));
-        const outputs = [0, 1].map(() => ({
-            instances: createStorageBuffer(native.engine, counts.reduce((a, b) => a + b, 0) * 12, { writable: true }),
-            indirect: createStorageBuffer(native.engine, 16, { writable: true }),
-            status: createStorageBuffer(native.engine, 4, { writable: true }),
-        }));
-        const serialShaders: ReturnType<typeof createComputeShader>[] = [];
-        try {
-            stages.forEach((stage, index) => {
-                stage.prepare(native.engine, counts.length, capacity);
-                const dispatches = stage.dispatches({ ...shared, ...outputs[index]! });
-                if (index) {
-                    for (const [i, entryPoint] of [
-                        [0, "serialMeasureTest"],
-                        [2, "serialPlaceTest"],
-                    ] as const) {
-                        const shader = createComputeShader(native.engine, {
-                            computeSource: stage._shaders![i]!._source + serialParagraphLayout,
-                            entryPoint,
-                            bindings: stage._shaders![i]!._decls,
-                        });
-                        serialShaders.push(shader);
-                        dispatches[i] = createComputeDispatch(
-                            shader,
-                            createComputeBindingSet(shader, { input: stage._input!, ...shared, ...outputs[index]!, info: stage._info!, lines: stage._lines! }),
-                            { size: { x: Math.ceil(counts.length / 64) } }
-                        );
+    it.each([0, 1])(
+        "matches serial WGSL bit-for-bit for blocked scans, candidate events, fallback, failures and incremental reuse (split stages %i, seed 0x31415926)",
+        async (split) => {
+            let seed = 0x31415926;
+            const random = (limit: number) => {
+                seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+                return seed % limit;
+            };
+            const capacity = 4097;
+            const counts = [0, 1, 257, 2049, 4097, 513, 900, 300, 30, 70, 256, 258, 60, 500, 900, 100];
+            const words = layoutWords(counts.length, capacity);
+            words[13] = split;
+            words[2] = bits(0.02343751);
+            words[4] = bits(41.37);
+            words[5] = bits(31.12345);
+            words[6] = bits(7.12345);
+            const records = new Int32Array(counts.length * (4 + capacity * 6));
+            counts.forEach((count, p) => {
+                const head = p * (4 + capacity * 6);
+                records[head + 1] = count;
+                let c = 0;
+                for (let i = 0; i < count; i++) {
+                    if (i && random(4)) {
+                        c++;
                     }
-                } else {
-                    for (const i of [0, 2]) {
-                        setComputeDispatchSize(dispatches[i]!, { x: 4, y: Math.ceil(counts.length / 4) });
-                    }
+                    const at = head + 4 + i * 6;
+                    const flags = p === 6 ? 4 : p === 7 ? 0 : random(8);
+                    const flagAt = 16 + words[11]! + p * words[12]! + Math.floor(c / 4);
+                    words[flagAt] = (words[flagAt]! & ~(255 << ((c % 4) * 8))) | (flags << ((c % 4) * 8));
+                    records.set([random(2), c, random(90), random(31) - 15, random(70) - 35, random(70) - 35], at);
                 }
-                dispatches.forEach((dispatch) => addComputeDispatch(tasks[index]!, dispatch));
-                tasks[index]!.record();
             });
-            async function compare(): Promise<void> {
-                for (const task of tasks) {
-                    await prepareComputeTask(task);
-                    submitComputeTasks([task]);
-                }
-                const results = await Promise.all(
-                    stages.map(async (stage, i) => ({
-                        lines: new Uint8Array(await readStorageBuffer(stage._lines!, 0, counts.length * capacity * 16)),
-                        info: new Uint8Array(await readStorageBuffer(stage._info!)),
-                        instances: new Uint8Array(await readStorageBuffer(outputs[i]!.instances)),
-                        indirect: new Uint8Array(await readStorageBuffer(outputs[i]!.indirect)),
-                        status: new Uint8Array(await readStorageBuffer(outputs[i]!.status)),
-                    }))
-                );
-                expect(results[0]).toEqual(results[1]);
+            // Entirely unbreakable, entirely space, negative advance, and signed-prefix overflow.
+            for (let i = 0; i < counts[8]!; i++) {
+                records[8 * (4 + capacity * 6) + 5 + i * 6] = 0;
             }
-            for (const width of [0.0001, 41.37, 1000000, Infinity]) {
-                for (const align of width === Infinity ? [0] : [0, 1, 2]) {
+            words.fill(0x01010101, 16 + words[11]! + 9 * words[12]!, 16 + words[11]! + 10 * words[12]!);
+            records[10 * (4 + capacity * 6) + 6 + 130 * 6] = -300;
+            records[11 * (4 + capacity * 6) + 6] = 0x7fffffff;
+            const shared = {
+                shaped: createStorageBuffer(native.engine, records, { writable: true }),
+                slots: createStorageBuffer(native.engine, Uint32Array.of(13, 0xfffffffe, 0xffffffff)),
+            };
+            const stages = [0, 1].map(() => createComputeTextParagraphStage({}, native.engine, words.slice()));
+            const tasks = [0, 1].map((i) => createComputeTask(native.engine, `parallel-serial-${i}`));
+            const outputs = [0, 1].map(() => ({
+                instances: createStorageBuffer(native.engine, counts.reduce((a, b) => a + b, 0) * 12, { writable: true }),
+                indirect: createStorageBuffer(native.engine, 16, { writable: true }),
+                status: createStorageBuffer(native.engine, 4, { writable: true }),
+            }));
+            const serialShaders: ReturnType<typeof createComputeShader>[] = [];
+            try {
+                stages.forEach((stage, index) => {
+                    stage.prepare(native.engine, counts.length, capacity);
+                    const dispatches = stage.dispatches({ ...shared, ...outputs[index]! });
+                    if (index) {
+                        for (const [i, entryPoint] of [
+                            [0, "serialMeasureTest"],
+                            [7, "serialPlaceTest"],
+                        ] as const) {
+                            const shader = createComputeShader(native.engine, {
+                                computeSource: stage._shaders![i]!._source + serialParagraphLayout,
+                                entryPoint,
+                                bindings: stage._shaders![i]!._decls,
+                            });
+                            serialShaders.push(shader);
+                            dispatches[i] = createComputeDispatch(
+                                shader,
+                                createComputeBindingSet(shader, { input: stage._input!, ...shared, ...outputs[index]!, info: stage._info!, lines: stage._lines! }),
+                                { size: { x: Math.ceil(counts.length / 64) } }
+                            );
+                        }
+                    } else {
+                        for (const i of split ? [1, 2, 7] : [0, 7]) {
+                            setComputeDispatchSize(dispatches[i]!, { x: 4, y: Math.ceil(counts.length / 4) });
+                        }
+                    }
+                    // The serial oracle measures every paragraph itself; block measuring would overwrite its results.
+                    dispatches.filter((_, i) => !index || (i !== 1 && i !== 2)).forEach((dispatch) => addComputeDispatch(tasks[index]!, dispatch));
+                    tasks[index]!.record();
+                });
+                async function compare(): Promise<void> {
+                    for (const task of tasks) {
+                        await prepareComputeTask(task);
+                        submitComputeTasks([task]);
+                    }
+                    const results = await Promise.all(
+                        stages.map(async (stage, i) => ({
+                            lines: new Uint8Array(await readStorageBuffer(stage._lines!, 0, counts.length * capacity * 16)),
+                            info: new Uint8Array(await readStorageBuffer(stage._info!)),
+                            instances: new Uint8Array(await readStorageBuffer(outputs[i]!.instances)),
+                            indirect: new Uint8Array(await readStorageBuffer(outputs[i]!.indirect)),
+                            status: new Uint8Array(await readStorageBuffer(outputs[i]!.status)),
+                        }))
+                    );
+                    expect(results[0]).toEqual(results[1]);
+                }
+                for (const width of [0.0001, 41.37, 1000000, Infinity]) {
+                    for (const align of width === Infinity ? [0] : [0, 1, 2]) {
+                        stages.forEach((stage) => {
+                            stage._words[4] = bits(width);
+                            stage._words[7] = align;
+                            updateStorageBuffer(native.engine, stage._input!, stage._words);
+                        });
+                        await compare();
+                    }
+                }
+                // Clean slots retain tables while one dirty physical slot changes; display order is permuted.
+                records[2 * (4 + capacity * 6) + 6] = records[2 * (4 + capacity * 6) + 6]! + 10;
+                updateStorageBuffer(native.engine, shared.shaped, records);
+                stages.forEach((stage) => {
+                    stage._words[8] = 2;
+                    stage._words[9] = 1;
+                    stage._words[10] = 0;
+                    stage._words.set(
+                        counts.map((_n, i) => counts.length - i - 1),
+                        16
+                    );
+                    updateStorageBuffer(native.engine, stage._input!, stage._words);
+                });
+                await compare();
+                for (const [failure, count, glyph] of [
+                    [1, 1, 2],
+                    [0, capacity + 1, 2],
+                    [0, 1, 2],
+                    [0, 1, 3],
+                    [0, 1, 0],
+                ]) {
                     stages.forEach((stage) => {
-                        stage._words[4] = bits(width);
-                        stage._words[7] = align;
+                        stage._words[8] = 0;
                         updateStorageBuffer(native.engine, stage._input!, stage._words);
                     });
+                    records[0] = failure!;
+                    records[1] = count!;
+                    records[4] = glyph!;
+                    updateStorageBuffer(native.engine, shared.shaped, records);
                     await compare();
                 }
+            } finally {
+                tasks.forEach((task) => task.dispose());
+                stages.forEach((stage) => stage.release());
+                serialShaders.forEach(disposeComputeShader);
+                [...Object.values(shared), ...outputs.flatMap(Object.values)].forEach(disposeStorageBuffer);
             }
-            // Clean slots retain tables while one dirty physical slot changes; display order is permuted.
-            records[2 * (4 + capacity * 6) + 6] = records[2 * (4 + capacity * 6) + 6]! + 10;
-            updateStorageBuffer(native.engine, shared.shaped, records);
-            stages.forEach((stage) => {
-                stage._words[8] = 2;
-                stage._words[9] = 1;
-                stage._words[10] = 0;
-                stage._words.set(
-                    counts.map((_n, i) => counts.length - i - 1),
-                    16
-                );
-                updateStorageBuffer(native.engine, stage._input!, stage._words);
-            });
-            await compare();
-            for (const [failure, count, glyph] of [
-                [1, 1, 2],
-                [0, capacity + 1, 2],
-                [0, 1, 2],
-                [0, 1, 3],
-                [0, 1, 0],
-            ]) {
-                stages.forEach((stage) => {
-                    stage._words[8] = 0;
-                    updateStorageBuffer(native.engine, stage._input!, stage._words);
-                });
-                records[0] = failure!;
-                records[1] = count!;
-                records[4] = glyph!;
-                updateStorageBuffer(native.engine, shared.shaped, records);
-                await compare();
-            }
-        } finally {
-            tasks.forEach((task) => task.dispose());
-            stages.forEach((stage) => stage.release());
-            serialShaders.forEach(disposeComputeShader);
-            [...Object.values(shared), ...outputs.flatMap(Object.values)].forEach(disposeStorageBuffer);
         }
-    });
+    );
 
-    it("matches the serial oracle for hinted gallop and lane line sweeps through 120001 records (seed 0x6a09e667)", async () => {
-        const capacity = 120001;
-        const words = layoutWords(1, capacity);
-        words[2] = bits(0.02343751);
-        words[5] = bits(31.12345);
-        const records = new Int32Array(4 + capacity * 6);
-        const shared = {
-            shaped: createStorageBuffer(native.engine, records, { writable: true }),
-            slots: createStorageBuffer(native.engine, Uint32Array.of(13, 0xfffffffe, 0xffffffff)),
-        };
-        const stages = [0, 1].map(() => createComputeTextParagraphStage({}, native.engine, words.slice()));
-        const tasks = [0, 1].map((i) => createComputeTask(native.engine, `gallop-sweep-oracle-${i}`));
-        const outputs = [0, 1].map(() => ({
-            instances: createStorageBuffer(native.engine, capacity * 12, { writable: true }),
-            indirect: createStorageBuffer(native.engine, 16, { writable: true }),
-            status: createStorageBuffer(native.engine, 4, { writable: true }),
-        }));
-        const serialShaders: ReturnType<typeof createComputeShader>[] = [];
-        let seed = 0x6a09e667;
-        const random = (limit: number) => {
-            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-            return seed % limit;
-        };
-        try {
-            stages.forEach((stage, index) => {
-                stage.prepare(native.engine, 1, capacity);
-                const dispatches = stage.dispatches({ ...shared, ...outputs[index]! });
-                if (index) {
-                    for (const [i, entryPoint] of [
-                        [0, "serialMeasureTest"],
-                        [2, "serialPlaceTest"],
-                    ] as const) {
-                        const shader = createComputeShader(native.engine, {
-                            computeSource: stage._shaders![i]!._source + serialParagraphLayout,
-                            entryPoint,
-                            bindings: stage._shaders![i]!._decls,
-                        });
-                        serialShaders.push(shader);
-                        dispatches[i] = createComputeDispatch(
-                            shader,
-                            createComputeBindingSet(shader, { input: stage._input!, ...shared, ...outputs[index]!, info: stage._info!, lines: stage._lines! }),
-                            { size: { x: 1 } }
-                        );
-                    }
-                }
-                dispatches.forEach((dispatch) => addComputeDispatch(tasks[index]!, dispatch));
-                tasks[index]!.record();
-            });
-            const cases = [
-                ...[0, 1, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025].map((count) => ({ count, kind: "boundary", width: 0.02343751 * 13 })),
-                { count: 4097, kind: "zero-tail", width: 41.37 },
-                { count: 4097, kind: "spaces", width: 0.0001 },
-                { count: 4097, kind: "guarded", width: 0.0001 },
-                { count: 4097, kind: "clusters", width: 41.37 },
-                { count: 1025, kind: "negative", width: 41.37 },
-                { count: 1025, kind: "overflow", width: 41.37 },
-                { count: capacity, kind: "seeded", width: 600 },
-                { count: capacity, kind: "zero-tail", width: Infinity },
-            ];
-            for (const { count, kind, width } of cases) {
-                records.fill(0);
-                records[1] = count;
-                words.fill(0, 17);
-                let cluster = 0;
-                for (let i = 0; i < count; i++) {
-                    if (i && (kind !== "clusters" || random(3))) {
-                        cluster++;
-                    }
-                    const flag = kind === "spaces" ? 1 : kind === "guarded" ? 4 : kind === "seeded" || kind === "clusters" ? random(8) : 0;
-                    const flagAt = 17 + Math.floor(cluster / 4);
-                    words[flagAt] = (words[flagAt]! & ~(255 << ((cluster % 4) * 8))) | (flag << ((cluster % 4) * 8));
-                    const advance = kind === "boundary" ? 13 : kind === "zero-tail" ? (i === 0 ? 1000000 : 0) : random(90);
-                    records.set([kind === "boundary" ? 0 : random(2), cluster, advance, random(9) - 4, random(17) - 8, random(17) - 8], 4 + i * 6);
-                }
-                if (kind === "negative") {
-                    records[6 + 513 * 6] = -300;
-                } else if (kind === "overflow") {
-                    records[6] = 0x7fffffff;
-                    records[12] = 1;
-                }
-                updateStorageBuffer(native.engine, shared.shaped, records);
-                stages.forEach((stage) => {
-                    stage._words.set(words);
-                    stage._words[4] = bits(width);
-                    updateStorageBuffer(native.engine, stage._input!, stage._words);
-                });
-                for (const task of tasks) {
-                    await prepareComputeTask(task);
-                    submitComputeTasks([task]);
-                }
-                const results = await Promise.all(
-                    stages.map(async (stage, i) => {
-                        const info = new Uint32Array(await readStorageBuffer(stage._info!));
-                        const visible = info[0]!;
-                        return {
-                            info,
-                            lines: new Uint32Array(await readStorageBuffer(stage._lines!, 0, info[2]! * 16)),
-                            instances: new Uint32Array(await readStorageBuffer(outputs[i]!.instances, 0, Math.max(4, visible * 12))),
-                            indirect: new Uint32Array(await readStorageBuffer(outputs[i]!.indirect)),
-                            status: new Uint32Array(await readStorageBuffer(outputs[i]!.status)),
-                        };
-                    })
-                );
-                expect(results[0], `${kind}/${count}/${width}: serial output`).toEqual(results[1]);
-                expect(new Int32Array(await readStorageBuffer(shared.shaped))).toEqual(records);
-                if (count) {
-                    const table = new Uint32Array(await readStorageBuffer(stages[0]!._lines!, capacity * 16, count * 32));
-                    const lines = results[1]!.lines;
-                    let line = 0;
-                    for (let i = 0; i < count; i++) {
-                        while (line + 1 < results[1]!.info[2]! && lines[(line + 1) * 4]! <= i) {
-                            line++;
+    it.each([0, 1])(
+        "matches the serial oracle for hinted gallop and lane line sweeps through 120001 records (split stages %i, seed 0x6a09e667)",
+        async (split) => {
+            const capacity = 120001;
+            const words = layoutWords(1, capacity);
+            words[13] = split;
+            words[2] = bits(0.02343751);
+            words[5] = bits(31.12345);
+            const records = new Int32Array(4 + capacity * 6);
+            const shared = {
+                shaped: createStorageBuffer(native.engine, records, { writable: true }),
+                slots: createStorageBuffer(native.engine, Uint32Array.of(13, 0xfffffffe, 0xffffffff)),
+            };
+            const stages = [0, 1].map(() => createComputeTextParagraphStage({}, native.engine, words.slice()));
+            const tasks = [0, 1].map((i) => createComputeTask(native.engine, `gallop-sweep-oracle-${i}`));
+            const outputs = [0, 1].map(() => ({
+                instances: createStorageBuffer(native.engine, capacity * 12, { writable: true }),
+                indirect: createStorageBuffer(native.engine, 16, { writable: true }),
+                status: createStorageBuffer(native.engine, 4, { writable: true }),
+            }));
+            const serialShaders: ReturnType<typeof createComputeShader>[] = [];
+            let seed = 0x6a09e667;
+            const random = (limit: number) => {
+                seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+                return seed % limit;
+            };
+            try {
+                stages.forEach((stage, index) => {
+                    stage.prepare(native.engine, 1, capacity);
+                    const dispatches = stage.dispatches({ ...shared, ...outputs[index]! });
+                    if (index) {
+                        for (const [i, entryPoint] of [
+                            [0, "serialMeasureTest"],
+                            [7, "serialPlaceTest"],
+                        ] as const) {
+                            const shader = createComputeShader(native.engine, {
+                                computeSource: stage._shaders![i]!._source + serialParagraphLayout,
+                                entryPoint,
+                                bindings: stage._shaders![i]!._decls,
+                            });
+                            serialShaders.push(shader);
+                            dispatches[i] = createComputeDispatch(
+                                shader,
+                                createComputeBindingSet(shader, { input: stage._input!, ...shared, ...outputs[index]!, info: stage._info!, lines: stage._lines! }),
+                                { size: { x: 1 } }
+                            );
                         }
-                        expect(table[i * 8 + 4], `${kind}/${count}: record ${i} line`).toBe(line);
+                    }
+                    // The serial oracle measures every paragraph itself; block measuring would overwrite its results.
+                    dispatches.filter((_, i) => !index || (i !== 1 && i !== 2)).forEach((dispatch) => addComputeDispatch(tasks[index]!, dispatch));
+                    tasks[index]!.record();
+                });
+                const cases = [
+                    ...[0, 1, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025].map((count) => ({ count, kind: "boundary", width: 0.02343751 * 13 })),
+                    { count: 4097, kind: "zero-tail", width: 41.37 },
+                    { count: 4097, kind: "spaces", width: 0.0001 },
+                    { count: 4097, kind: "guarded", width: 0.0001 },
+                    { count: 4097, kind: "clusters", width: 41.37 },
+                    { count: 1025, kind: "negative", width: 41.37 },
+                    { count: 1025, kind: "overflow", width: 41.37 },
+                    { count: capacity, kind: "seeded", width: 600 },
+                    { count: capacity, kind: "zero-tail", width: Infinity },
+                ];
+                for (const { count, kind, width } of cases) {
+                    records.fill(0);
+                    records[1] = count;
+                    words.fill(0, 17);
+                    let cluster = 0;
+                    for (let i = 0; i < count; i++) {
+                        if (i && (kind !== "clusters" || random(3))) {
+                            cluster++;
+                        }
+                        const flag = kind === "spaces" ? 1 : kind === "guarded" ? 4 : kind === "seeded" || kind === "clusters" ? random(8) : 0;
+                        const flagAt = 17 + Math.floor(cluster / 4);
+                        words[flagAt] = (words[flagAt]! & ~(255 << ((cluster % 4) * 8))) | (flag << ((cluster % 4) * 8));
+                        const advance = kind === "boundary" ? 13 : kind === "zero-tail" ? (i === 0 ? 1000000 : 0) : random(90);
+                        records.set([kind === "boundary" ? 0 : random(2), cluster, advance, random(9) - 4, random(17) - 8, random(17) - 8], 4 + i * 6);
+                    }
+                    if (kind === "negative") {
+                        records[6 + 513 * 6] = -300;
+                    } else if (kind === "overflow") {
+                        records[6] = 0x7fffffff;
+                        records[12] = 1;
+                    }
+                    updateStorageBuffer(native.engine, shared.shaped, records);
+                    stages.forEach((stage) => {
+                        stage._words.set(words);
+                        stage._words[4] = bits(width);
+                        updateStorageBuffer(native.engine, stage._input!, stage._words);
+                    });
+                    for (const task of tasks) {
+                        await prepareComputeTask(task);
+                        submitComputeTasks([task]);
+                    }
+                    const results = await Promise.all(
+                        stages.map(async (stage, i) => {
+                            const info = new Uint32Array(await readStorageBuffer(stage._info!));
+                            const visible = info[0]!;
+                            return {
+                                info,
+                                lines: new Uint32Array(await readStorageBuffer(stage._lines!, 0, info[2]! * 16)),
+                                instances: new Uint32Array(await readStorageBuffer(outputs[i]!.instances, 0, Math.max(4, visible * 12))),
+                                indirect: new Uint32Array(await readStorageBuffer(outputs[i]!.indirect)),
+                                status: new Uint32Array(await readStorageBuffer(outputs[i]!.status)),
+                            };
+                        })
+                    );
+                    expect(results[0], `${kind}/${count}/${width}: serial output`).toEqual(results[1]);
+                    expect(new Int32Array(await readStorageBuffer(shared.shaped))).toEqual(records);
+                    if (count) {
+                        const table = new Uint32Array(await readStorageBuffer(stages[0]!._lines!, capacity * 16, count * 32));
+                        const lines = results[1]!.lines;
+                        let line = 0;
+                        for (let i = 0; i < count; i++) {
+                            while (line + 1 < results[1]!.info[2]! && lines[(line + 1) * 4]! <= i) {
+                                line++;
+                            }
+                            expect(table[i * 8 + 4], `${kind}/${count}: record ${i} line`).toBe(line);
+                        }
                     }
                 }
+            } finally {
+                tasks.forEach((task) => task.dispose());
+                stages.forEach((stage) => stage.release());
+                serialShaders.forEach(disposeComputeShader);
+                [...Object.values(shared), ...outputs.flatMap(Object.values)].forEach(disposeStorageBuffer);
             }
-        } finally {
-            tasks.forEach((task) => task.dispose());
-            stages.forEach((stage) => stage.release());
-            serialShaders.forEach(disposeComputeShader);
-            [...Object.values(shared), ...outputs.flatMap(Object.values)].forEach(disposeStorageBuffer);
-        }
-    }, 120000);
+        },
+        120000
+    );
 
     describe("successor-prefix fits", () => {
         interface ParagraphCase {
@@ -1534,6 +1615,7 @@ describe("native GPU paragraph wrapping and placement", () => {
         async function compare(paragraphs: readonly ParagraphCase[], widths: readonly number[], checkPath = false): Promise<void> {
             const capacity = Math.max(1, ...paragraphs.map((p) => p.records.length));
             const words = layoutWords(paragraphs.length, capacity);
+            words[13] = computeTextParagraphSplitStages(capacity);
             words[2] = bits(scale);
             words[5] = bits(31.12345);
             const stride = 4 + capacity * 6;
@@ -1565,7 +1647,7 @@ describe("native GPU paragraph wrapping and placement", () => {
                     if (index) {
                         for (const [i, entryPoint] of [
                             [0, "serialMeasureTest"],
-                            [2, "serialPlaceTest"],
+                            [7, "serialPlaceTest"],
                         ] as const) {
                             const shader = createComputeShader(native.engine, {
                                 computeSource: stage._shaders![i]!._source + serialParagraphLayout,
@@ -1580,7 +1662,8 @@ describe("native GPU paragraph wrapping and placement", () => {
                             );
                         }
                     }
-                    dispatches.forEach((dispatch) => addComputeDispatch(tasks[index]!, dispatch));
+                    // The serial oracle measures every paragraph itself; block measuring would overwrite its results.
+                    dispatches.filter((_, i) => !index || (i !== 1 && i !== 2)).forEach((dispatch) => addComputeDispatch(tasks[index]!, dispatch));
                     tasks[index]!.record();
                 });
                 for (const width of widths) {

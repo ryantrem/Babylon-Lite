@@ -8,7 +8,8 @@ import { mapComputeFontScalars } from "./compute-font.js";
 import { closeComputeTextGlyphs } from "./compute-text-closure.js";
 import { createComputeTextPlan, ensureComputeTextProfile, profileSupport, validateComputeTextPlanFont } from "./compute-text-plan.js";
 import { segmentComputeTextRuns } from "./compute-text-segment.js";
-import type { ComputeTextInputSlab, ComputeTextRunSelection } from "./compute-text-selection.js";
+import type { SegmentSafeSpaces } from "./compute-text-segment.js";
+import type { ComputeTextInputSlab, ComputeTextRunSelection, ComputeTextSelectionReuse } from "./compute-text-selection.js";
 import { computeTextRequiredProfiles, createComputeTextInputSlab, selectComputeTextRun } from "./compute-text-selection.js";
 import { extractComputeGlyphCurves } from "./compute-glyph-extraction.js";
 import { updateGlyphStorage } from "./glyph-storage.js";
@@ -216,6 +217,12 @@ export function submitComputeTextData(
         readonly pool: number;
         /** Request a retry with full input if closure installation cannot be additive. */
         readonly rebuild?: Error;
+        /** Paragraph flags that `createStage` fills per logical run; segmentation reuses their proven safe spaces. */
+        readonly safeSpaces?: SegmentSafeSpaces;
+        /** Prior plain decodes aligned with `texts`; selection reuses their unchanged prefix and suffix. */
+        readonly previous?: readonly (ComputeTextSelectionReuse | undefined)[];
+        /** Receives each run's selection, aligned with `texts`, before `createStage` runs. */
+        readonly selections?: ComputeTextRunSelection[];
     }
 ): Promise<ComputeTextUpdate> {
     return submitComputeTextPrepared(data, (assertLive) => {
@@ -232,13 +239,21 @@ export function submitComputeTextData(
         // Every nominal glyph: seeds the closure and lets packing prove runs mark-free.
         const seeds = new Set<number>();
         const slab = createComputeTextInputSlab(snapshot, false);
-        const prepared = snapshot.map((text, run) => prepareRun(data._font, text, run, seeds, slab));
+        const previous = options?.previous;
+        const selections = options?.selections;
+        const prepared = snapshot.map((text, run) => {
+            const result = prepareRun(data._font, text, run, seeds, slab, previous?.[run]);
+            if (selections) {
+                selections[run] = result.selection;
+            }
+            return result;
+        });
         const groups = groupRuns(data._font, prepared);
-        const segments = data._disableSegmentation
-            ? null
-            : segmentComputeTextRuns(groups, device.limits, { headerWords: COMPUTE_TEXT_HEADER_WORDS, recordWords: COMPUTE_TEXT_RECORD_WORDS });
         const needed = sharedCapacity(groups);
         const stage = createStage?.(groups, needed);
+        const segments = data._disableSegmentation
+            ? null
+            : segmentComputeTextRuns(groups, device.limits, { headerWords: COMPUTE_TEXT_HEADER_WORDS, recordWords: COMPUTE_TEXT_RECORD_WORDS }, options?.safeSpaces);
         const capacity = options?.capacity ?? needed;
         const runCount = prepared.length;
         const drawSizes = checkDrawBufferSizes(data, options?.pool ?? runCount, capacity);
@@ -531,10 +546,10 @@ interface PreparedRun {
     readonly glyphIds: Uint32Array;
 }
 
-function prepareRun(font: ComputeFont, text: string, run: number, seeds: Set<number>, slab: ComputeTextInputSlab): PreparedRun {
+function prepareRun(font: ComputeFont, text: string, run: number, seeds: Set<number>, slab: ComputeTextInputSlab, previous: ComputeTextSelectionReuse | undefined): PreparedRun {
     let selection: ComputeTextRunSelection;
     try {
-        selection = selectComputeTextRun(text, font, seeds, slab);
+        selection = selectComputeTextRun(text, font, seeds, slab, previous);
         if (selection.script === "deva") {
             profileSupport("indic")?.validateRun?.(selection);
             createComputeTextPlan(font, selection);

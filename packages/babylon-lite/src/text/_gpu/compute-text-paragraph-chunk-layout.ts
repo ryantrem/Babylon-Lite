@@ -9,7 +9,9 @@ export const COMPUTE_TEXT_CHUNK_LAYOUT = `
 @group(0) @binding(6) var<storage,read_write> carry: array<u32>;
 @group(0) @binding(7) var<storage,read_write> scratch: array<u32>;
 const NONE:u32 = 0xffffffffu;
-var<private> state:array<u32,32>;
+// Wrap state words 0..13; carry[16..29] and info quadrants 0/32/64/96 persist them.
+const STATE:u32 = 14u;
+var<private> state:array<u32,STATE>;
 var<private> events:u32;
 var<private> replay:bool;
 fn flag(c:u32)->u32 {
@@ -106,30 +108,30 @@ fn summary() {
 @compute @workgroup_size(1)
 fn measure() {
   if (params[4]!=0u) {
-    for (var i=0u;i<32u;i++) { carry[16u+i]=0u; }
+    for (var i=0u;i<STATE;i++) { carry[16u+i]=0u; }
     carry[24]=NONE; carry[27]=NONE;
     carry[19]=select(select(0u,info[130],info[130]!=NONE),params[1]+u32(shaped[5]),info[128]!=0u);
   }
   info[133]=carry[4];
   var equal=params[12]==0u && info[134]==params[6] && info[135]==params[9] && info[136]==info[130] && info[137]==info[131];
-  for (var i=0u;i<32u;i++) { state[i]=carry[16u+i]; info[i]=state[i]; equal=equal && info[64u+i]==state[i]; }
+  for (var i=0u;i<STATE;i++) { state[i]=carry[16u+i]; info[i]=state[i]; equal=equal && info[64u+i]==state[i]; }
   if (equal && info[138]!=0u) {
-    for (var i=0u;i<32u;i++) { state[i]=info[96u+i]; }
+    for (var i=0u;i<STATE;i++) { state[i]=info[96u+i]; }
     info[139]=0u;
   } else {
     replay=false; scan(); info[139]=1u;
   }
-  for (var i=0u;i<32u;i++) { info[32u+i]=state[i]; carry[16u+i]=state[i]; info[64u+i]=info[i]; info[96u+i]=state[i]; }
+  for (var i=0u;i<STATE;i++) { info[32u+i]=state[i]; carry[16u+i]=state[i]; info[64u+i]=info[i]; info[96u+i]=state[i]; }
   info[134]=params[6]; info[135]=params[9]; info[136]=info[130]; info[137]=info[131]; info[138]=1u;
   if (params[5]!=0u) { carry[4]+=state[1]; }
 }
 @compute @workgroup_size(1)
 fn replayChunk() {
   if (params[5]!=0u) { carry[48]=0u; }
-  for (var i=0u;i<32u;i++) { state[i]=info[i]; }
+  for (var i=0u;i<STATE;i++) { state[i]=info[i]; }
   let first=state[0];
   replay=true; events=0u; scan();
-  for (var i=0u;i<32u;i++) { if (state[i]!=info[32u+i]) { fail(2u); } }
+  for (var i=0u;i<STATE;i++) { if (state[i]!=info[32u+i]) { fail(2u); } }
   let incoming=carry[48];
   var same=params[12]==0u && info[139]==0u;
   for (var i=0u;i<17u;i++) {

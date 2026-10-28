@@ -727,7 +727,9 @@ describe("native persistent paragraph chunks", () => {
         const pairs = Math.ceil((Math.floor(native.device.limits.maxStorageBufferBindingSize / 48) + 1) / (2 * expansion));
         const required = pairs * 2 * expansion;
         expect(required * 48).toBeGreaterThan(native.device.limits.maxStorageBufferBindingSize);
-        expect(() => computeTextParagraphAllocation(native.device.limits, 1, required)).toThrow(`layout lines buffer of ${required * 48} bytes exceeds device storage limits`);
+        // Split-capacity line storage also carries one 48-byte measure summary per 2048-record block.
+        const lineBytes = (required + Math.ceil(required / 2048)) * 48;
+        expect(() => computeTextParagraphAllocation(native.device.limits, 1, required)).toThrow(`layout lines buffer of ${lineBytes} bytes exceeds device storage limits`);
         const periodic = oracleFields(face, "a a a ");
         expect(periodic).toHaveLength(6);
         const small = block(face, false);

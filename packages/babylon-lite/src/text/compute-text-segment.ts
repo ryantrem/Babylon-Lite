@@ -38,6 +38,12 @@ import { coverageIndex, glyphClass } from "./font-parser/opentype-layout.js";
 /** @internal */
 export const SEGMENT_TARGET = 64;
 
+/** @internal Paragraph flag for a U+0020 before a non-space that `safeAfter` proved safe; other such spaces hold 1. */
+export const SAFE_SPACE_FLAG = 3;
+
+/** @internal Per-group, per-logical-run paragraph flags, indexed like the `groups` passed to `segmentComputeTextRuns`. */
+export type SegmentSafeSpaces = readonly (readonly (Uint8Array | undefined)[] | undefined)[];
+
 /** @internal */
 export interface SegmentAnalysis {
     readonly space: number;
@@ -635,11 +641,20 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     };
 }
 
+// A cached paragraph flag answers exactly the spaces it covers; everything else runs the analysis.
+function safeAfterAt(analysis: SegmentAnalysis, run: SegmentRun, flags: Uint8Array | undefined, s: number): boolean {
+    if (flags !== undefined && run.scalars[s] === 0x20 && s + 1 < run.scalars.length && run.scalars[s + 1] !== 0x20) {
+        return flags[s] === SAFE_SPACE_FLAG;
+    }
+    return analysis.safeAfter(run.glyphIds, s);
+}
+
 /** @internal Segment views in shaped-slot order; null preserves the existing resident path. */
 export function segmentComputeTextRuns(
     groups: readonly SegmentGroup[],
     limits: { readonly maxComputeWorkgroupsPerDimension: number; readonly maxStorageBufferBindingSize: number; readonly maxBufferSize: number },
-    layout: { readonly headerWords: number; readonly recordWords: number }
+    layout: { readonly headerWords: number; readonly recordWords: number },
+    safeSpaces?: SegmentSafeSpaces
 ): ComputeTextSegments | null {
     if (!groups.some((group) => group.runs.some((run) => run.glyphIds.length > SEGMENT_TARGET))) {
         return null;
@@ -650,7 +665,8 @@ export function segmentComputeTextRuns(
     const starts: number[] = [];
     let split = false;
     let capacity = 1;
-    for (const group of groups) {
+    for (let g = 0; g < groups.length; g++) {
+        const group = groups[g]!;
         const runs: SegmentRun[] = [];
         let analysis: SegmentAnalysis | null | undefined;
         const outputRun = starts.length;
@@ -660,6 +676,8 @@ export function segmentComputeTextRuns(
             first[logical] = starts.length;
             let start = 0;
             const n = run.glyphIds.length;
+            const known = safeSpaces?.[g]?.[r];
+            const flags = known?.length === n ? known : undefined;
             if (n > SEGMENT_TARGET && analysis === undefined) {
                 analysis = analyzeComputeTextSegmentation(compileComputeTextProgram(group.plan));
             }
@@ -669,12 +687,12 @@ export function segmentComputeTextRuns(
             }
             while (analysis && n - start > SEGMENT_TARGET) {
                 let s = start + SEGMENT_TARGET - 1;
-                while (s > start && (!analysis.safeAfter(run.glyphIds, s) || (joiningType !== undefined && joiningType(run.scalars[s]!) !== 0))) {
+                while (s > start && (!safeAfterAt(analysis, run, flags, s) || (joiningType !== undefined && joiningType(run.scalars[s]!) !== 0))) {
                     s--;
                 }
                 if (s === start) {
                     s = start + SEGMENT_TARGET;
-                    while (s < n - 1 && (!analysis.safeAfter(run.glyphIds, s) || (joiningType !== undefined && joiningType(run.scalars[s]!) !== 0))) {
+                    while (s < n - 1 && (!safeAfterAt(analysis, run, flags, s) || (joiningType !== undefined && joiningType(run.scalars[s]!) !== 0))) {
                         s++;
                     }
                     if (s === n - 1) {

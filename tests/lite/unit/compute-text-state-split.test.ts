@@ -68,10 +68,11 @@ describe("cached fast-path state isolation", () => {
         const source = kernelSource(tier);
         const fns = functions(source);
         const main = fns.get("main")!;
-        const probe = fns.get("activeRootsProbe");
+        const probe = fns.get("activeRootsLanes");
         expect(probe).toBeDefined();
         expect(probe).not.toMatch(/rootPresence/);
-        expect(probe).toContain("if (nominalSource) { nominalMasks[index] = first; }");
+        expect(probe).toContain("nominalMasks[index] = first;");
+        expect(fns.get("activeRoots")).not.toContain("nominalMasks");
         expect(fns.get("activeRoots")).toContain("for (var word = 0u; word < width; word++)");
         expect(fns.get("activeRoots")).toContain("rootPresence[word] = bits & witnesses;");
         expect(fns.get("activeRoots")).not.toContain("Barrier(");
@@ -80,18 +81,18 @@ describe("cached fast-path state isolation", () => {
         expect(entry).toBeGreaterThan(fastReturn);
         expect(main.indexOf(generalEntry, entry + 1)).toBe(-1);
         expect(entry).toBeLessThan(main.indexOf("nominalSource = false;"));
-        expect(main.slice(0, fastReturn)).toContain("let present = activeRootsProbe(inputOrigin, length);");
+        expect(main.slice(0, fastReturn)).toContain("proveSimpleRunLanes(inputOrigin, scalarCount, activeRootsLanes(inputOrigin, scalarCount, lane), lane);");
         expect(main.slice(0, fastReturn)).not.toContain("nextLigature =");
         expect(main.slice(0, fastReturn)).toContain("let simple = workgroupUniformLoad(&simpleRoots);");
-        expect(callers(fns, "activeRootsProbe")).toEqual(["main"]);
+        expect(callers(fns, "activeRootsLanes")).toEqual(["main"]);
         expect(callers(fns, "activeRoots")).toEqual(["main", "refreshRun"]);
-        expect(callers(fns, "matchInputProbe")).toEqual(["proveSimpleRun"]);
+        expect(callers(fns, "matchInputProbe")).toEqual(["proveSimpleRunLanes"]);
         expect(callers(fns, "matchInput")).toEqual(["applySelected", "selectCandidate"]);
         // Serial refresh ignores the return and depends on the ORIGINAL helper's stores.
         expect(fns.get("refreshRun")).toContain("if ((flags & 2u) != 0u) { let present = activeRoots(base, length); }");
-        expect(fns.get("refreshRun")).not.toContain("activeRootsProbe");
+        expect(fns.get("refreshRun")).not.toContain("activeRootsLanes");
         expect(fns.get("refreshRun")).toContain("atomicOr(&presenceBits[word], bits)");
-        const fast = closure(fns, ["activeRootsProbe", "proveSimpleRun", "finishSimpleRun", "finishSimpleRunLean"]);
+        const fast = closure(fns, ["activeRootsLanes", "proveSimpleRunLanes", "finishSimpleRun", "finishSimpleRunLean"]);
         const full = closure(fns, ["main"]);
         for (const name of state) {
             expect(fast, name).not.toMatch(new RegExp(`\\b${name}\\b`));
@@ -112,11 +113,13 @@ describe("cached fast-path state isolation", () => {
             it(`retains the old path for ${variant?.id ?? "default"}/${tier}`, () => {
                 const source = kernelSource(tier, variant);
                 const main = functions(source).get("main")!;
-                expect(source).not.toMatch(/activeRootsProbe|matchInputProbe|generalPresence/);
+                expect(source).not.toMatch(/activeRootsLanes|matchInputProbe|generalPresence/);
                 expect(main.slice(0, main.indexOf("let scalarCount"))).toContain("nextLigature = 0u;");
-                expect(main).toContain("activeRoots(");
-                if (!variant) {
-                    expect(main).toContain("let present = activeRoots(inputOrigin, length);");
+                if (variant) {
+                    expect(main).toContain("activeRoots(");
+                } else {
+                    expect(main).toContain("activeRootsParallel(inputOrigin, scalarCount, lane);");
+                    expect(callers(functions(source), "matchInput")).toContain("proveSimpleRunLanes");
                 }
             });
         }

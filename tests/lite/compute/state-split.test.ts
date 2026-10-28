@@ -200,7 +200,7 @@ describe("cached full-kernel state split", () => {
               })
             : createComputeTextShapeShader(native.engine, p.capacity);
         if (!cacheless) {
-            expect(shader._source).toContain("fn activeRootsProbe(");
+            expect(shader._source).toContain("fn activeRootsLanes(");
         }
         const buffers = Object.fromEntries(
             Object.entries(inputs).map(([name, source]) => [name, createStorageBuffer(native.engine, source, { writable: name === "scratch" || name === "output" })])

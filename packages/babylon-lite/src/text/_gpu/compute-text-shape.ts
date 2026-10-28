@@ -202,28 +202,28 @@ if (lane == 0u) { ${refresh} }
 `;
 }
 
-/** Presence scans share matching/addressing; only the general scan publishes all words. */
-function presenceSource(name: "activeRoots" | "activeRootsProbe", mode: "all-words" | "word0-probe", localScratch: boolean): string {
-    const allWords = mode === "all-words";
-    const offset = allWords ? " + word" : "";
-    const value = allWords ? "present" : "first";
-    const scan = `  for (var index = 0u; index < count; index++) {
+/** General presence scan: publishes every root-presence word and returns word 0. */
+function presenceSource(): string {
+    return `fn activeRoots(base:u32, count:u32)->u32 {
+  let masks = params.programWords + params.rootCount * 4u;
+  let width = program[13u];
+  var first = 0u;
+  for (var word = 0u; word < width; word++) {
+  var bits = 0u;
+  var witnesses = 0u;
+  for (var index = 0u; index < count; index++) {
     let at = glyphAt(base, index);
     if (nominalSource || (scratch[at + 6] & 1) == 0) {
       let glyph = readGlyph(base, index);
-      let ${value} = program[masks + glyph * width${offset}];
-      bits |= ${value};
-      ${localScratch ? (allWords ? "if (nominalSource && word == 0u) { nominalMasks[index] = present; }" : "if (nominalSource) { nominalMasks[index] = first; }") : ""}
-      witnesses |= program[masks + params.glyphCount * width + glyph * width${offset}];
+      let present = program[masks + glyph * width + word];
+      bits |= present;
+      witnesses |= program[masks + params.glyphCount * width + glyph * width + word];
     }
-  }`;
-    return `fn ${name}(base:u32, count:u32)->u32 {
-  let masks = params.programWords + params.rootCount * 4u;
-  let width = program[13u];
-${allWords ? "  var first = 0u;\n  for (var word = 0u; word < width; word++) {\n" : ""}  var bits = 0u;
-  var witnesses = 0u;
-${scan}
-${allWords ? "  rootPresence[word] = bits & witnesses;\n  if (word == 0u) { first = bits & witnesses; }\n  }\n  return first;" : "  return bits & witnesses;"}
+  }
+  rootPresence[word] = bits & witnesses;
+  if (word == 0u) { first = bits & witnesses; }
+  }
+  return first;
 }`;
 }
 
@@ -274,7 +274,7 @@ var<private> lowRead:u32;
 var<private> recordMatches:bool;
 var<private> actionDelta:i32;
 var<private> mergeLength:u32;
-${masked ? "var<private> rootMask:u32;\n" : ""}${localScratch ? `var<workgroup> nominalMasks:array<u32,${scratchCapacity}>;` : ""}
+${masked ? "var<private> rootMask:u32;\n" : ""}${splitFastState ? `var<workgroup> nominalMasks:array<u32,${scratchCapacity}>;` : ""}
 ${fragments?.profilePrepass ? `fn profileBarrier() { ${storageFence} workgroupBarrier(); }\n` : ""}${Object.values(fragments ?? {}).join("\n")}${COMPUTE_TEXT_PREDICATES}
 ${fragments?.glyphAddress ? "" : "fn glyphAt(base:u32, index:u32)->u32 { return base + index * GLYPH_WORDS; }\n"}fn recordProperties(cls:u32, distance:u32)->i32 { return bitcast<i32>((cls & RECORD_CLASS_MASK) | (distance << ATTACH_SHIFT)); }
 fn recordClass(at:u32)->u32 { return u32(scratch[at + 7u]) & RECORD_CLASS_MASK; }
@@ -309,11 +309,36 @@ fn live(base:u32, index:u32, count:u32, flag:u32)->bool {
   let at = glyphAt(base, index);
   return (scratch[at + 6] & 1) == 0 && !skipped(flag, u32(scratch[at]));
 }
-${presenceSource("activeRoots", "all-words", localScratch)}${splitFastState ? "\n" + presenceSource("activeRootsProbe", "word0-probe", localScratch) : ""}
+${presenceSource()}${
+        splitFastState
+            ? `
+var<workgroup> simpleCandidates:u32;
+fn activeRootsLanes(base:u32, count:u32, lane:u32)->u32 {
+loadSimpleRootInfo(lane);
+let masks = params.programWords + params.rootCount * 4u;
+let width = program[13u];
+var bits = 0u;
+var witnesses = 0u;
+for (var index = lane; index < count; index += 32u) {
+let glyph = readGlyph(base, index);
+let first = program[masks + glyph * width];
+nominalMasks[index] = first;
+bits |= first;
+witnesses |= program[masks + params.glyphCount * width + glyph * width];
+}
+atomicOr(&presenceBits[0u], bits);
+atomicOr(&presenceWitnesses[0u], witnesses);
+workgroupBarrier();
+if (lane == 0u) { simpleCandidates = atomicLoad(&presenceBits[0u]) & atomicLoad(&presenceWitnesses[0u]); }
+return workgroupUniformLoad(&simpleCandidates);
+}`
+            : ""
+    }
 ${
-    localScratch
+    localScratch || !simpleEnabled
         ? ""
         : `fn activeRootsParallel(base:u32, count:u32, lane:u32) {
+loadSimpleRootInfo(lane);
 let masks = params.programWords + params.rootCount * 4u;
 let width = program[13u];
 for (var word = 0u; word < width; word++) {
@@ -363,17 +388,17 @@ ${splitFastState ? "" : "    nextLigature = 0u;\n"}    atomicStore(&idsChanged, 
     rootCount = params.rootCount;
     gsubCount = program[2u];
     if (length > capacity) { output[out] = ${STATUS_OVERFLOW}; terminal = 1u; }
-    if (terminal == 0u${localScratch ? "" : " && length <= 256u"}) {
-${simpleEnabled ? `let present = ${splitFastState ? "activeRootsProbe" : "activeRoots"}(inputOrigin, length);\nsimpleRoots = proveSimpleRun(inputOrigin, length, present);` : "simpleRoots = vec2u(0u);"}
-${localScratch ? "atomicStore(&firstFailure, 0xffffffffu);" : ""}
-}
 ${
     localScratch || !simpleEnabled
-        ? ""
+        ? `    if (terminal == 0u${localScratch ? "" : " && length <= 256u"}) {
+${splitFastState ? "atomicStore(&presenceBits[0u], 0u);\natomicStore(&presenceWitnesses[0u], 0u);\natomicStore(&proofFailure, 0u);" : "simpleRoots = vec2u(0u);"}
+${localScratch ? "atomicStore(&firstFailure, 0xffffffffu);" : ""}
+}`
         : `for (var word = 0u; word < 8u; word++) {
 atomicStore(&presenceBits[word], 0u);
 atomicStore(&presenceWitnesses[word], 0u);
 }
+atomicStore(&proofFailure, 0u);
 atomicStore(&firstFailureIndex, 0xffffffffu);`
 }
 ${localScratch ? "" : "atomicStore(&firstFailure, 0xffffffffu);"}
@@ -382,16 +407,13 @@ ${localScratch ? "" : "atomicStore(&firstFailure, 0xffffffffu);"}
   workgroupBarrier();
   if (workgroupUniformLoad(&terminal) != 0u) { return; }
   let scalarCount = workgroupUniformLoad(&length);
-  ${
-      localScratch || !simpleEnabled
-          ? ""
-          : `if (scalarCount > 256u) {
-activeRootsParallel(inputOrigin, scalarCount, lane);
-let candidates = workgroupUniformLoad(&rootPresence[0u]);
-let proved = proveSimpleRunParallel(inputOrigin, scalarCount, candidates, lane);
-if (lane == 0u) { simpleRoots = proved; }
-}`
-  }
+${splitFastState ? "let proved = proveSimpleRunLanes(inputOrigin, scalarCount, activeRootsLanes(inputOrigin, scalarCount, lane), lane);\nif (lane == 0u) { simpleRoots = proved; }\n" : ""}  ${
+        localScratch || !simpleEnabled
+            ? ""
+            : `activeRootsParallel(inputOrigin, scalarCount, lane);
+let proved = proveSimpleRunLanes(inputOrigin, scalarCount, workgroupUniformLoad(&rootPresence[0u]), lane);
+if (lane == 0u) { simpleRoots = proved; }`
+    }
   let simple = workgroupUniformLoad(&simpleRoots);
 ${simpleEnabled ? "if (simple.y != 0u) {\nif (simple.y == 1u) { finishSimpleRun(inputOrigin, scalarCount, simple.x, out, lane); } else { finishSimpleRunLean(inputOrigin, scalarCount, simple.x, out, lane); }\nreturn;\n}\n" : ""}${
         splitFastState

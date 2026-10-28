@@ -352,6 +352,48 @@ describe("paragraph scalar flags", () => {
         expect(evaluations).toBe(10000);
     });
 
+    it("uses a known unchanged span instead of comparing, and any lower bound of it yields identical flags", () => {
+        const before = scalars("A ".repeat(5000));
+        const safety = analysis(vi.fn(() => true));
+        const initial = computeTextParagraphFlags(before, before, safety);
+        const after = new Uint32Array(before.length + 1);
+        after.set(before.subarray(0, 5000));
+        after[5000] = 0x42;
+        after.set(before.subarray(5000), 5001);
+        const full = computeTextParagraphFlags(after, after, safety);
+        const reads = { count: 0 };
+        const counted = (array: Uint32Array) =>
+            new Proxy(array, {
+                get(target, key) {
+                    if (typeof key === "string" && /^\d+$/.test(key)) {
+                        reads.count++;
+                    }
+                    const value = Reflect.get(target, key, target);
+                    return typeof value === "function" ? value.bind(target) : value;
+                },
+            });
+        const previous = { scalars: counted(before), glyphIds: counted(before), flags: initial };
+        let evaluations = 0;
+        const evaluate = (input: Uint32Array, ids: Uint32Array, i: number, read: () => SegmentAnalysis | null) => {
+            evaluations++;
+            if (input[i] !== 32) {
+                return 0;
+            }
+            return i + 1 < input.length && input[i + 1] !== 32 && read()!.safeAfter(ids, i) ? 3 : 1;
+        };
+        expect(computeTextParagraphFlagsIncremental(previous, after, after, () => safety, evaluate, [5000, 5000])).toEqual(full);
+        expect(reads.count).toBe(0);
+        expect(evaluations).toBe(133);
+        for (const known of [
+            [4000, 5000],
+            [5000, 3500],
+            [0, 0],
+            [10, 4990],
+        ] as const) {
+            expect(computeTextParagraphFlagsIncremental(previous, after, after, () => safety, undefined, known)).toEqual(full);
+        }
+    });
+
     it("marks only ASCII spaces and only the last space in a followed run as break-after", () => {
         const input = scalars("  A   B  \u00a0\u2002");
         const safe = vi.fn((_ids: Uint32Array, _index: number) => true);
@@ -782,8 +824,10 @@ describe("paragraph per-record storage", () => {
             stage.prepare(test.data._engine, 7, 1);
             const buffer = stage._lines!;
             const dispatches = stage.dispatches({ shaped: buffer, slots: buffer, instances: buffer, indirect: buffer, status: buffer });
+            // measure, the five split-only stages (idle at this capacity), prefix, place.
             expect(dispatches.map((dispatch) => [dispatch._x, dispatch._y, dispatch.enabled])).toEqual([
                 [4, 2, true],
+                ...Array.from({ length: 5 }, () => [0, 1, false]),
                 [1, 1, true],
                 [4, 2, true],
             ]);
@@ -791,7 +835,7 @@ describe("paragraph per-record storage", () => {
             words[9] = 0;
             stage.prepare(test.data._engine, 0, 1);
             expect(dispatches.map((dispatch) => [dispatch._x, dispatch._y, dispatch.enabled])).toEqual([
-                [0, 1, false],
+                ...Array.from({ length: 6 }, () => [0, 1, false]),
                 [1, 1, true],
                 [1, 1, true],
             ]);

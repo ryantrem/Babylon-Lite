@@ -1,12 +1,13 @@
 import type { ComputeTextData, ComputeTextUpdate } from "./compute-text-data.js";
 import { computeTextDrawBufferSizes, submitComputeTextData } from "./compute-text-data.js";
 import { getComputeFontLineMetrics } from "./compute-font.js";
-import { analyzeComputeTextSegmentation } from "./compute-text-segment.js";
+import { SAFE_SPACE_FLAG, analyzeComputeTextSegmentation } from "./compute-text-segment.js";
 import type { SegmentAnalysis } from "./compute-text-segment.js";
 import { compileComputeTextProgram } from "./compute-text-program.js";
 import {
     checkComputeTextParagraphBufferSize,
     computeTextParagraphBufferSizes,
+    computeTextParagraphSplitStages,
     getComputeTextParagraphStage,
     reserveComputeTextParagraphStage,
 } from "./_gpu/compute-text-paragraph-layout.js";
@@ -14,6 +15,7 @@ import type { ComputeTextParagraphCache, ComputeTextParagraphFlagEntry } from ".
 import { updateStorageBuffer } from "../resource/storage-buffer.js";
 import { needsComputeTextParagraphChunks, submitChunkedComputeTextParagraphs } from "./compute-text-paragraph-chunks.js";
 import { computeTextNoBreakBefore, computeTextHasDevanagari } from "./compute-text-selection.js";
+import type { ComputeTextRunSelection } from "./compute-text-selection.js";
 
 /** Line box and paragraph placement for {@link updateComputeTextParagraphs}. */
 export interface ComputeTextParagraphLayout {
@@ -83,11 +85,22 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
         const rebuild = new Error("paragraph resident state requires a full rebuild");
         function submit(full: boolean): Promise<ComputeTextUpdate> {
             const dirty = full ? snapshot : snapshot.slice(prefix, snapshot.length - suffix);
+            const safeSpaces: Uint8Array[][] = [];
+            const selections: ComputeTextRunSelection[] = [];
+            const priorFlags = cache?._flags;
+            const reuseEnd = full ? (priorFlags?.length ?? 0) : (cache?._paragraphs.length ?? 0) - suffix;
+            const previousRuns = priorFlags ? dirty.map((_text, i) => (base(i) < reuseEnd ? priorFlags[base(i)]?.reuse : undefined)) : undefined;
+            function base(i: number): number {
+                return (full ? 0 : prefix) + i;
+            }
             const options = {
                 capacity: full ? 0 : cache!._capacity,
                 pool: full ? snapshot.length : cache!._pool,
                 runBase: full ? 0 : allocation!.runBase,
                 rebuild: full ? undefined : rebuild,
+                safeSpaces,
+                previous: previousRuns,
+                selections,
             };
             let candidate: ComputeTextParagraphCache;
             let epoch: number;
@@ -168,10 +181,13 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                     words[10] = measureAll ? 1 : 0;
                     words[11] = options.pool;
                     words[12] = flagStride;
+                    words[13] = computeTextParagraphSplitStages(capacity);
                     words.set(order.subarray(orderStart, orderEnd), 16 + orderStart);
                     const flagStart = 16 + options.pool + options.runBase * flagStride;
                     const flagEnd = flagStart + dirty.length * flagStride;
                     words.fill(0, flagStart, flagEnd);
+                    // Kernels read flags only below each paragraph's scalar count, so the upload stops after the last dirty paragraph's flag words.
+                    let flagUploadEnd = flagStart;
                     const flagEntries: (ComputeTextParagraphFlagEntry | undefined)[] = full
                         ? new Array(snapshot.length)
                         : (cache!._flags?.slice() ?? new Array(cache!._paragraphs.length));
@@ -179,7 +195,9 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                         flagEntries.splice(prefix, cache!._paragraphs.length - prefix - suffix, ...new Array<undefined>(dirty.length));
                     }
                     const reuseFlags = !full && cache!._paragraphs.length === snapshot.length;
-                    for (const group of groups) {
+                    for (let g = 0; g < groups.length; g++) {
+                        const group = groups[g]!;
+                        const groupFlags: Uint8Array[] = (safeSpaces[g] = []);
                         let analysis: SegmentAnalysis | null | undefined;
                         const readAnalysis = () => {
                             if (analysis === undefined) {
@@ -191,16 +209,31 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                             const run = group.runs[runIndex]!;
                             const paragraph = (full ? 0 : prefix) + group.outputRun + runIndex;
                             const old = reuseFlags ? cache!._flags?.[paragraph] : undefined;
-                            const flags = computeTextParagraphFlagsIncremental(old?.plan === group.plan ? old : undefined, run.scalars, run.glyphIds, readAnalysis);
-                            flagEntries[paragraph] = { plan: group.plan, scalars: run.scalars.slice(), glyphIds: run.glyphIds.slice(), flags };
-                            let at = flagStart + (group.outputRun + runIndex) * flagStride;
-                            for (let i = 0; i < run.scalars.length;) {
-                                let word = 0;
-                                for (let shift = 0; shift < 32 && i < run.scalars.length; shift += 8, i++) {
-                                    word |= flags[i]! << shift;
-                                }
-                                words[at++] = word;
-                            }
+                            const selection = selections[group.outputRun + runIndex]!;
+                            const prior = old?.plan === group.plan ? old : undefined;
+                            // The selection's unchanged span is proven against the record it reused; it applies only when that record is this entry's.
+                            const known = prior?.reuse && prior.reuse === previousRuns?.[group.outputRun + runIndex] ? selection._unchanged : undefined;
+                            const flags = computeTextParagraphFlagsIncremental(prior, run.scalars, run.glyphIds, readAnalysis, undefined, known);
+                            groupFlags[runIndex] = flags;
+                            // Runs view a per-submit slab nothing writes after selection; retain it unless it is much larger than this run.
+                            const runBytes = run.scalars.byteLength + run.glyphIds.byteLength;
+                            const scalars = run.scalars.buffer.byteLength > 2 * runBytes ? run.scalars.slice() : run.scalars;
+                            const glyphIds = run.glyphIds.buffer.byteLength > 2 * runBytes ? run.glyphIds.slice() : run.glyphIds;
+                            const strong = selection._reuseStrong;
+                            flagEntries[paragraph] = {
+                                plan: group.plan,
+                                scalars,
+                                glyphIds,
+                                flags,
+                                reuse:
+                                    strong === undefined
+                                        ? undefined
+                                        : { text: dirty[group.outputRun + runIndex]!, font: data._font, scalars, glyphIds, strong, firsts: selection._firsts },
+                            };
+                            // Byte i lands at bits 8 * (i % 4) of the little-endian u32 words the kernel reads.
+                            const at = flagStart + (group.outputRun + runIndex) * flagStride;
+                            new Uint8Array(words.buffer, words.byteOffset + at * 4, flags.length).set(flags);
+                            flagUploadEnd = Math.max(flagUploadEnd, at + Math.ceil(flags.length / 4));
                         }
                     }
                     stage._uploadRanges = full
@@ -208,7 +241,7 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                         : [
                               [0, 16],
                               [16 + orderStart, 16 + orderEnd],
-                              [flagStart, flagEnd],
+                              [flagStart, flagUploadEnd],
                           ];
                     candidate = {
                         _paragraphs: snapshot,
@@ -426,19 +459,21 @@ function paragraphFlag(scalars: Uint32Array, glyphIds: Uint32Array, i: number, r
             throw new Error("updateComputeTextParagraphs: shaping-safe space analysis is unavailable for a paragraph with break candidates");
         }
         if (analysis.safeAfter(glyphIds, i)) {
-            return 3;
+            return SAFE_SPACE_FLAG;
         }
     }
     return 1;
 }
 
-/** @internal Reuse only proven unchanged scalar/glyph neighborhoods; callback injection is for exact untimed tests. */
+/** @internal Reuse only proven unchanged scalar/glyph neighborhoods; callback injection is for exact untimed tests.
+ *  `known` lower-bounds the unchanged prefix and suffix lengths, skipping their comparison. */
 export function computeTextParagraphFlagsIncremental(
     previous: Pick<ComputeTextParagraphFlagEntry, "scalars" | "glyphIds" | "flags"> | undefined,
     scalars: Uint32Array,
     glyphIds: Uint32Array,
     readAnalysis: () => SegmentAnalysis | null,
-    evaluate = paragraphFlag
+    evaluate = paragraphFlag,
+    known?: readonly [prefix: number, suffix: number]
 ): Uint8Array {
     const flags = new Uint8Array(scalars.length);
     let lo = 0;
@@ -447,16 +482,20 @@ export function computeTextParagraphFlagsIncremental(
         const oldN = previous.scalars.length;
         const limit = Math.min(oldN, scalars.length);
         let prefix = 0;
-        while (prefix < limit && previous.scalars[prefix] === scalars[prefix] && previous.glyphIds[prefix] === glyphIds[prefix]) {
-            prefix++;
-        }
         let suffix = 0;
-        while (
-            suffix < limit - prefix &&
-            previous.scalars[oldN - suffix - 1] === scalars[scalars.length - suffix - 1] &&
-            previous.glyphIds[oldN - suffix - 1] === glyphIds[glyphIds.length - suffix - 1]
-        ) {
-            suffix++;
+        if (known) {
+            [prefix, suffix] = known;
+        } else {
+            while (prefix < limit && previous.scalars[prefix] === scalars[prefix] && previous.glyphIds[prefix] === glyphIds[prefix]) {
+                prefix++;
+            }
+            while (
+                suffix < limit - prefix &&
+                previous.scalars[oldN - suffix - 1] === scalars[scalars.length - suffix - 1] &&
+                previous.glyphIds[oldN - suffix - 1] === glyphIds[glyphIds.length - suffix - 1]
+            ) {
+                suffix++;
+            }
         }
         lo = Math.max(0, prefix - 66);
         hi = Math.min(scalars.length, scalars.length - suffix + 66);
