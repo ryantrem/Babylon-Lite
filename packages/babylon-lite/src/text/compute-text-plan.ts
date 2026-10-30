@@ -65,8 +65,18 @@ export interface ComputeTextProfileSupport {
 /** @internal Profile paragraph seam: space proof, paragraph flag bytes and grapheme-chain extent. */
 export interface ComputeTextParagraphProfile {
     readonly spaces: (program: ComputeTextProgram) => ComputeTextSpaceProof | null;
-    /** Writes paragraph flag bytes for scalars `[lo, hi)` to `out[outOffset + i - lo]`, reading context from the full arrays. */
-    readonly flags: (scalars: Uint32Array, glyphIds: Uint32Array, proof: ComputeTextSpaceProof | null, lo: number, hi: number, out: Uint8Array, outOffset: number) => void;
+    /** Writes paragraph flag bytes for scalars `[lo, hi)` to `out[outOffset + i - lo]`, reading context from the full arrays.
+     * Throws `unavailable` when a candidate space needs a proof and `proof` is null. */
+    readonly flags: (
+        scalars: Uint32Array,
+        glyphIds: Uint32Array,
+        proof: ComputeTextSpaceProof | null,
+        lo: number,
+        hi: number,
+        out: Uint8Array,
+        outOffset: number,
+        unavailable: string
+    ) => void;
     /** Smallest `h >= hi` from which flags no longer depend on scalars before `h - 1`. */
     readonly chainEnd: (scalars: Uint32Array, hi: number) => number;
 }
