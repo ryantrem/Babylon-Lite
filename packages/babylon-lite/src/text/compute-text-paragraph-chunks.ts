@@ -131,6 +131,10 @@ export function planComputeTextParagraphChunks(
             throw new Error(`updateComputeTextParagraphs: paragraph ${p} scalar/record counters exceed the chunk addressing ABI`);
         }
         const plan = createComputeTextPlanForSelection(font, selection);
+        if (plan._profile === "indic") {
+            // CTF-03 task 03_02 replaces this with Indic run validation, proof dispatch and profile capacity.
+            throw new Error(`updateComputeTextParagraphs: paragraph ${p} Devanagari paged paragraph layout is unsupported`);
+        }
         plans.push(plan);
         const program = compileComputeTextProgram(plan);
         const expansion = Math.max(1, program.maxExpansion);

@@ -6,13 +6,7 @@ import { join } from "node:path";
 import * as unicodeScripts from "../../../packages/babylon-lite/src/text/unicode-script-data";
 import { createComputeFontFromBuffer, mapComputeFontScalar } from "../../../packages/babylon-lite/src/text/compute-font";
 
-import {
-    selectComputeTextRun,
-    scanComputeTextRun,
-    computeTextHasDevanagari,
-    computeTextRequiredProfiles,
-    createComputeTextInputSlab,
-} from "../../../packages/babylon-lite/src/text/compute-text-selection";
+import { selectComputeTextRun, scanComputeTextRun, computeTextRequiredProfiles, createComputeTextInputSlab } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 import type { ComputeTextRunSelection, ComputeTextSelectionReuse } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 
 describe("selectComputeTextRun", () => {
@@ -20,12 +14,12 @@ describe("selectComputeTextRun", () => {
         for (const text of ["क", "१२३", "॑क", "क\u200dष", "क\u200cष"]) {
             expect(selectComputeTextRun(text)).toMatchObject({ script: "deva", direction: "ltr" });
             expect(scanComputeTextRun(text)).toMatchObject({ script: "deva", direction: "ltr", scalarCount: [...text].length });
-            expect(computeTextHasDevanagari(text)).toBe(true);
+            expect(computeTextRequiredProfiles([text])).toEqual(["indic"]);
         }
         for (const text of ["।", "॥", "।॥ 12"]) {
             expect(selectComputeTextRun(text).script).toBe("DFLT");
             expect(scanComputeTextRun(text).script).toBe("DFLT");
-            expect(computeTextHasDevanagari(text)).toBe(false);
+            expect(computeTextRequiredProfiles([text])).toEqual([]);
         }
         expect(() => selectComputeTextRun("॑")).toThrow("inherited mark without an admitted base script");
         expect(computeTextRequiredProfiles(["كتب", "क\u200dष"])).toEqual(["arabic", "indic"]);

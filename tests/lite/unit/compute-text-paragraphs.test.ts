@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createComputeFontFromBuffer, getComputeFontLineMetrics, updateComputeTextParagraphs } from "../../../packages/babylon-lite/src/index";
 import type { ComputeFont, ComputeTextParagraphLayout } from "../../../packages/babylon-lite/src/index";
 import type { EngineContext } from "../../../packages/babylon-lite/src/engine/engine";
@@ -26,7 +26,7 @@ import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/c
 import * as profiles from "../../../packages/babylon-lite/src/text/compute-text-plan";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 import { mapComputeFontScalars } from "../../../packages/babylon-lite/src/text/compute-font";
-import { computeTextHasDevanagari } from "../../../packages/babylon-lite/src/text/compute-text-selection";
+import { installComputeTextIndicProfile } from "../../../packages/babylon-lite/src/text/compute-text-indic";
 
 function font(file = "Inter.ttf"): ComputeFont {
     const bytes = readFileSync(join(process.cwd(), "lab/public/fonts", file));
@@ -525,20 +525,28 @@ describe("paragraph synchronous admission", () => {
         }
     });
 
-    it("rejects Devanagari paragraphs before allocation or profile loading", () => {
+    it("loads the Indic profile for Devanagari paragraphs before allocation, then re-enters", async () => {
         const { data, close } = block("NotoSansDevanagari-Regular.ttf");
-        const loader = vi.spyOn(profiles, "ensureComputeTextProfile");
+        const importer = vi.fn(async () => installComputeTextIndicProfile());
+        profiles.installComputeTextProfileLoader("indic", importer);
         const allocations = vi.spyOn(data._device, "createBuffer");
         allocations.mockClear();
         const version = data._revision;
+        const admitted = new Error("test stopped after storage admission");
+        vi.spyOn(paragraphStages, "reserveComputeTextParagraphStage").mockImplementation(() => {
+            throw admitted;
+        });
         try {
-            expect(() => updateComputeTextParagraphs(data, ["क"], { maxWidthPx: 200 })).toThrow("paragraph 0 Devanagari paragraph layout is unsupported");
-            expect(loader).not.toHaveBeenCalled();
+            const pending = updateComputeTextParagraphs(data, ["क"], { maxWidthPx: 200 });
             expect(allocations).not.toHaveBeenCalled();
             expect(data._revision).toBe(version);
             expect(data.status).toBe("ready");
+            await expect(pending).rejects.toThrow(`updateComputeTextParagraphs: ${admitted.message}`);
+            expect(importer).toHaveBeenCalledOnce();
+            expect(profiles.profileSupport("indic")?.paragraph).toBeDefined();
+            expect(() => updateComputeTextParagraphs(data, ["क"], { maxWidthPx: 200 })).toThrow(admitted.message);
+            expect(importer).toHaveBeenCalledOnce();
         } finally {
-            loader.mockRestore();
             allocations.mockRestore();
             close();
         }
@@ -554,7 +562,7 @@ describe("paragraph synchronous admission", () => {
 
     it.each([
         { paragraphs: ["A\tक"], message: "paragraph 0 must not contain line breaks or tabs" },
-        { paragraphs: ["A", "क", "B\t"], message: "paragraph 1 Devanagari paragraph layout is unsupported" },
+        { paragraphs: ["A", "क", "B\t"], message: "paragraph 2 must not contain line breaks or tabs" },
         { paragraphs: ["A", "B\t", "क"], message: "paragraph 1 must not contain line breaks or tabs" },
     ])("preserves control priority and the first offending paragraph: $paragraphs", ({ paragraphs, message }) => {
         expect(() => updateComputeTextParagraphs(undefined!, paragraphs, { maxWidthPx: 100 })).toThrow(message);
@@ -675,6 +683,8 @@ describe("paragraph synchronous admission", () => {
 });
 
 describe("RM-1 exact paragraph admission", () => {
+    // With the profile loaded, Devanagari admission is synchronous like every other script.
+    beforeAll(() => profiles.ensureComputeTextProfile("indic"));
     const sentinel = new Error("RM1_ADMISSION_PASSED");
     const admissionData = {
         get _chunkBudgets(): never {
@@ -699,8 +709,8 @@ describe("RM-1 exact paragraph admission", () => {
         const prefix = 0,
             suffix = 0;
         return outcome(() => {
-            // Verbatim C129 admission loop; only the surrounding fixture supplies
-            // an empty prior cache and a sentinel after successful admission.
+            // C129 admission loop, verbatim except for the Devanagari rejection CTF-03 removed; only the
+            // surrounding fixture supplies an empty prior cache and a sentinel after successful admission.
             for (let p = 0; p < paragraphs.length; p++) {
                 const text = paragraphs[p];
                 if (typeof text !== "string") {
@@ -710,9 +720,6 @@ describe("RM-1 exact paragraph admission", () => {
                     if (/[\n\r\t\u2028\u2029]/u.test(text)) {
                         throw new Error(`paragraph ${p} must not contain line breaks or tabs`);
                     }
-                    if (computeTextHasDevanagari(text)) {
-                        throw new Error(`paragraph ${p} Devanagari paragraph layout is unsupported`);
-                    }
                 }
             }
             throw sentinel;
@@ -721,16 +728,15 @@ describe("RM-1 exact paragraph admission", () => {
     it.each([
         { paragraphs: [123, "क"], message: "paragraph 0 text must be a string" },
         { paragraphs: ["A", "B\t", "क"], message: "paragraph 1 must not contain line breaks or tabs" },
-        { paragraphs: ["A", "क", "B\t"], message: "paragraph 1 Devanagari paragraph layout is unsupported" },
+        { paragraphs: ["A", "क", "B\t"], message: "paragraph 2 must not contain line breaks or tabs" },
         { paragraphs: ["\u2028"], message: "paragraph 0 must not contain line breaks or tabs" },
         { paragraphs: ["\u2029"], message: "paragraph 0 must not contain line breaks or tabs" },
-        { paragraphs: ["\u0900"], message: "paragraph 0 Devanagari paragraph layout is unsupported" },
-        ...["é", "😀", "\ud800", "\udc00", ""].map((text) => ({ paragraphs: [text], message: sentinel.message })),
+        ...["é", "😀", "\ud800", "\udc00", "", "\u0900", "क"].map((text) => ({ paragraphs: [text], message: sentinel.message })),
     ])("preserves exact first-offender admission: $paragraphs", ({ paragraphs, message }) => {
         expect(production(paragraphs as readonly string[])).toBe(message);
     });
-    it("reports Devanagari before invalid layout width", () => {
-        expect(production(["क"], { maxWidthPx: 0 })).toBe("paragraph 0 Devanagari paragraph layout is unsupported");
+    it("reports invalid layout width for Devanagari paragraphs before any profile load", () => {
+        expect(production(["क"], { maxWidthPx: 0 })).toBe("maxWidthPx must be positive or Infinity and representable as f32");
     });
     it("does not scan a tab in a cached clean prefix on the next positional update", () => {
         const test = block();

@@ -41,9 +41,16 @@ export async function runComputeTextM4Probe() {
             await updateComputeTextData(data, ["नमस्ते दुनिया"])
         ).completed;
         const indirect = [...new Uint32Array(await readStorageBuffer(data._indirect))];
-        let paragraphError: string | null = null;
+        let paragraphError: string | null = null,
+            paragraphLines = 0;
         try {
-            await updateComputeTextParagraphs(data, ["नमस्ते दुनिया"], { maxWidthPx: 400 });
+            await (
+                await updateComputeTextParagraphs(data, ["नमस्ते दुनिया"], { maxWidthPx: 200 })
+            ).completed;
+            // Instances are x, y, slot words; each wrapped line has its own baseline y.
+            const visible = new Uint32Array(await readStorageBuffer(data._indirect))[1]!;
+            const instances = new Float32Array(await readStorageBuffer(data._instances, 0, visible * 12));
+            paragraphLines = new Set(Array.from({ length: visible }, (_, i) => instances[i * 3 + 1])).size;
         } catch (error) {
             paragraphError = error instanceof Error ? error.message : String(error);
         }
@@ -69,6 +76,7 @@ export async function runComputeTextM4Probe() {
             residentStatus: 0,
             indirect,
             paragraphError,
+            paragraphLines,
             rejectError,
             rejectedPublished,
             unmappedError,

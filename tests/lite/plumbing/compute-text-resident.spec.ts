@@ -35,6 +35,7 @@ test("resident compute text shapes Roboto fi and Inter AC without mapping instan
     expect(m4.residentStatus).toBe(0);
     expect(m4.indirect[0]).toBe(6);
     expect(m4.indirect[1]).toBeGreaterThan(0);
-    expect(m4.paragraphError).toBe("updateComputeTextParagraphs: paragraph 0 Devanagari paragraph layout is unsupported");
+    expect(m4.paragraphError).toBeNull();
+    expect(m4.paragraphLines).toBe(2);
     expect(captured.errors).toEqual([]);
 });

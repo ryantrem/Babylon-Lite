@@ -4,6 +4,8 @@ import { getComputeFontLineMetrics } from "./compute-font.js";
 import { SAFE_SPACE_FLAG, computeTextParagraphSpaceProof } from "./compute-text-segment.js";
 import type { ComputeTextSpaceProof } from "./compute-text-segment.js";
 import { compileComputeTextProgram } from "./compute-text-program.js";
+import { ensureComputeTextProfile, profileSupport } from "./compute-text-plan.js";
+import type { ComputeTextParagraphProfile } from "./compute-text-plan.js";
 import {
     checkComputeTextParagraphBufferSize,
     computeTextParagraphBufferSizes,
@@ -14,7 +16,7 @@ import {
 import type { ComputeTextParagraphCache, ComputeTextParagraphFlagEntry } from "./_gpu/compute-text-paragraph-layout.js";
 import { updateStorageBuffer } from "../resource/storage-buffer.js";
 import { needsComputeTextParagraphChunks, submitChunkedComputeTextParagraphs } from "./compute-text-paragraph-chunks.js";
-import { computeTextNoBreakBefore, computeTextHasDevanagari } from "./compute-text-selection.js";
+import { computeTextNoBreakBefore, scanComputeTextRun } from "./compute-text-selection.js";
 import type { ComputeTextRunSelection } from "./compute-text-selection.js";
 
 /** Line box and paragraph placement for {@link updateComputeTextParagraphs}. */
@@ -51,9 +53,6 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                 if (/[\n\r\t\u2028\u2029]/u.test(text)) {
                     throw new Error(`paragraph ${p} must not contain line breaks or tabs`);
                 }
-                if (computeTextHasDevanagari(text)) {
-                    throw new Error(`paragraph ${p} Devanagari paragraph layout is unsupported`);
-                }
             }
         }
         if (!layout || !(layout.maxWidthPx > 0) || (layout.maxWidthPx !== Infinity && !positiveFloat(layout.maxWidthPx))) {
@@ -74,6 +73,16 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
         const maxWidth = layout.maxWidthPx;
         const requestedHeight = layout.lineHeightPx;
         const snapshot = paragraphs.slice();
+        if (!profileSupport("indic") && snapshot.slice(prefix, snapshot.length - suffix).some(selectsDevanagari)) {
+            // Load before any mutation, then re-enter: later errors keep their wording and order, rejected only on this first load.
+            const admitted = { ...layout };
+            return ensureComputeTextProfile("indic").then(
+                () => updateComputeTextParagraphs(data, snapshot, admitted),
+                (error: unknown) => {
+                    throw paragraphError(error);
+                }
+            );
+        }
         admittedSnapshot = snapshot;
         if (needsComputeTextParagraphChunks(data, snapshot, !!cache, prefix, snapshot.length - suffix)) {
             admittedLayout = { maxWidthPx: maxWidth, lineHeightPx: requestedHeight, paragraphSpacingPx: spacing, align };
@@ -213,7 +222,15 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                             const prior = old?.plan === group.plan ? old : undefined;
                             // The selection's unchanged span is proven against the record it reused; it applies only when that record is this entry's.
                             const known = prior?.reuse && prior.reuse === previousRuns?.[group.outputRun + runIndex] ? selection._unchanged : undefined;
-                            const flags = computeTextParagraphFlagsIncremental(prior, run.scalars, run.glyphIds, readProof, undefined, known);
+                            const flags = computeTextParagraphFlagsIncremental(
+                                prior,
+                                run.scalars,
+                                run.glyphIds,
+                                readProof,
+                                undefined,
+                                known,
+                                profileSupport(group.plan._profile)?.paragraph
+                            );
                             groupFlags[runIndex] = flags;
                             // Runs view a per-submit slab nothing writes after selection; retain it unless it is much larger than this run.
                             const runBytes = run.scalars.byteLength + run.glyphIds.byteLength;
@@ -448,6 +465,8 @@ export function computeTextParagraphFlags(scalars: Uint32Array, glyphIds: Uint32
     return flags;
 }
 
+const UNAVAILABLE = "updateComputeTextParagraphs: shaping-safe space analysis is unavailable for a paragraph with break candidates";
+
 function paragraphFlag(scalars: Uint32Array, glyphIds: Uint32Array, i: number, readProof: () => ComputeTextSpaceProof | null): number {
     const cp = scalars[i]!;
     if (cp !== 0x20) {
@@ -456,7 +475,7 @@ function paragraphFlag(scalars: Uint32Array, glyphIds: Uint32Array, i: number, r
     if (i + 1 < scalars.length && scalars[i + 1] !== 0x20) {
         const proof = readProof();
         if (!proof) {
-            throw new Error("updateComputeTextParagraphs: shaping-safe space analysis is unavailable for a paragraph with break candidates");
+            throw new Error(UNAVAILABLE);
         }
         if (proof.safeAfter(glyphIds, i, scalars)) {
             return SAFE_SPACE_FLAG;
@@ -466,14 +485,16 @@ function paragraphFlag(scalars: Uint32Array, glyphIds: Uint32Array, i: number, r
 }
 
 /** @internal Reuse only proven unchanged scalar/glyph neighborhoods; callback injection is for exact untimed tests.
- *  `known` lower-bounds the unchanged prefix and suffix lengths, skipping their comparison. */
+ *  `known` lower-bounds the unchanged prefix and suffix lengths, skipping their comparison.
+ *  A `profile` seam replaces the per-scalar rule and extends the recomputed range to the end of its grapheme chain. */
 export function computeTextParagraphFlagsIncremental<P extends ComputeTextSpaceProof>(
     previous: Pick<ComputeTextParagraphFlagEntry, "scalars" | "glyphIds" | "flags"> | undefined,
     scalars: Uint32Array,
     glyphIds: Uint32Array,
     readProof: () => P | null,
     evaluate: (scalars: Uint32Array, glyphIds: Uint32Array, i: number, readProof: () => P | null) => number = paragraphFlag,
-    known?: readonly [prefix: number, suffix: number]
+    known?: readonly [prefix: number, suffix: number],
+    profile?: ComputeTextParagraphProfile
 ): Uint8Array {
     const flags = new Uint8Array(scalars.length);
     let lo = 0;
@@ -505,6 +526,9 @@ export function computeTextParagraphFlagsIncremental<P extends ComputeTextSpaceP
         if (scalars.length - hi < 66) {
             hi = scalars.length;
         }
+        if (profile) {
+            hi = profile.chainEnd(scalars, hi);
+        }
         if (hi - lo >= scalars.length / 2) {
             lo = 0;
             hi = scalars.length;
@@ -512,10 +536,23 @@ export function computeTextParagraphFlagsIncremental<P extends ComputeTextSpaceP
         flags.set(previous.flags.subarray(0, lo));
         flags.set(previous.flags.subarray(hi - scalars.length + oldN), hi);
     }
-    for (let i = lo; i < hi; i++) {
-        flags[i] = evaluate(scalars, glyphIds, i, readProof);
+    if (profile) {
+        profile.flags(scalars, glyphIds, readProof(), lo, hi, flags, lo, UNAVAILABLE);
+    } else {
+        for (let i = lo; i < hi; i++) {
+            flags[i] = evaluate(scalars, glyphIds, i, readProof);
+        }
     }
     return flags;
+}
+
+/** The base selection scan, non-throwing: paragraphs it rejects (e.g. `mixed scripts`) keep their synchronous errors. */
+function selectsDevanagari(text: string): boolean {
+    try {
+        return /[^\0-\x7f]/u.test(text) && scanComputeTextRun(text).script === "deva";
+    } catch {
+        return false;
+    }
 }
 
 function positiveFloat(value: number): boolean {

@@ -332,18 +332,6 @@ export function computeTextRequiredProfiles(texts: readonly string[]): ComputeTe
     return [...(arabic ? ["arabic" as const] : []), ...(indic ? ["indic" as const] : [])];
 }
 
-/** @internal Non-throwing Script scan; Common/Inherited block members are not strong. */
-export function computeTextHasDevanagari(text: string): boolean {
-    if (!/[\u0080-\u{10ffff}]/u.test(text)) {
-        return false;
-    }
-    for (const character of text) {
-        if (classifyScalar(character.codePointAt(0)!) === 10) {
-            return true;
-        }
-    }
-    return false;
-}
 /** @internal Paragraph-level admission without a paragraph-sized decode allocation. */
 export function scanComputeTextRun(text: string): Pick<ComputeTextRunSelection, "script" | "direction" | "language" | "scalarCount"> {
     let strong = 0;
