@@ -7,6 +7,7 @@ import {
     disposeGlyphStorage,
     createComputeTextData,
     updateComputeTextData,
+    updateComputeTextParagraphs,
     createComputeTextLayer,
     disposeComputeTextData,
     createTextRenderer,
@@ -186,8 +187,54 @@ function summarizePassProfile(profiler: PassProfiler, firstFrame: number) {
     };
 }
 
+const WRAP_TEXT = "भारत एक विशाल देश है। यहाँ कर्म और धर्म का प्रकाश है। किताब और विज्ञान की शक्ति से स्त्री पुरुष सब मिलकर सुंदर भविष्य बनाएँगे।";
+const WRAP_LINE_HEIGHT_PX = 48;
+
+/** CTF-03 witness (`?wrap=1&widths=320,640`): one Hindi paragraph with a conjunct, reph, pre-base ि and danda, wrapped at each width and left rendering. Untimed. */
+async function runWrappedParagraphWitness(query: URLSearchParams) {
+    const widths = (query.get("widths") ?? "320,640").split(",").map(Number);
+    const canvas = document.getElementById("renderCanvas") as HTMLCanvasElement;
+    const response = await fetch("/fonts/NotoSansDevanagari-Regular.ttf");
+    if (!response.ok) {
+        throw new Error(`Font request failed: ${response.status}`);
+    }
+    const font = createComputeFontFromBuffer(await response.arrayBuffer());
+    const engine = await createEngine(canvas),
+        storage = createGlyphStorage();
+    const blocks = widths.map(() => createComputeTextData(engine, font, storage, "bench-wrap", { fontSizePx: 32 }));
+    const lineCounts: number[] = [];
+    let error: string | null = null;
+    try {
+        for (const [i, data] of blocks.entries()) {
+            await (
+                await updateComputeTextParagraphs(data, [WRAP_TEXT], { maxWidthPx: widths[i]!, lineHeightPx: WRAP_LINE_HEIGHT_PX })
+            ).completed;
+            // Instances are x, y, slot words; glyph y offsets stay well inside one line height of their baseline.
+            const visible = new Uint32Array(await readStorageBuffer(data._indirect))[1]!;
+            const instances = new Float32Array(await readStorageBuffer(data._instances, 0, visible * 12));
+            lineCounts.push(new Set(Array.from({ length: visible }, (_, g) => Math.round(instances[g * 3 + 1]! / WRAP_LINE_HEIGHT_PX))).size);
+        }
+    } catch (caught) {
+        error = caught instanceof Error ? caught.message : String(caught);
+    }
+    let y = 60;
+    const layers = blocks.map((data, i) => {
+        const layer = createComputeTextLayer(data, { positionPx: { x: 20, y } });
+        y += (lineCounts[i] ?? 1) * WRAP_LINE_HEIGHT_PX + 40;
+        return layer;
+    });
+    registerTextRenderer(createTextRenderer(engine.surfaces[0], { layers }));
+    await startEngine(engine);
+    const result = { mode: "wrap", text: WRAP_TEXT, widths, lineCounts, error };
+    (document.getElementById("result") as HTMLElement).textContent = JSON.stringify(result, null, 2);
+    return result;
+}
+
 export async function runComputeTextWorkload() {
     const query = new URLSearchParams(location.search);
+    if (query.has("wrap")) {
+        return runWrappedParagraphWitness(query);
+    }
     const profilePasses = query.get("profile") === "passes";
     const script = query.get("script") === "arab" ? "arab" : query.get("script") === "latn" ? "latn" : "deva";
     const arabic = script === "arab",
