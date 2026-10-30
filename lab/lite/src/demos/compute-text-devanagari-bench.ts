@@ -230,10 +230,93 @@ async function runWrappedParagraphWitness(query: URLSearchParams) {
     return result;
 }
 
+/** `workload=paragraph`: one ~2000-scalar paragraph at 32 px; wall clock from `updateComputeTextParagraphs` to `completed`. */
+async function runParagraphWorkload(script: "deva" | "latn") {
+    const latin = script === "latn";
+    const fontFile = latin ? "Roboto-Regular.ttf" : "NotoSansDevanagari-Regular.ttf";
+    const sentence = latin ? "Plain English text written for the compute text bench wraps across many lines of a long paragraph." : WRAP_TEXT;
+    const words = sentence.repeat(Math.ceil(2000 / [...sentence].length) + 1).split(" ");
+    while ([...words.join(" ")].length > 2000) {
+        words.pop();
+    }
+    const middle = words.length >> 1;
+    const texts = [words.join(" "), words.map((word, i) => (i === middle ? (latin ? "planet" : "किताब") : word)).join(" ")];
+    const canvas = document.getElementById("renderCanvas") as HTMLCanvasElement;
+    const response = await fetch(`/fonts/${fontFile}`);
+    if (!response.ok) {
+        throw new Error(`Font request failed: ${response.status} ${fontFile}`);
+    }
+    const font = createComputeFontFromBuffer(await response.arrayBuffer());
+    const engine = await createEngine(canvas),
+        storage = createGlyphStorage();
+    const options = (maxWidthPx: number) => ({ maxWidthPx, lineHeightPx: WRAP_LINE_HEIGHT_PX });
+    const timed = async (data: ReturnType<typeof createComputeTextData>, text: string, maxWidthPx: number) => {
+        const start = performance.now();
+        await (
+            await updateComputeTextParagraphs(data, [text], options(maxWidthPx))
+        ).completed;
+        return performance.now() - start;
+    };
+    const fresh = () => createComputeTextData(engine, font, storage, `bench-paragraph-${fontFile}`, { fontSizePx: 32 });
+    try {
+        const coldData = fresh();
+        const coldMs = await timed(coldData, texts[0]!, 640);
+        disposeComputeTextData(coldData);
+        const initialMs: number[] = [];
+        for (let i = 0; i < 7; i++) {
+            const data = fresh();
+            initialMs.push(await timed(data, texts[0]!, 640));
+            disposeComputeTextData(data);
+        }
+        const data = fresh();
+        try {
+            await timed(data, texts[0]!, 640);
+            const editMs: number[] = [],
+                widthMs: number[] = [];
+            for (let i = 1; i <= 10; i++) {
+                editMs.push(await timed(data, texts[i % 2]!, 640));
+            }
+            for (let i = 1; i <= 10; i++) {
+                widthMs.push(await timed(data, texts[0]!, i % 2 ? 480 : 640));
+            }
+            const visible = new Uint32Array(await readStorageBuffer(data._indirect))[1]!;
+            if (data.status !== "ready" || visible <= 0) {
+                throw new Error("Paragraph workload produced invalid status or no resident instances; do not publish timings.");
+            }
+            const result = {
+                script,
+                workload: "paragraph-2000-scalars",
+                fontFile,
+                scalars: texts.map((text) => [...text].length),
+                coldMs,
+                initialMs: statistics(initialMs),
+                editMs: statistics(editMs),
+                widthMs: statistics(widthMs),
+                visibleInstances: visible,
+                endpoint:
+                    "Wall clock from updateComputeTextParagraphs to completed; initial uses fresh data (n=7), edit swaps one middle word (n=10), width alternates 480/640 (n=10).",
+            };
+            (document.getElementById("result") as HTMLElement).textContent = JSON.stringify(result, null, 2);
+            return result;
+        } finally {
+            disposeComputeTextData(data);
+        }
+    } finally {
+        disposeGlyphStorage(storage);
+        disposeEngine(engine);
+    }
+}
+
 export async function runComputeTextWorkload() {
     const query = new URLSearchParams(location.search);
     if (query.has("wrap")) {
         return runWrappedParagraphWitness(query);
+    }
+    if (query.get("workload") === "paragraph") {
+        if (query.get("script") === "arab") {
+            throw new Error("Arabic paragraphs are not supported.");
+        }
+        return runParagraphWorkload(query.get("script") === "latn" ? "latn" : "deva");
     }
     const profilePasses = query.get("profile") === "passes";
     const script = query.get("script") === "arab" ? "arab" : query.get("script") === "latn" ? "latn" : "deva";
@@ -390,7 +473,7 @@ export async function runComputeTextWorkload() {
                   ? "Latin control with the same protocol and block shape."
                   : "Candidate absolute workload only: baseline 27c6ecb3 does not support Devanagari; no B/A ratio.",
             passProfile,
-            segmentation: arabic ? "CTF-14 whole RTL run" : latin ? "Latin segmentation as admitted" : "CTF-16 whole run; independent blocks are parallel",
+            segmentation: arabic ? "CTF-14 whole RTL run" : latin ? "Latin segmentation as admitted" : "CTF-16 runs split at proven spaces; independent blocks are parallel",
         };
         (document.getElementById("result") as HTMLElement).textContent = JSON.stringify(result, null, 2);
         return result;

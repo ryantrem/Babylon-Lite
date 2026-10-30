@@ -30,6 +30,15 @@ interface Row {
 }
 const cases = (JSON.parse(readFileSync("tests/lite/compute/references/deva-harfbuzz-11.0.1.json", "utf8")) as { cases: Row[] }).cases;
 const expected = (text: string) => cases.find((row) => row.text === text && row.expected === "positive")!.records!;
+interface ParagraphRow {
+    id: string;
+    text: string;
+    length: number;
+    tags: string[];
+    proven: number[];
+    whole: number[][];
+}
+const paragraphCases = (JSON.parse(readFileSync("tests/lite/compute/references/deva-paragraph-harfbuzz-11.0.1.json", "utf8")) as { cases: ParagraphRow[] }).cases;
 
 function pipelineStarted(native: NativeHarness): Promise<void> {
     let notify!: () => void;
@@ -68,7 +77,71 @@ describe("native Indic resident, proof and lifetime integration", () => {
     });
     afterAll(() => installComputeTextProfile("indic", original));
 
-    it("explicit whole-run normalization proof fallback, not fake segmentation, preserves long independent records", async () => {
+    it("segments long runs at proven Indic spaces and stitches HarfBuzz whole-paragraph records", async () => {
+        const native = await engine(),
+            face = fixture("NotoSansDevanagari-Regular.ttf");
+        const storage = createGlyphStorage(),
+            data = createComputeTextData(native.engine, face.font, storage, "indic-segments");
+        try {
+            const rows = paragraphCases.filter((row) => row.length > 64 && !row.tags.includes("reference-only"));
+            expect(rows.map((row) => row.id)).toEqual(expect.arrayContaining(["plain-rain", "overlong-single", "multiseam-forced", "multiseam-default"]));
+            for (const row of rows) {
+                const selection = selectComputeTextRun(row.text),
+                    plan = createComputeTextPlan(face.font, selection);
+                const groups = [{ plan, runs: [{ scalars: selection._scalars, glyphIds: selection._scalars.map((cp) => face.oracle.glyphId(cp)) }], outputRun: 0 }];
+                const segments = segmentComputeTextRuns(groups, native.device.limits, { headerWords: 4, recordWords: 6 });
+                const starts = segments ? [...segments.table.subarray(2)] : [0];
+                expect(starts[0], row.id).toBe(0);
+                for (const start of starts.slice(1)) {
+                    expect(row.proven, `${row.id} split after ${start - 1}`).toContain(start - 1);
+                }
+                expect(starts.length > 1, row.id).toBe(row.proven.some((space) => space > 0 && space < row.length - 1));
+                await (
+                    await updateComputeTextData(data, [row.text])
+                ).completed;
+                const words = new Int32Array(await readStorageBuffer(data._shaped));
+                expect([...words.slice(0, 2)], row.id).toEqual([0, row.whole.length]);
+                expect([...words.slice(4, 4 + row.whole.length * 6)], row.id).toEqual(row.whole.flat());
+            }
+        } finally {
+            disposeComputeTextData(data);
+            disposeGlyphStorage(storage);
+        }
+    });
+
+    it("segmented and whole-run shaping agree on long runs built from the hard paragraph rows", async () => {
+        const native = await engine(),
+            face = fixture("NotoSansDevanagari-Regular.ttf");
+        const storage = createGlyphStorage(),
+            data = createComputeTextData(native.engine, face.font, storage, "indic-segments-hard");
+        try {
+            const hard = paragraphCases
+                .filter((row) => row.length <= 64 && /\S/.test(row.text) && !row.tags.includes("mixed") && !row.tags.includes("reference-only"))
+                .map((row) => row.text);
+            const texts = [hard.join(" "), [...hard].reverse().join(" "), hard.map((text) => `${text} ${text}`).join(" ")];
+            for (const text of texts) {
+                const selection = selectComputeTextRun(text),
+                    plan = createComputeTextPlan(face.font, selection);
+                const groups = [{ plan, runs: [{ scalars: selection._scalars, glyphIds: selection._scalars.map((cp) => face.oracle.glyphId(cp)) }], outputRun: 0 }];
+                expect(segmentComputeTextRuns(groups, native.device.limits, { headerWords: 4, recordWords: 6 })?.count).toBeGreaterThan(1);
+                const results: number[][] = [];
+                for (const disabled of [false, true]) {
+                    data._disableSegmentation = disabled;
+                    await (
+                        await updateComputeTextData(data, [text])
+                    ).completed;
+                    const words = new Int32Array(await readStorageBuffer(data._shaped));
+                    results.push([...words.slice(0, 4 + words[1]! * 6)]);
+                }
+                expect(results[0]).toEqual(results[1]);
+            }
+        } finally {
+            disposeComputeTextData(data);
+            disposeGlyphStorage(storage);
+        }
+    });
+
+    it("text-block analysis stays null for Indic; disabling segmentation preserves long independent records", async () => {
         const native = await engine(),
             face = fixture("NotoSansDevanagari-Regular.ttf");
         const storage = createGlyphStorage(),
@@ -79,7 +152,7 @@ describe("native Indic resident, proof and lifetime integration", () => {
                 plan = createComputeTextPlan(face.font, selection);
             const groups = [{ plan, runs: [{ scalars: selection._scalars, glyphIds: selection._scalars.map((cp) => face.oracle.glyphId(cp)) }], outputRun: 0 }];
             expect(analyzeComputeTextSegmentation(compileComputeTextProgram(plan))).toBeNull();
-            expect(segmentComputeTextRuns(groups, native.device.limits, { headerWords: 4, recordWords: 6 })).toBeNull();
+            expect(segmentComputeTextRuns(groups, native.device.limits, { headerWords: 4, recordWords: 6 })?.count).toBeGreaterThan(1);
             for (const disabled of [false, true]) {
                 data._disableSegmentation = disabled;
                 await (

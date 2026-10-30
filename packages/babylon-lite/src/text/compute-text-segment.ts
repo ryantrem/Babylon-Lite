@@ -380,7 +380,7 @@ export function enumerateCrossings(program: ComputeTextProgram, bStar: Uint32Arr
     return { crossings, allSlots, maxD, inB };
 }
 
-/** @internal Paragraph space proof: the profile's lazy proof for Indic plans, otherwise the generic analysis. */
+/** @internal Space proof for paragraph breaks and run segmentation: the profile's lazy proof for Indic plans, otherwise the generic analysis. */
 export function computeTextParagraphSpaceProof(program: ComputeTextProgram): ComputeTextSpaceProof | null {
     return program.plan._profile === "indic" ? (profileSupport("indic")?.paragraph?.spaces(program) ?? null) : analyzeComputeTextSegmentation(program);
 }
@@ -388,9 +388,8 @@ export function computeTextParagraphSpaceProof(program: ComputeTextProgram): Com
 function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     const font = program.plan.font;
     // Indic normalization expands/contracts nominal slots before the lookup
-    // proof's producer-span induction begins. Space locality alone cannot
-    // certify that induction: retain exact whole-run execution until those
-    // producers are represented. No limit or existing-script proof is relaxed.
+    // proof's producer-span induction begins, so this analysis cannot certify
+    // Indic spaces; the profile's barrier proof does (computeTextParagraphSpaceProof).
     if (program.plan._profile === "indic") {
         return null;
     }
@@ -724,11 +723,11 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
 }
 
 // A cached paragraph flag answers exactly the spaces it covers; everything else runs the analysis.
-function safeAfterAt(analysis: SegmentAnalysis, run: SegmentRun, flags: Uint8Array | undefined, s: number): boolean {
+function safeAfterAt(proof: ComputeTextSpaceProof, run: SegmentRun, flags: Uint8Array | undefined, s: number): boolean {
     if (flags !== undefined && run.scalars[s] === 0x20 && s + 1 < run.scalars.length && run.scalars[s + 1] !== 0x20) {
         return flags[s] === SAFE_SPACE_FLAG;
     }
-    return analysis.safeAfter(run.glyphIds, s);
+    return proof.safeAfter(run.glyphIds, s, run.scalars);
 }
 
 /** @internal Segment views in shaped-slot order; null preserves the existing resident path. */
@@ -750,7 +749,7 @@ export function segmentComputeTextRuns(
     for (let g = 0; g < groups.length; g++) {
         const group = groups[g]!;
         const runs: SegmentRun[] = [];
-        let analysis: SegmentAnalysis | null | undefined;
+        let analysis: ComputeTextSpaceProof | null | undefined;
         const outputRun = starts.length;
         for (let r = 0; r < group.runs.length; r++) {
             const run = group.runs[r]!;
@@ -761,7 +760,7 @@ export function segmentComputeTextRuns(
             const known = safeSpaces?.[g]?.[r];
             const flags = known?.length === n ? known : undefined;
             if (n > SEGMENT_TARGET && analysis === undefined) {
-                analysis = analyzeComputeTextSegmentation(compileComputeTextProgram(group.plan));
+                analysis = computeTextParagraphSpaceProof(compileComputeTextProgram(group.plan));
             }
             const joiningType = group.plan._profile === "arabic" ? profileSupport("arabic")?.joiningType : undefined;
             if (group.plan._profile === "arabic" && !joiningType) {
@@ -795,7 +794,7 @@ export function segmentComputeTextRuns(
         }
         const expansion = compileComputeTextProgram(group.plan).maxExpansion;
         for (const run of runs) {
-            capacity = Math.max(capacity, run.scalars.length * expansion);
+            capacity = Math.max(capacity, group.plan._profileData?.capacity?.(run.scalars) ?? run.scalars.length * expansion);
         }
         segmented.push({ plan: group.plan, runs, outputRun });
     }

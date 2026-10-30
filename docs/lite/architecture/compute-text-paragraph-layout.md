@@ -368,9 +368,10 @@ flags never need context across a seam, because every non-initial chunk starts
 after a proven space (D1).
 
 A `null` proof gives the existing unavailable error for paragraphs with break
-candidates. Run segmentation (`analyzeComputeTextSegmentation`) stays disabled for
-indic plans (CTF-16): the paragraph proof only selects line breaks; whole
-paragraphs are still shaped as one run.
+candidates. The same proof also drives run segmentation for indic plans (CTF-16):
+`segmentComputeTextRuns` splits long runs and monolithic paragraphs at proven spaces,
+reusing cached paragraph flags where present. `analyzeComputeTextSegmentation` itself
+stays null for indic plans.
 
 ## Internal Architecture
 

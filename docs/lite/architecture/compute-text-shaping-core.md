@@ -5,7 +5,7 @@
 > Milestone 4 slice 1: **Devanagari, pinned Noto Sans Devanagari 2.007**.
 > Milestone 4 and the broader user task remain open. See the durable
 > [follow-up boundaries](compute-text-follow-ups.md), especially CTF-01/02/03/04,
-> CTF-14 (whole RTL runs), CTF-16 (whole Indic runs), and CTF-17 (multi-record
+> CTF-14 (whole RTL runs), CTF-16 (Indic run segmentation, done), and CTF-17 (multi-record
 > contextual Ligature admission). No arbitrary-font conformance or measured
 > performance claim follows from admitting a font.
 
@@ -174,7 +174,9 @@ selects global scratch. Both allocator values and actual declarations are tested
 Variants are profile/word-width/mask/plane/memory-tier choices, justified by GPU
 storage and execution needs. Default fast paths remain; source eligibility is not
 speed evidence. Each independent run uses one workgroup. Proven generic LTR runs
-can segment and stitch; Arabic remains whole (CTF-14), Indic remains whole (CTF-16).
+can segment and stitch. Indic runs segment at spaces certified by the profile's barrier
+space proof (`computeTextParagraphSpaceProof`, CTF-16), with per-segment capacity from
+the profile; Arabic remains whole (CTF-14).
 Neither boundary lowers the public device-binding run maximum.
 
 Each public/resident shape output has four header words (status/count/failure
@@ -400,13 +402,14 @@ identity and structural executor eligibility are not speed measurements.
 3. **Required CTF-16 workload:**
    `node scripts/measure-compute-text-devanagari.mjs --workload=single`.
    This is one exactly 2,000-scalar Hindi run, padded only at a word boundary.
-   It measures the honest whole-run limitation. It is not 100 small blocks or
-   claimed Indic segmentation.
+   It measures long-run segmentation at proven spaces; it is not 100 small blocks.
+   `--workload=paragraph` times one ~2,000-scalar paragraph (fresh initial layout,
+   one-word edit, width change) through `updateComputeTextParagraphs`.
 4. CTF-14/C9 cost:
    `node scripts/measure-compute-text-devanagari.mjs --script=arab`.
    Record absolute Arabic block results with the same bounded protocol.
    Arabic whole-run/RTL behavior is not an independent split proof.
-5. Latin control: rerun steps 2 and 3 with `--script=latn` (Roboto, 67 scalars per
+5. Latin control: rerun steps 2 and 3 (including `--workload=paragraph`) with `--script=latn` (Roboto, 67 scalars per
    block; the single workload uses the same 2,000-scalar padding rule). This gives
    the same protocol, block shape and frame pacing, so complex-script costs can be
    expressed relative to Latin on the same device and run session. Interleave the

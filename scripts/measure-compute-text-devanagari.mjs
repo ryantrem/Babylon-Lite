@@ -6,12 +6,12 @@ import { writeFileSync } from "node:fs";
 import { basename } from "node:path";
 const args = process.argv.slice(2);
 for (const arg of args) {
-    if (!/^--script=(?:deva|arab|latn)$|^--workload=(?:blocks|single)$|^--base=https?:\/\/|^--profile=passes$|^--cpu-profile=\/.+\.cpuprofile$/.test(arg)) {
+    if (!/^--script=(?:deva|arab|latn)$|^--workload=(?:blocks|single|paragraph)$|^--base=https?:\/\/|^--profile=passes$|^--cpu-profile=\/.+\.cpuprofile$/.test(arg)) {
         throw new Error(`Unknown workload argument: ${arg}`);
     }
 }
 const script = args.includes("--script=arab") ? "arab" : args.includes("--script=latn") ? "latn" : "deva";
-const workload = args.includes("--workload=single") ? "single" : "blocks";
+const workload = args.includes("--workload=single") ? "single" : args.includes("--workload=paragraph") ? "paragraph" : "blocks";
 const profilePasses = args.includes("--profile=passes");
 const cpuProfilePath = args.find((arg) => arg.startsWith("--cpu-profile="))?.slice(14);
 const base = new URL(args.find((arg) => arg.startsWith("--base="))?.slice(7) ?? "http://localhost:5187");
@@ -27,6 +27,8 @@ try {
         server = spawn("pnpm", ["--filter", "@babylon-lite/lab", "dev"], {
             env: { ...process.env, LAB_DEV_PORT: base.port },
             stdio: ["ignore", "pipe", "inherit"],
+            // Own process group: killing pnpm alone leaves Vite holding the stdout pipe and the runner never exits.
+            detached: true,
         });
         server.stdout.pipe(process.stderr);
         for (let i = 0; i < 30; i++) {
@@ -91,7 +93,7 @@ try {
     }
 } finally {
     if (server?.pid && server.exitCode === null) {
-        server.kill("SIGTERM");
+        process.kill(-server.pid, "SIGTERM");
     }
 }
 
