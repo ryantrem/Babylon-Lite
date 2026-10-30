@@ -1,12 +1,14 @@
 import type { ComputeTextData, ComputeTextDrawRange } from "../compute-text-data.js";
 import type { ComputeTextChunkPlan, ComputeTextSourceChunk } from "../compute-text-paragraph-chunks.js";
-import { computeTextNoBreakBefore, decodeComputeTextChunk } from "../compute-text-selection.js";
+import { decodeComputeTextChunk } from "../compute-text-selection.js";
 import { mapComputeFontScalars } from "../compute-font.js";
 import { computeTextParagraphSpaceProof } from "../compute-text-segment.js";
 import type { ComputeTextSpaceProof } from "../compute-text-segment.js";
 import { compileComputeTextProgram } from "../compute-text-program.js";
 import type { ComputeTextParagraphLayout } from "../compute-text-paragraphs.js";
+import { computeTextParagraphFlagsIncremental } from "../compute-text-paragraph-flags.js";
 import type { ComputeTextPlan } from "../compute-text-plan.js";
+import { profileSupport } from "../compute-text-plan.js";
 import type { StorageBuffer } from "../../resource/storage-buffer.js";
 import { createStorageBuffer, disposeStorageBuffer, updateStorageBuffer } from "../../resource/storage-buffer.js";
 import type { ComputeStorageBufferRange } from "../../compute/compute-storage-buffer-binding.js";
@@ -19,7 +21,7 @@ import type { ComputeTask } from "../../compute/compute-task.js";
 import { createComputeShader, disposeComputeShader } from "../../compute/compute-shader.js";
 import type { ComputeShader } from "../../compute/compute-shader.js";
 import { submitDeferredComputeTaskResult } from "../../compute/compute-task-readback.js";
-import { computeTextVariantTier, createComputeTextShapeShader, createShapeSchedule, prepareComputeTextShapeWords } from "./compute-text-shape.js";
+import { computeTextShapeCapacity, computeTextVariantTier, createComputeTextShapeShader, createShapeSchedule, prepareComputeTextShapeWords } from "./compute-text-shape.js";
 import { COMPUTE_TEXT_STITCH_KERNEL } from "./compute-text-resident.js";
 import { COMPUTE_TEXT_CHUNK_LAYOUT, COMPUTE_TEXT_CHUNK_PUBLISH } from "./compute-text-paragraph-chunk-layout.js";
 
@@ -434,11 +436,35 @@ export function installComputeTextChunks(data: ComputeTextData, state: ComputeTe
     state.plan = plan;
 }
 
+/** @internal Chunk flag bytes from the monolithic producer over the context-extended chunk, so paged and monolithic flags are
+ *  byte-identical. Byte 0 is the preceding scalar's flag, which successor metadata may request for its first output cluster. */
+export function computeTextChunkFlags(
+    plan: ComputeTextPlan,
+    proof: ComputeTextSpaceProof | null,
+    contextScalars: Uint32Array,
+    contextGlyphs: Uint32Array,
+    prefixScalars: number,
+    scalars: number,
+    size: number
+): Uint8Array {
+    const contextFlags = computeTextParagraphFlagsIncremental(
+        undefined,
+        contextScalars,
+        contextGlyphs,
+        () => proof,
+        undefined,
+        undefined,
+        profileSupport(plan._profile)?.paragraph
+    );
+    const flags = new Uint8Array(size);
+    flags.set(contextFlags.subarray(Math.max(0, prefixScalars - 1), prefixScalars + scalars), prefixScalars ? 0 : 1);
+    return flags;
+}
+
 /** @internal Shape only dirty chunks using the existing interpreter/schedule and local stitch ABI. */
 async function shapeChunks(data: ComputeTextData, state: ComputeTextChunkState, assertLive: () => void): Promise<void> {
     const engine = data._engine;
     let selectedPlan: ComputeTextPlan | undefined;
-    let expansion = 1;
     let proof: ComputeTextSpaceProof | null = null;
     for (const paragraph of state.chunks) {
         for (const chunk of paragraph) {
@@ -448,9 +474,7 @@ async function shapeChunks(data: ComputeTextData, state: ComputeTextChunkState, 
             const source = chunk.source;
             if (selectedPlan !== source.plan) {
                 selectedPlan = source.plan;
-                const program = compileComputeTextProgram(selectedPlan);
-                expansion = Math.max(1, program.maxExpansion);
-                proof = computeTextParagraphSpaceProof(program);
+                proof = computeTextParagraphSpaceProof(compileComputeTextProgram(selectedPlan));
             }
             const full = source.before + source.text + source.after;
             const context = decodeComputeTextChunk(full);
@@ -466,7 +490,7 @@ async function shapeChunks(data: ComputeTextData, state: ComputeTextChunkState, 
                 first = end;
                 return run;
             });
-            const capacity = Math.max(1, ...runs.map((run) => run.scalars.length * expansion));
+            const capacity = computeTextShapeCapacity(source.plan, runs);
             const prepared = prepareComputeTextShapeWords(source.plan, runs, 0, capacity, data._device.limits);
             const outputBytes = runs.length * (4 + capacity * 6) * 4;
             const shapeBuffers = {
@@ -510,32 +534,7 @@ async function shapeChunks(data: ComputeTextData, state: ComputeTextChunkState, 
             assertLive();
             submitComputeTasks([schedule.task, stitchTask]);
             chunk.shapes++;
-            const flagBytes = new Uint8Array(chunk.flags.size);
-            const classify = (cp: number) => (cp === 32 ? 1 : computeTextNoBreakBefore(cp));
-            const before = source.before
-                ? source.before.codePointAt(
-                      source.before.length - (source.before.charCodeAt(source.before.length - 1) >= 0xdc00 && source.before.charCodeAt(source.before.length - 1) <= 0xdfff ? 2 : 1)
-                  )!
-                : 0;
-            flagBytes[0] = classify(before);
-            for (let i = 0; i < scalars.length; i++) {
-                const cp = scalars[i]!;
-                let f = classify(cp);
-                const at = context.offsets[prefixScalars + i]!;
-                if (cp === 32 && at + 1 < full.length && full.charCodeAt(at + 1) !== 32) {
-                    if (!proof) {
-                        throw new Error("updateComputeTextParagraphs: independent space analysis is unavailable");
-                    }
-                    if (proof.safeAfter(contextGlyphs, prefixScalars + i, context.scalars)) {
-                        f |= 2;
-                    }
-                }
-                flagBytes[i + 1] = f;
-            }
-            // The successor metadata may request the scalar preceding its first output cluster.
-            if (before === 32 && source.text.length && source.text.charCodeAt(0) !== 32 && proof?.safeAfter(contextGlyphs, prefixScalars - 1, context.scalars)) {
-                flagBytes[0] |= 2;
-            }
+            const flagBytes = computeTextChunkFlags(source.plan, proof, context.scalars, contextGlyphs, prefixScalars, scalars.length, chunk.flags.size);
             updateStorageBuffer(engine, chunk.flags.buffer, flagBytes, chunk.flags.offset);
         }
     }

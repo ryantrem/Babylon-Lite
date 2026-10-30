@@ -7,7 +7,7 @@ import type { EngineContext } from "../../../packages/babylon-lite/src/engine/en
 import { createComputeTextData, disposeComputeTextData } from "../../../packages/babylon-lite/src/text/compute-text-data";
 import { createGlyphStorage, disposeGlyphStorage } from "../../../packages/babylon-lite/src/text/glyph-storage";
 import * as paragraphStages from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
-import { computeTextParagraphFlagsIncremental } from "../../../packages/babylon-lite/src/text/compute-text-paragraphs";
+import { computeTextParagraphFlagsIncremental } from "../../../packages/babylon-lite/src/text/compute-text-paragraph-flags";
 import * as profiles from "../../../packages/babylon-lite/src/text/compute-text-plan";
 import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/compute-text-plan";
 import { compileComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
@@ -176,13 +176,15 @@ describe("Devanagari monolithic paragraph flags", () => {
         }
     });
 
-    it("rejects paged Devanagari layout until the paged planner supports it", async () => {
+    it("rejects unsupported Devanagari scalars on the paged path with the monolithic message", async () => {
         const { data, close } = block();
-        data._chunkBudgets = { force: true };
         try {
-            await expect((async () => updateComputeTextParagraphs(data, ["नमस्ते दुनिया"], { maxWidthPx: 100 }))()).rejects.toThrow(
-                "updateComputeTextParagraphs: paragraph 0 Devanagari paged paragraph layout is unsupported"
-            );
+            for (const budgets of [{ monolithic: true }, { force: true }]) {
+                data._chunkBudgets = budgets;
+                await expect((async () => updateComputeTextParagraphs(data, ["क\u25cc ख"], { maxWidthPx: 100 }))()).rejects.toThrow(
+                    "updateComputeTextParagraphs: run 0 unsupported scalar in Devanagari run at scalar 1 U+25CC"
+                );
+            }
         } finally {
             close();
         }

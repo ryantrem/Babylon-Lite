@@ -12,10 +12,9 @@ import {
     computeTextParagraphCacheValid,
     computeTextParagraphAllocation,
     computeTextParagraphDiff,
-    computeTextParagraphFlags,
-    computeTextParagraphFlagsIncremental,
     computeTextParagraphPoolSize,
 } from "../../../packages/babylon-lite/src/text/compute-text-paragraphs";
+import { computeTextParagraphFlags, computeTextParagraphFlagsIncremental } from "../../../packages/babylon-lite/src/text/compute-text-paragraph-flags";
 import { createComputeTextParagraphStage } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
 import * as paragraphStages from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
 import type { ComputeTextParagraphCache } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";

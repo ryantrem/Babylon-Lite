@@ -1,12 +1,13 @@
 import type { ComputeFont } from "./compute-font.js";
 import { mapComputeFontScalars } from "./compute-font.js";
 import { decodeComputeTextChunk, prepareComputeTextChunk, scanComputeTextRun } from "./compute-text-selection.js";
-import { createComputeTextPlanForSelection } from "./compute-text-plan.js";
+import type { ComputeTextRunSelection } from "./compute-text-selection.js";
+import { createComputeTextPlanForSelection, profileSupport } from "./compute-text-plan.js";
 import type { ComputeTextPlan } from "./compute-text-plan.js";
 import { compileComputeTextProgram } from "./compute-text-program.js";
 import { computeTextParagraphSpaceProof } from "./compute-text-segment.js";
 import type { ComputeTextSpaceProof } from "./compute-text-segment.js";
-import { checkComputeTextShapeBounds, prepareComputeTextShapeWords } from "./_gpu/compute-text-shape.js";
+import { checkComputeTextShapeBounds, computeTextPlanVariant, computeTextShapeCapacity, prepareComputeTextShapeWords } from "./_gpu/compute-text-shape.js";
 import { installComputeTextClosure, resetComputeTextDrawBuffers, submitComputeTextPrepared } from "./compute-text-data.js";
 import type { ComputeTextData, ComputeTextUpdate } from "./compute-text-data.js";
 import { closeComputeTextGlyphs } from "./compute-text-closure.js";
@@ -96,7 +97,6 @@ export function planComputeTextParagraphChunks(
         throw new Error(`updateComputeTextParagraphs: chunk metadata buffer of 1024 bytes exceeds binding limit ${bindingLimit}`);
     }
     const target = Math.max(1, Math.min(16384, budgets?.records ?? 16384, Math.floor((bindingLimit - 144) / 48)));
-    const maxBatchProduct = Math.floor((3 * 1024 * 1024 - 80 * target - 1024) / 56);
     const seeds = new Set<number>();
     const plans: ComputeTextPlan[] = [];
     const chunks: ComputeTextSourceChunk[][] = [];
@@ -131,14 +131,24 @@ export function planComputeTextParagraphChunks(
             throw new Error(`updateComputeTextParagraphs: paragraph ${p} scalar/record counters exceed the chunk addressing ABI`);
         }
         const plan = createComputeTextPlanForSelection(font, selection);
-        if (plan._profile === "indic") {
-            // CTF-03 task 03_02 replaces this with Indic run validation, proof dispatch and profile capacity.
-            throw new Error(`updateComputeTextParagraphs: paragraph ${p} Devanagari paged paragraph layout is unsupported`);
+        const validateRun = profileSupport(plan._profile)?.validateRun;
+        if (validateRun) {
+            try {
+                validateRun({ _scalars: decodeComputeTextChunk(text).scalars } as ComputeTextRunSelection);
+            } catch (error) {
+                // The monolithic prepareRun message: paragraphs are runs.
+                throw new Error(`updateComputeTextParagraphs: run ${p} ${(error as Error).message}`, { cause: error });
+            }
         }
         plans.push(plan);
+        const variant = computeTextPlanVariant(plan);
+        // One batch's segments x segment capacity, at 24 output bytes plus the kernel variant's scratch per record, share the 3 MiB workspace.
+        const maxBatchProduct = Math.floor((3 * 1024 * 1024 - 80 * target - 1024) / (24 + variant.glyphWords * 4 * variant.planes + (variant.auxBytes?.(1) ?? 0)));
         const program = compileComputeTextProgram(plan);
         const expansion = Math.max(1, program.maxExpansion);
-        totalRecords += Math.max(1, selection.scalarCount * expansion);
+        // Glyph-record upper bound, as computeTextShapeCapacity; profile capacities are additive over scalars.
+        const records = (source: string, scalars: number) => plan._profileData?.capacity?.(decodeComputeTextChunk(source).scalars) ?? scalars * expansion;
+        totalRecords += Math.max(1, records(text, selection.scalarCount));
         if (!Number.isSafeInteger(totalRecords) || totalRecords + paragraphs.length > 0xfffffffe) {
             throw new Error(`updateComputeTextParagraphs: paragraph ${p} conservative record/line counters exceed the chunk addressing ABI`);
         }
@@ -181,6 +191,7 @@ export function planComputeTextParagraphChunks(
         let scalarStart = 0;
         let cursor = 0;
         let count = 0;
+        let countRecords = 0;
         let maxSegmentCapacity = 0;
         let segments: number[] = [];
         do {
@@ -192,12 +203,14 @@ export function planComputeTextParagraphChunks(
                 }
                 start = cursor;
                 count = retained.scalars;
+                countRecords = retained.capacity;
                 segments = [...retained.segments];
                 cursor += retained.text.length;
                 paragraphChunks.push(makeSource(cursor));
                 scalarStart += count;
                 start = cursor;
                 count = 0;
+                countRecords = 0;
                 maxSegmentCapacity = 0;
                 segments = [];
                 if (cursor === text.length) {
@@ -220,10 +233,13 @@ export function planComputeTextParagraphChunks(
                 if (seam === cursor) {
                     seam = end;
                     let spanScalars = decodeComputeTextChunk(text.slice(cursor, end)).scalars.length;
+                    let spanRecords = records(text.slice(cursor, end), spanScalars);
                     while (seam < text.length && !safeComputeTextSourceBoundary(font, proof, text, seam - 1)) {
-                        seam = move(text, seam, 1);
+                        const next = move(text, seam, 1);
+                        spanRecords += records(text.slice(seam, next), 1);
+                        seam = next;
                         spanScalars++;
-                        const bytes = spanScalars * expansion * 48 + 144;
+                        const bytes = spanRecords * 48 + 144;
                         if (bytes > bindingLimit) {
                             throw new Error(
                                 `updateComputeTextParagraphs: paragraph ${p} indivisible scalar span ${scalarStart + count}..${scalarStart + count + spanScalars} replay buffer of ${bytes} bytes exceeds binding limit ${bindingLimit} (maxBufferSize=${limits.maxBufferSize}, maxStorageBufferBindingSize=${limits.maxStorageBufferBindingSize})`
@@ -234,21 +250,24 @@ export function planComputeTextParagraphChunks(
                 end = seam;
             }
             const length = decodeComputeTextChunk(text.slice(cursor, end)).scalars.length;
+            const lengthRecords = records(text.slice(cursor, end), length);
             if (
                 count &&
-                ((count + length) * expansion > target ||
+                (countRecords + lengthRecords > target ||
                     segments.length >= limits.maxComputeWorkgroupsPerDimension ||
-                    (segments.length + 1) * Math.max(maxSegmentCapacity, length * expansion) > maxBatchProduct)
+                    (segments.length + 1) * Math.max(maxSegmentCapacity, lengthRecords) > maxBatchProduct)
             ) {
                 paragraphChunks.push(makeSource(cursor));
                 start = cursor;
                 scalarStart += count;
                 count = 0;
+                countRecords = 0;
                 maxSegmentCapacity = 0;
                 segments = [];
             }
             count += length;
-            maxSegmentCapacity = Math.max(maxSegmentCapacity, length * expansion);
+            countRecords += lengthRecords;
+            maxSegmentCapacity = Math.max(maxSegmentCapacity, lengthRecords);
             segments.push(count);
             cursor = end;
         } while (cursor < text.length);
@@ -257,7 +276,7 @@ export function planComputeTextParagraphChunks(
         }
 
         function makeSource(end: number): ComputeTextSourceChunk {
-            const capacity = Math.max(1, count * expansion);
+            const capacity = Math.max(1, countRecords);
             const replay = 16 + capacity * 16 + (capacity + 4) * 32;
             if (!Number.isSafeInteger(replay) || replay > bindingLimit) {
                 throw new Error(
@@ -279,7 +298,7 @@ export function planComputeTextParagraphChunks(
             for (const glyph of input.glyphIds) {
                 seeds.add(glyph);
             }
-            const shapeCapacity = Math.max(1, ...input.runs.map((run) => run.scalars.length * expansion));
+            const shapeCapacity = computeTextShapeCapacity(plan, input.runs);
             const prepared = prepareComputeTextShapeWords(plan, input.runs, 0, shapeCapacity, limits);
             checkComputeTextShapeBounds(limits, prepared);
             const shapeBytes = input.runs.length * (4 + shapeCapacity * 6) * 4;
@@ -366,8 +385,9 @@ export function needsComputeTextParagraphChunks(data: ComputeTextData, paragraph
     sum = 0;
     for (const text of paragraphs) {
         const selected = scanComputeTextRun(text);
-        const expansion = Math.max(1, compileComputeTextProgram(createComputeTextPlanForSelection(data._font, selected)).maxExpansion);
-        const capacity = Math.max(1, selected.scalarCount * expansion);
+        const plan = createComputeTextPlanForSelection(data._font, selected);
+        const expansion = Math.max(1, compileComputeTextProgram(plan).maxExpansion);
+        const capacity = Math.max(1, plan._profileData?.capacity?.(decodeComputeTextChunk(text).scalars) ?? selected.scalarCount * expansion);
         max = Math.max(max, capacity);
         sum += capacity;
     }
@@ -400,7 +420,13 @@ export function submitChunkedComputeTextParagraphs(data: ComputeTextData, paragr
         baseRevision = reuse ? state.baseRevision : data._revision;
         candidateRevision = data._revision;
         return async () => {
-            const closure = closeComputeTextGlyphs(data._font, plan.plans, [...plan.seeds]);
+            // Profile seeds cover GPU-inserted glyphs (e.g. Devanagari ◌ and decompositions), as on the monolithic path.
+            const closure = closeComputeTextGlyphs(
+                data._font,
+                plan.plans,
+                [...plan.seeds],
+                plan.plans.flatMap((selected) => selected._profileData?.closureSeeds ?? [])
+            );
             const rebuild = new Error("paragraph chunk atlas requires full installation");
             let shapeReuse = reuse;
             try {

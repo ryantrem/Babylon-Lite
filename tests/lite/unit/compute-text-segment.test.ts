@@ -14,7 +14,7 @@ import {
     COMPUTE_RULE_MODE_POSITION,
 } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import type { ComputeGlyphPredicate, ComputeProgramLookup, ComputeProgramRule, ComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
-import { computeTextParagraphFlags } from "../../../packages/babylon-lite/src/text/compute-text-paragraphs";
+import { computeTextParagraphFlags } from "../../../packages/babylon-lite/src/text/compute-text-paragraph-flags";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 import {
     analyzeComputeTextSegmentation,
