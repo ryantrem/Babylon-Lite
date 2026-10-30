@@ -19,8 +19,176 @@ import {
 const quantile = (values: number[], q: number) => [...values].sort((a, b) => a - b)[Math.floor((values.length - 1) * q)]!;
 const statistics = (values: number[]) => ({ median: quantile(values, 0.5), p10: quantile(values, 0.1), p90: quantile(values, 0.9) });
 
+interface PassSample {
+    readonly frame: number;
+    readonly key: string;
+    readonly ns: number;
+}
+
+interface PassProfiler {
+    frame: number;
+    readonly samples: PassSample[];
+    readonly submitted: { frame: number; encoders: string[] }[];
+    readonly pending: Promise<void>[];
+    onSubmit(buffers: readonly GPUCommandBuffer[]): void;
+    uninstall(): void;
+}
+
+const PASS_QUERY_CAPACITY = 128;
+
+/** Diagnostic only: per-pass GPU timestamps, keyed by encoder label, pass label and pipeline labels. */
+function installPassProfiler(device: GPUDevice): PassProfiler {
+    interface Slot {
+        readonly querySet: GPUQuerySet;
+        readonly resolve: GPUBuffer;
+        readonly read: GPUBuffer;
+    }
+    interface Recorded {
+        readonly encoder: string;
+        readonly keys: string[];
+        readonly slot: Slot | null;
+    }
+    const pool: Slot[] = [];
+    const byBuffer = new WeakMap<GPUCommandBuffer, Recorded>();
+    const createCommandEncoder = device.createCommandEncoder.bind(device);
+    const take = (): Slot =>
+        pool.pop() ?? {
+            querySet: device.createQuerySet({ type: "timestamp", count: PASS_QUERY_CAPACITY }),
+            resolve: device.createBuffer({ size: PASS_QUERY_CAPACITY * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
+            read: device.createBuffer({ size: PASS_QUERY_CAPACITY * 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+        };
+    const profiler: PassProfiler = {
+        frame: -1,
+        samples: [],
+        submitted: [],
+        pending: [],
+        onSubmit(buffers) {
+            const frame = profiler.frame;
+            profiler.submitted.push({ frame, encoders: buffers.map((buffer) => byBuffer.get(buffer)?.encoder ?? "(unlabeled)") });
+            for (const buffer of buffers) {
+                const recorded = byBuffer.get(buffer);
+                const slot = recorded?.slot;
+                if (!recorded || !slot) {
+                    continue;
+                }
+                profiler.pending.push(
+                    slot.read.mapAsync(GPUMapMode.READ).then(() => {
+                        const times = new BigUint64Array(slot.read.getMappedRange(0, recorded.keys.length * 16));
+                        recorded.keys.forEach((key, i) => {
+                            const ns = Number(times[i * 2 + 1]! - times[i * 2]!);
+                            profiler.samples.push({ frame, key: `${recorded.encoder} > ${key}`, ns });
+                        });
+                        slot.read.unmap();
+                        pool.push(slot);
+                    })
+                );
+            }
+        },
+        uninstall() {
+            device.createCommandEncoder = createCommandEncoder;
+        },
+    };
+    device.createCommandEncoder = (descriptor?: GPUCommandEncoderDescriptor) => {
+        const encoder = createCommandEncoder(descriptor);
+        const label = descriptor?.label || "(unlabeled)";
+        const keys: string[] = [];
+        let slot: Slot | null = null;
+        const timestamps = () => {
+            if (keys.length * 2 >= PASS_QUERY_CAPACITY) {
+                return undefined;
+            }
+            slot ??= take();
+            return { querySet: slot.querySet, beginningOfPassWriteIndex: keys.length * 2, endOfPassWriteIndex: keys.length * 2 + 1 };
+        };
+        const beginComputePass = encoder.beginComputePass.bind(encoder);
+        encoder.beginComputePass = (pass?: GPUComputePassDescriptor) => {
+            const timestampWrites = pass?.timestampWrites ? undefined : timestamps();
+            if (!timestampWrites) {
+                return beginComputePass(pass);
+            }
+            const index = keys.length;
+            keys.push(`compute:${pass?.label || "(unlabeled)"}`);
+            const computePass = beginComputePass({ ...pass, timestampWrites });
+            const setPipeline = computePass.setPipeline.bind(computePass);
+            const pipelines: string[] = [];
+            computePass.setPipeline = (pipeline: GPUComputePipeline) => {
+                if (!pipelines.includes(pipeline.label)) {
+                    pipelines.push(pipeline.label);
+                    keys[index] = `compute:${pass?.label || "(unlabeled)"} [${pipelines.join(" + ")}]`;
+                }
+                setPipeline(pipeline);
+            };
+            return computePass;
+        };
+        const beginRenderPass = encoder.beginRenderPass.bind(encoder);
+        encoder.beginRenderPass = (pass: GPURenderPassDescriptor) => {
+            const timestampWrites = pass.timestampWrites ? undefined : timestamps();
+            if (!timestampWrites) {
+                return beginRenderPass(pass);
+            }
+            keys.push(`render:${pass.label || "(unlabeled)"}`);
+            return beginRenderPass({ ...pass, timestampWrites });
+        };
+        const finish = encoder.finish.bind(encoder);
+        encoder.finish = (finishDescriptor?: GPUCommandBufferDescriptor) => {
+            if (slot && keys.length) {
+                encoder.resolveQuerySet(slot.querySet, 0, keys.length * 2, slot.resolve, 0);
+                encoder.copyBufferToBuffer(slot.resolve, 0, slot.read, 0, keys.length * 16);
+            }
+            const buffer = finish(finishDescriptor);
+            byBuffer.set(buffer, { encoder: label, keys, slot });
+            return buffer;
+        };
+        return encoder;
+    };
+    return profiler;
+}
+
+function summarizePassProfile(profiler: PassProfiler, firstFrame: number) {
+    const frames = new Set<number>();
+    const byKey = new Map<string, Map<number, { ns: number; count: number }>>();
+    for (const sample of profiler.samples) {
+        if (sample.frame < firstFrame) {
+            continue;
+        }
+        frames.add(sample.frame);
+        const perFrame = byKey.get(sample.key) ?? new Map<number, { ns: number; count: number }>();
+        byKey.set(sample.key, perFrame);
+        const entry = perFrame.get(sample.frame) ?? { ns: 0, count: 0 };
+        entry.ns += sample.ns;
+        entry.count++;
+        perFrame.set(sample.frame, entry);
+    }
+    const frameList = [...frames];
+    const totals = frameList.map((frame) => [...byKey.values()].reduce((sum, perFrame) => sum + (perFrame.get(frame)?.ns ?? 0), 0) / 1e6);
+    const passes = [...byKey.entries()]
+        .map(([key, perFrame]) => {
+            const ms = frameList.map((frame) => (perFrame.get(frame)?.ns ?? 0) / 1e6);
+            const counts = frameList.map((frame) => perFrame.get(frame)?.count ?? 0);
+            return { key, msPerFrame: statistics(ms), passesPerFrame: quantile(counts, 0.5) };
+        })
+        .sort((left, right) => right.msPerFrame.median - left.msPerFrame.median);
+    const allNs = profiler.samples.map((sample) => sample.ns).filter((ns) => ns > 0);
+    const submitShapes = new Map<string, number>();
+    for (const submit of profiler.submitted) {
+        if (submit.frame >= firstFrame) {
+            const shape = submit.encoders.join(", ");
+            submitShapes.set(shape, (submitShapes.get(shape) ?? 0) + 1);
+        }
+    }
+    return {
+        frames: frameList.length,
+        summedPassMsPerFrame: statistics(totals),
+        passes,
+        submitsBySampledFrameCount: Object.fromEntries([...submitShapes.entries()].map(([shape, count]) => [shape, count / Math.max(1, frameList.length)])),
+        quantizationCheck: { positiveSamples: allNs.length, multiplesOf100us: allNs.filter((ns) => ns % 100_000 === 0).length },
+        endpoint: "GPU timestamp begin/end of each pass, summed per sampled frame. Profiling adds resolve/copy work, so do not compare this mode's latencies with unprofiled runs.",
+    };
+}
+
 export async function runComputeTextWorkload() {
     const query = new URLSearchParams(location.search);
+    const profilePasses = query.get("profile") === "passes";
     const script = query.get("script") === "arab" ? "arab" : query.get("script") === "latn" ? "latn" : "deva";
     const arabic = script === "arab",
         latin = script === "latn",
@@ -73,13 +241,19 @@ export async function runComputeTextWorkload() {
         await startEngine(engine);
         // Render-task GPU timing only covers frame-graph tasks; compute text work is fused into the
         // frame submit outside them. Observe queue submits instead: first submit to all-work-done.
+        if (profilePasses && !engine._device.features.has("timestamp-query")) {
+            throw new Error("Pass profiling requires the WebGPU timestamp-query feature.");
+        }
+        const profiler = profilePasses ? installPassProfiler(engine._device) : null;
         const queue = engine._device.queue,
             submit = queue.submit.bind(queue);
         let submits: { at: number; done: Promise<number> }[] = [];
         queue.submit = (buffers: Iterable<GPUCommandBuffer>) => {
+            const list = [...buffers];
             const at = performance.now();
-            submit(buffers);
+            submit(list);
             submits.push({ at, done: queue.onSubmittedWorkDone().then(() => performance.now()) });
+            profiler?.onSubmit(list);
         };
         const firstStarted = performance.now();
         await Promise.all(blocks.map(async (data) => (await updateComputeTextData(data, [variants[0]!])).completed));
@@ -98,9 +272,15 @@ export async function runComputeTextWorkload() {
             submitToGpuDoneMs: number[] = [],
             submitsPerFrame: number[] = [];
         for (let frame = 0; frame < 150 && running; frame++) {
+            if (frame === 30) {
+                await window.__benchCpuProfile?.("start");
+            }
             await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
             let active = 0;
             submits = [];
+            if (profiler) {
+                profiler.frame = frame;
+            }
             const began = performance.now();
             const admitted = blocks.map((data, i) => {
                 const start = performance.now();
@@ -120,12 +300,20 @@ export async function runComputeTextWorkload() {
                 submitsPerFrame.push(frameSubmits.length);
             }
         }
+        await window.__benchCpuProfile?.("stop");
         // Diagnostic validation occurs outside all measured intervals.
         const indirect = await Promise.all(blocks.map(async (data) => [...new Uint32Array(await readStorageBuffer(data._indirect))]));
         if (indirect.some((words) => words[0] !== 6 || words[1]! <= 0) || blocks.some((data) => data.status !== "ready")) {
             throw new Error("Workload produced invalid status or no resident instances; do not publish timings.");
         }
         queue.submit = submit;
+        let passProfile: ReturnType<typeof summarizePassProfile> | null = null;
+        if (profiler) {
+            profiler.frame = -1;
+            await Promise.all(profiler.pending);
+            profiler.uninstall();
+            passProfile = summarizePassProfile(profiler, 30);
+        }
         const result = {
             script,
             workload: single ? "single-2000-scalars" : "100-independent-blocks",
@@ -154,6 +342,7 @@ export async function runComputeTextWorkload() {
                 : latin
                   ? "Latin control with the same protocol and block shape."
                   : "Candidate absolute workload only: baseline 27c6ecb3 does not support Devanagari; no B/A ratio.",
+            passProfile,
             segmentation: arabic ? "CTF-14 whole RTL run" : latin ? "Latin segmentation as admitted" : "CTF-16 whole run; independent blocks are parallel",
         };
         (document.getElementById("result") as HTMLElement).textContent = JSON.stringify(result, null, 2);
@@ -170,6 +359,8 @@ export async function runComputeTextWorkload() {
 declare global {
     interface Window {
         runComputeTextWorkload: typeof runComputeTextWorkload;
+        /** Installed by the runner only for `--cpu-profile`. */
+        __benchCpuProfile?: (phase: "start" | "stop") => Promise<void>;
     }
 }
 window.runComputeTextWorkload = runComputeTextWorkload;

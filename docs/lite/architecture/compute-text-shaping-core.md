@@ -416,6 +416,20 @@ async self CPU time. If the runner starts its own Vite server, its readiness pro
 uses a bounded fetch timeout; an already running lab server can be passed with
 `--base`.
 
+Two diagnostic options attribute cost; use them for relative attribution, not as the
+headline timings above:
+
+- `--profile=passes` adds `?profile=passes` to the page, which wraps command-encoder
+  pass creation with unique timestamp-query slots per pass and reports
+  `passProfile`: GPU milliseconds per sampled frame for each
+  `encoder > pass [pipeline]` key, passes per frame, submits per encoder label per
+  frame, and a quantization check (timestamps must not be multiples of 100 µs).
+  Summed pass time can exceed `submitToGpuDoneMs` because passes from different
+  command buffers overlap on the device.
+- `--cpu-profile=/absolute/path.cpuprofile` samples the main thread at 100 µs
+  through CDP over the sampled frames only, writes the raw profile, and adds a
+  `cpuSelfTime` summary by module and by function.
+
 **Never compute a Hindi B/A ratio against baseline rejection or incorrect shaping:**
 `27c6ecb3` has no Devanagari implementation. Use candidate absolute results until a
 correct, supported Hindi baseline exists. Only the existing comparable Latin/F1
