@@ -6,7 +6,8 @@ import { createComputeTextPlan, ensureComputeTextProfile } from "../../../packag
 import { compileComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import type { ComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
-import { analyzeComputeTextSegmentation, clearComputeTextSegmentationCache, collectComputeTextCrossings } from "../../../packages/babylon-lite/src/text/compute-text-segment";
+import { analyzeComputeTextSegmentation, clearComputeTextSegmentationCache } from "../../../packages/babylon-lite/src/text/compute-text-segment";
+import { collectComputeTextCrossings } from "../../../packages/babylon-lite/src/text/compute-text-indic-paragraph";
 
 const paragraph =
     "The quick brown fox jumps over the lazy dog. Every letter belongs to a flowing English paragraph with ordinary spaces and punctuation. AV To are adjacent pairs; office and affinity remain ordered shaping controls. ";

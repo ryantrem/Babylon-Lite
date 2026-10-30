@@ -80,14 +80,16 @@ export interface ComputeTextSegments {
     readonly count: number;
 }
 
-interface Slot {
+/** @internal */
+export interface Slot {
     side: number;
     d: number;
     p: ComputeGlyphPredicate;
     bit: number;
 }
 
-interface Crossing {
+/** @internal */
+export interface Crossing {
     slots: Slot[];
     anchor: Slot;
 }
@@ -110,7 +112,8 @@ export function clearComputeTextSegmentationCache(): void {
     predicateIds = null;
 }
 
-function matches(p: ComputeGlyphPredicate, g: number): boolean {
+/** @internal Predicate membership, memoizing glyph-id sets. */
+export function matches(p: ComputeGlyphPredicate, g: number): boolean {
     if (p.kind === "glyphs") {
         let ids = predicateIds?.get(p);
         if (!ids) {
@@ -132,7 +135,8 @@ export function analyzeComputeTextSegmentation(program: ComputeTextProgram): Seg
     return result;
 }
 
-interface SpaceContext {
+/** @internal */
+export interface SpaceContext {
     readonly space: number;
     readonly cls: (g: number) => number;
     readonly closure: (g: number, any?: boolean) => Uint32Array;
@@ -140,7 +144,8 @@ interface SpaceContext {
     readonly skipped: (g: number) => boolean;
 }
 
-interface CrossingSet {
+/** @internal */
+export interface CrossingSet {
     readonly crossings: Crossing[];
     readonly allSlots: Slot[];
     readonly maxD: number;
@@ -179,9 +184,9 @@ function outputs(r: ComputeProgramRule): readonly number[] {
     return action.kind === "ligature" ? [action.glyph] : action.kind === "multiple" || action.kind === "substitute" ? action.glyphs : [];
 }
 
-/** Rule-mode admission, the GSUB producer index, the space glyph, GDEF classes, memoized `any`-closures and B*.
+/** @internal Rule-mode admission, the GSUB producer index, the space glyph, GDEF classes, memoized `any`-closures and B*.
  * Null for an unsupported rule mode, a B* that is not class 0 or is a ligature tail, or (`limitExpanding`) a second expanding GSUB lookup. */
-function spaceContext(program: ComputeTextProgram, limitExpanding: boolean): SpaceContext | null {
+export function spaceContext(program: ComputeTextProgram, limitExpanding: boolean): SpaceContext | null {
     const modes = [
         COMPUTE_RULE_MODE_SUBSTITUTE,
         COMPUTE_RULE_MODE_MULTIPLE,
@@ -315,9 +320,9 @@ function spaceContext(program: ComputeTextProgram, limitExpanding: boolean): Spa
     return { space, cls, closure, bStar, skipped };
 }
 
-/** Every non-mark-attachment rule window with a non-final slot that can see B*; null above 4096 crossings.
+/** @internal Every non-mark-attachment rule window with a non-final slot that can see B*; null above 4096 crossings.
  * `rules`, when given, also receives each window's identity and B*-slot count (profile proofs only). */
-function enumerateCrossings(program: ComputeTextProgram, bStar: Uint32Array, rules?: ComputeTextCrossingRule[]): CrossingSet | null {
+export function enumerateCrossings(program: ComputeTextProgram, bStar: Uint32Array, rules?: ComputeTextCrossingRule[]): CrossingSet | null {
     const crossings: Crossing[] = [];
     const allSlots: Slot[] = [];
     let maxD = 1;
@@ -373,42 +378,6 @@ function enumerateCrossings(program: ComputeTextProgram, bStar: Uint32Array, rul
         }
     }
     return { crossings, allSlots, maxD, inB };
-}
-
-/** @internal Shared B*, closure and crossing facts without the generic span induction or expanding-lookup bound.
- * Uncached and profile-agnostic: callers (the lazy Indic paragraph proof) cache per program. */
-export function collectComputeTextCrossings(program: ComputeTextProgram): ComputeTextCrossings | null {
-    const context = spaceContext(program, false);
-    if (!context) {
-        return null;
-    }
-    const rules: ComputeTextCrossingRule[] = [];
-    const set = enumerateCrossings(program, context.bStar, rules);
-    if (!set) {
-        return null;
-    }
-    const { closure, bStar } = context;
-    const inB = set.inB;
-    const attached = program.lookups.some((l) =>
-        l.rules.some(
-            (r) =>
-                (r.mode === COMPUTE_RULE_MODE_MARK_BASE || r.mode === COMPUTE_RULE_MODE_MARK_MARK || r.mode === COMPUTE_RULE_MODE_MARK_LIGATURE) &&
-                ((!!r.input[0] && bStar.some((g) => matches(r.input[0]!, g))) ||
-                    (r.action.kind === "mark-ligature"
-                        ? r.action.ligatures.some((b) => inB[b.glyphId] === 1)
-                        : (r.action.kind === "mark-base" || r.action.kind === "mark-mark") && r.action.bases.some((b) => inB[b.glyphId] === 1)))
-        )
-    );
-    return {
-        space: context.space,
-        bStar,
-        closure: (glyph) => closure(glyph),
-        glyphClass: context.cls,
-        skipped: context.skipped,
-        matches,
-        attached,
-        crossings: rules,
-    };
 }
 
 /** @internal Paragraph space proof: the profile's lazy proof for Indic plans, otherwise the generic analysis. */

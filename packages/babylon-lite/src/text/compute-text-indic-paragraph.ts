@@ -3,8 +3,9 @@
  * the only module state is the lazily created per-program proof cache.
  */
 import type { ComputeTextProgram } from "./compute-text-program.js";
-import type { ComputeTextSpaceProof } from "./compute-text-segment.js";
-import { collectComputeTextCrossings } from "./compute-text-segment.js";
+import { COMPUTE_RULE_MODE_MARK_BASE, COMPUTE_RULE_MODE_MARK_LIGATURE, COMPUTE_RULE_MODE_MARK_MARK } from "./compute-text-program.js";
+import type { ComputeTextCrossingRule, ComputeTextCrossings, ComputeTextSpaceProof } from "./compute-text-segment.js";
+import { enumerateCrossings, matches, spaceContext } from "./compute-text-segment.js";
 import { indicProperties } from "./compute-text-indic-plan.js";
 import { INDIC_GRAPHEME } from "./compute-text-indic-unicode.js";
 
@@ -27,6 +28,42 @@ const DFA_BACKOFF = [1, 3, 4, 6, 7, 8, 14, 15, 16, 17, 18, 20];
 const DFA_ACCEPT_ONE = 11;
 
 let proofs: WeakMap<ComputeTextProgram, { proof: ComputeTextSpaceProof | null; reason: string | null }> | undefined;
+
+/** @internal Shared B*, closure and crossing facts without the generic span induction or expanding-lookup bound.
+ * Uncached and profile-agnostic; lives in this lazy module so Latin-only consumers never fetch it. */
+export function collectComputeTextCrossings(program: ComputeTextProgram): ComputeTextCrossings | null {
+    const context = spaceContext(program, false);
+    if (!context) {
+        return null;
+    }
+    const rules: ComputeTextCrossingRule[] = [];
+    const set = enumerateCrossings(program, context.bStar, rules);
+    if (!set) {
+        return null;
+    }
+    const { closure, bStar } = context;
+    const inB = set.inB;
+    const attached = program.lookups.some((l) =>
+        l.rules.some(
+            (r) =>
+                (r.mode === COMPUTE_RULE_MODE_MARK_BASE || r.mode === COMPUTE_RULE_MODE_MARK_MARK || r.mode === COMPUTE_RULE_MODE_MARK_LIGATURE) &&
+                ((!!r.input[0] && bStar.some((g) => matches(r.input[0]!, g))) ||
+                    (r.action.kind === "mark-ligature"
+                        ? r.action.ligatures.some((b) => inB[b.glyphId] === 1)
+                        : (r.action.kind === "mark-base" || r.action.kind === "mark-mark") && r.action.bases.some((b) => inB[b.glyphId] === 1)))
+        )
+    );
+    return {
+        space: context.space,
+        bStar,
+        closure: (glyph) => closure(glyph),
+        glyphClass: context.cls,
+        skipped: context.skipped,
+        matches,
+        attached,
+        crossings: rules,
+    };
+}
 
 /** `GCB << 2 | InCB` for admitted scalars; `UNMODELED` for anything `validateIndicRun` would reject. */
 function graphemeClass(cp: number): number {

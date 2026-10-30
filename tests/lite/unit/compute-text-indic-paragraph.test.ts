@@ -7,8 +7,13 @@ import { compileComputeTextProgram } from "../../../packages/babylon-lite/src/te
 import type { ComputeGlyphPredicate, ComputeProgramLookup, ComputeProgramRule, ComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import { selectComputeTextRun } from "../../../packages/babylon-lite/src/text/compute-text-selection";
 import { mapComputeFontScalars } from "../../../packages/babylon-lite/src/text/compute-font";
-import { analyzeComputeTextSegmentation, collectComputeTextCrossings, computeTextParagraphSpaceProof } from "../../../packages/babylon-lite/src/text/compute-text-segment";
-import { indicParagraphFlags, indicParagraphProofReason, proveIndicParagraphSpaces } from "../../../packages/babylon-lite/src/text/compute-text-indic-paragraph";
+import { analyzeComputeTextSegmentation, computeTextParagraphSpaceProof } from "../../../packages/babylon-lite/src/text/compute-text-segment";
+import {
+    collectComputeTextCrossings,
+    indicParagraphFlags,
+    indicParagraphProofReason,
+    proveIndicParagraphSpaces,
+} from "../../../packages/babylon-lite/src/text/compute-text-indic-paragraph";
 import { safeComputeTextSourceBoundary } from "../../../packages/babylon-lite/src/text/compute-text-paragraph-chunks";
 import { INDIC_SYLLABLE_MACHINE } from "../../../packages/babylon-lite/src/text/compute-text-indic-unicode";
 
