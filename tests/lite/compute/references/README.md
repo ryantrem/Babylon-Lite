@@ -242,3 +242,85 @@ References remain test-only witnesses, not product modes. All numeric record
 arrays use a compact deterministic JSON representation. For empty scalar input,
 `hb-shape` emits no paragraph/serialized line; the helper explicitly verifies
 that boundary against ctypes' zero records.
+
+## CTF-03: Devanagari paragraph wrapping references
+
+`deva-paragraph-harfbuzz-11.0.1.json` is the evidence for the CTF-03 space
+proof (REQ-PROOF-2/3). The standalone generator
+`scripts/generate-devanagari-paragraph-references.mjs` shapes
+`devanagari-paragraph-corpus.mjs`:
+
+```sh
+node scripts/generate-devanagari-paragraph-references.mjs --write
+node scripts/generate-devanagari-paragraph-references.mjs --check
+```
+
+Exactly one flag is accepted. `--check` regenerates the file in memory and
+compares the bytes. Before shaping, the generator pins the same identity as
+`generate-shaping-references.mjs`, without importing or modifying it:
+
+- the Homebrew HarfBuzz 11.0.1 `hb-shape` binary and `libharfbuzz.0.dylib`, both
+  by sha256, plus a `--version` check and an `otool -L` link check;
+- an arm64 `python3.12`;
+- the Noto Sans Devanagari font and its license, by sha256;
+- text-shaper 0.1.28 (version and sha256).
+
+The JSON records the corpus sha256 and the generator's own sha256. The unit
+test re-hashes both files.
+
+Every Devanagari text goes through two routes, which must agree exactly:
+
+- the unchanged ctypes helper, in one batch with `captureEvidence: false`;
+- the per-text CLI, with `--shapers=ot --font-funcs=ot --font-size=upem
+--font-ppem=0 --variations= --script=Deva --language=und --direction=ltr
+--cluster-level=1 --features=`.
+
+Neither route sets buffer flags. That means `HB_BUFFER_FLAG_DEFAULT`: no
+BOT/EOT and no pre/post context. A split half or a line is therefore shaped
+exactly as an independent paragraph would be.
+
+The single `mixed-common` row is DFLT-selected. It uses text-shaper with the
+DFLT script, mirroring the existing generator's adapter rows.
+
+### Fields of each case
+
+- `candidates` are the scalar indices `s` where `T[s]` is U+0020 and `T[s+1]`
+  exists and is not a space.
+- `proven` is the hand-declared set the runtime proof must reproduce. The
+  unit test re-derives it as follows: a UAX #29 grapheme boundary at `s+1`,
+  and maximal non-space words on both sides of at most 64 scalars. The test
+  pins Node `process.versions.unicode === "16.0"` because ICU supplies the
+  grapheme boundaries.
+- `whole` holds the records for the whole paragraph.
+- `splits` holds `{ s, independent, left, right }` for every candidate.
+  `independent` means `left ++ right` (with right clusters rebased by `s+1`)
+  equals `whole`. Rows longer than 2 000 scalars (`multiseam-default`) store
+  only `{ s, independent }`, for 24 sampled candidates: the first, the last,
+  and evenly spaced ones.
+- `lines["a:b"]` holds the records for `T[a..b)`, with clusters relative to
+  `a`.
+    - Boundaries are `{0} ∪ {s+1 : s ∈ proven} ∪ {n}`. The DFLT row uses all
+      candidates instead.
+    - Pairs are included when at most 12 proven spaces lie strictly inside
+      (`lineDistance` 13).
+    - Rows longer than 2 000 scalars use boundary distance ≤ 3.
+- `multiseam-default` has 47 699 scalars and more than 2 × 16 384 records, so
+  it needs at least two seams under the default paged budget. Its line table
+  would add about 8 MB, so the file keeps only `lineSummary`
+  (`{ pairs, consistent }`). The generator checks every one of those lines
+  against the slice of `whole` itself. Its split evidence comes from the
+  identical repeated unit (`multiseam-unit`, `multiseam-forced`). The native
+  suite relies on paged == monolithic for this row.
+
+### What the unit test checks
+
+`tests/lite/unit/compute-text-paragraph-references.test.ts` consumes the JSON
+only and never invokes HarfBuzz. It checks:
+
+- the structure of every case;
+- the proven-set drift guard;
+- G1, recomputing independence from stored `left`/`right`;
+- that every candidate in a `plain` row is proven (REQ-PROOF-3);
+- that line slices are consistent;
+- the `validateIndicRun` repertoire;
+- the informational count of independent-but-unproven spaces.
