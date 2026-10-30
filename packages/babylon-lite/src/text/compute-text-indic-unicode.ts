@@ -31,6 +31,8 @@
  * unicode/16.0.0/UnicodeData.txt: ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f
  * unicode/16.0.0/CompositionExclusions.txt: 89e83cf9cc8bef6c1f8bf77e42cf6f0341dfa42e66261f4dbe9b492e7a23c8ee
  * unicode/16.0.0/DerivedCoreProperties.txt: 39d35161f2954497f69e08bdb9e701493f476a3d30222de20028feda36c1dabd
+ * unicode/16.0.0/GraphemeBreakProperty.txt: c29360bd6f7132811d701d29069541e827eb44bfc4c8fbde8c370d6982689dc1
+ * unicode/16.0.0/emoji/emoji-data.txt: f1365a5173eee18e1f98b240cdc492e84a25f1ce7e0c9d1094eb29c41a22696a
  * unicode/16.0.0/LICENSE.txt: e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96
  * indic/harfbuzz-11.0.1/hb-ot-shaper-indic-table.cc: b7a455c29a425a237f2ffeff9c6a44ef5a57de1eb5ff73a63e5c5c81a24702d1
  * indic/harfbuzz-11.0.1/hb-ot-shaper-indic.hh: 3c6ddb7bc92ac5d641ba1b0206b091e40b0e8f41569f97704a7a6d8eac47d405
@@ -39,8 +41,12 @@
  * indic/harfbuzz-11.0.1/COPYING: ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64
  * Props: category8 | position8 | modifiedCCC8 | flags8 (mark, DI, ZWJ, ZWNJ, admissible, decomposition).
  * Vowel entries: first, second, third-or-zero, insertion index. No modified CCC override is needed for the admitted set.
+ * Grapheme: sorted entries start * 32 + GCB * 4 + InCB (start 21 bits, GCB 3 bits, InCB 2 bits); the last entry whose start is not above cp applies. GCB: Other, Extend, ZWJ, SpacingMark, Prepend.
+ * InCB: None, Consonant, Extend, Linker. Only admitted scalars carry classes; every other scalar decodes Other/None.
+ * Generation asserts that no admitted scalar is Extended_Pictographic (pinned emoji-data.txt) or any other GCB value
+ * (Control, CR, LF, Regional_Indicator, L, V, T, LV, LVT).
  */
-export const INDIC_TABLE_VERSION = "1b37ad58cc2902bc7ca3227eaec75eec7caab73d7fb235c950590608228451fb";
+export const INDIC_TABLE_VERSION = "1e0102c092c613672564d01369a74d106c8003acff8f59a627942940a7b428c5";
 export const INDIC_DENSE_BASE = 0x900;
 export const INDIC_DENSE = /* @__PURE__ */ new Uint32Array([
     285216008, 285216008, 285216008, 285216008, 268436482, 268436482, 268436482, 268436482, 268436482, 268436482, 268436482, 268436482, 268436482, 268436482, 268436482, 268436482,
@@ -263,4 +269,8 @@ export const INDIC_SYLLABLE_MACHINE = /* @__PURE__ */ new Uint32Array([
     57, 57, 57, 57, 57, 57, 57, 57, 57, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 102, 102, 102, 102, 102, 102, 102,
     102, 102, 102, 102, 102, 102, 27, 102, 102, 102, 102, 102, 102, 102, 119, 119, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
     120, 120, 102, 57, 57, 57, 57, 57, 57, 57, 57, 147, 147, 147, 147, 147, 119,
+]);
+export const INDIC_GRAPHEME = /* @__PURE__ */ new Uint32Array([
+    0, 73734, 73836, 73856, 74401, 75590, 75628, 75654, 75680, 75724, 75814, 76076, 76199, 76236, 76288, 76326, 76545, 76800, 76870, 76928, 77569, 77824, 262532, 262570, 262592,
+    269830, 269856,
 ]);

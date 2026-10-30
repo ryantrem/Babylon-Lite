@@ -10,6 +10,7 @@ import {
     INDIC_COMPOSITIONS,
     INDIC_VOWEL_CONSTRAINTS,
     INDIC_TABLE_VERSION,
+    INDIC_GRAPHEME,
 } from "../../../packages/babylon-lite/src/text/compute-text-indic-unicode";
 
 function properties(cp: number): number {
@@ -25,6 +26,29 @@ function properties(cp: number): number {
 }
 const rejected = (cp: number): boolean =>
     cp === 13 || cp === 0xad || cp === 0x200b || cp === 0x25cc || (cp >= 0x1cd0 && cp <= 0x1cff) || (cp >= 0xa8e0 && cp <= 0xa8ff) || (cp >= 0x11b00 && cp <= 0x11b5f);
+
+const GCB_EXTEND = 1,
+    GCB_ZWJ = 2,
+    GCB_SPACING_MARK = 3,
+    GCB_PREPEND = 4;
+const INCB_CONSONANT = 1,
+    INCB_EXTEND = 2,
+    INCB_LINKER = 3;
+function grapheme(cp: number): { gcb: number; incb: number } {
+    let lo = 0,
+        hi = INDIC_GRAPHEME.length - 1;
+    while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (INDIC_GRAPHEME[mid]! >>> 5 <= cp) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    const code = INDIC_GRAPHEME[lo]! & 31;
+    return { gcb: code >> 2, incb: code & 3 };
+}
+const graphemes = (text: string): number => [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)].length;
 
 describe("generated pinned Indic scalar properties", () => {
     it("has the exact dense region and sorted sparse pairs, with generator identity and no import side effects", async () => {
@@ -91,5 +115,49 @@ describe("generated pinned Indic scalar properties", () => {
         expect(properties(0x915) & 255).toBe(1);
         expect(properties(0x930) & 255).toBe(15);
         expect((properties(0x93f) >>> 8) & 255).toBe(2);
+    });
+
+    it("grapheme table classes every admitted scalar consistently with the Unicode 16 Intl.Segmenter oracle", () => {
+        expect(process.versions.unicode).toBe("16.0");
+        expect(INDIC_GRAPHEME[0]).toBe(0);
+        for (let i = 1; i < INDIC_GRAPHEME.length; i++) {
+            expect(INDIC_GRAPHEME[i]! >>> 5).toBeGreaterThan(INDIC_GRAPHEME[i - 1]! >>> 5);
+            expect(INDIC_GRAPHEME[i]! & 31).not.toBe(INDIC_GRAPHEME[i - 1]! & 31);
+        }
+        const ka = "\u0915",
+            virama = "\u094d";
+        let admitted = 0;
+        const seen = new Set<string>();
+        for (let cp = 0; cp <= 0x11b5f; cp++) {
+            if ((properties(cp) & (1 << 28)) === 0) {
+                expect(grapheme(cp), `U+${cp.toString(16)}`).toEqual({ gcb: 0, incb: 0 });
+                continue;
+            }
+            admitted++;
+            const c = String.fromCodePoint(cp);
+            const { gcb, incb } = grapheme(cp);
+            seen.add(`${gcb}/${incb}`);
+            const joins = gcb === GCB_EXTEND || gcb === GCB_ZWJ || gcb === GCB_SPACING_MARK;
+            const chain = incb === INCB_EXTEND || incb === INCB_LINKER;
+            const label = `U+${cp.toString(16)} gcb ${gcb} incb ${incb}`;
+            expect(c, label).not.toMatch(/\p{Extended_Pictographic}|\p{Regional_Indicator}/u);
+            expect(graphemes(ka + c), label).toBe(joins ? 1 : 2);
+            expect(graphemes(c + ka), label).toBe(gcb === GCB_PREPEND ? 1 : 2);
+            expect(graphemes(ka + virama + c), label).toBe(joins || incb === INCB_CONSONANT ? 1 : 2);
+            expect(graphemes(ka + virama + c + ka), label).toBe(chain ? 1 : joins || incb === INCB_CONSONANT || gcb === GCB_PREPEND ? 2 : 3);
+            expect(graphemes(ka + c + ka), label).toBe(incb === INCB_LINKER ? 1 : joins || gcb === GCB_PREPEND ? 2 : 3);
+            if (chain) {
+                expect(joins, label).toBe(true);
+            }
+        }
+        expect(admitted).toBe(194);
+        expect([...seen].sort()).toEqual(["0/0", "0/1", "1/0", "1/2", "1/3", "2/2", "3/0"]);
+        expect(grapheme(0x200d)).toEqual({ gcb: GCB_ZWJ, incb: INCB_EXTEND });
+        expect(grapheme(0x200c)).toEqual({ gcb: GCB_EXTEND, incb: 0 });
+        expect(grapheme(0x20f0).gcb).toBe(GCB_EXTEND);
+        expect(grapheme(0x94d)).toEqual({ gcb: GCB_EXTEND, incb: INCB_LINKER });
+        expect(grapheme(0x915).incb).toBe(INCB_CONSONANT);
+        expect(grapheme(0x1cd0)).toEqual({ gcb: 0, incb: 0 });
+        expect(grapheme(0x25cc)).toEqual({ gcb: 0, incb: 0 });
     });
 });

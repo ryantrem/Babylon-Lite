@@ -20,6 +20,8 @@ const pins = {
     "unicode/16.0.0/UnicodeData.txt": "ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f",
     "unicode/16.0.0/CompositionExclusions.txt": "89e83cf9cc8bef6c1f8bf77e42cf6f0341dfa42e66261f4dbe9b492e7a23c8ee",
     "unicode/16.0.0/DerivedCoreProperties.txt": "39d35161f2954497f69e08bdb9e701493f476a3d30222de20028feda36c1dabd",
+    "unicode/16.0.0/GraphemeBreakProperty.txt": "c29360bd6f7132811d701d29069541e827eb44bfc4c8fbde8c370d6982689dc1",
+    "unicode/16.0.0/emoji/emoji-data.txt": "f1365a5173eee18e1f98b240cdc492e84a25f1ce7e0c9d1094eb29c41a22696a",
     "unicode/16.0.0/LICENSE.txt": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
     "indic/harfbuzz-11.0.1/hb-ot-shaper-indic-table.cc": "b7a455c29a425a237f2ffeff9c6a44ef5a57de1eb5ff73a63e5c5c81a24702d1",
     "indic/harfbuzz-11.0.1/hb-ot-shaper-indic.hh": "3c6ddb7bc92ac5d641ba1b0206b091e40b0e8f41569f97704a7a6d8eac47d405",
@@ -182,6 +184,53 @@ for (const [i, name] of ["trans_keys", "key_spans", "index_offsets", "indicies",
     machine[i + 1] = machine.length;
     machine.push(...values);
 }
+const propertyRanges = (source, pattern) => [...source.matchAll(pattern)].map((m) => [parseInt(m[1], 16), parseInt(m[2] ?? m[1], 16), m[3]]);
+const lookupRange = (list, cp) => list.find(([a, b]) => cp >= a && cp <= b)?.[2];
+const gcbRanges = propertyRanges(sources["GraphemeBreakProperty.txt"], /^([0-9A-F]+)(?:\.\.([0-9A-F]+))?\s*;\s*(\w+)/gm);
+const incbRanges = propertyRanges(sources["DerivedCoreProperties.txt"], /^([0-9A-F]+)(?:\.\.([0-9A-F]+))?\s*;\s*InCB\s*;\s*(\w+)/gm);
+const extPict = propertyRanges(sources["emoji-data.txt"], /^([0-9A-F]+)(?:\.\.([0-9A-F]+))?\s*;\s*(Extended_Pictographic)\b/gm);
+assert.ok(gcbRanges.length > 1000 && incbRanges.length > 100 && extPict.length > 50, "Ambiguous grapheme sources");
+const gcbCodes = ["Other", "Extend", "ZWJ", "SpacingMark", "Prepend"];
+const incbCodes = ["None", "Consonant", "Extend", "Linker"];
+const admitted = mapped.filter((cp) => !rejected(cp));
+const grapheme = [];
+let previousCode = -1;
+for (let cp = 0; cp <= admitted.at(-1) + 1; cp++) {
+    let code = 0;
+    if (admitted.includes(cp)) {
+        const gcb = lookupRange(gcbRanges, cp) ?? "Other";
+        const incb = lookupRange(incbRanges, cp) ?? "None";
+        assert.equal(lookupRange(extPict, cp), undefined, `Admitted Extended_Pictographic U+${cp.toString(16)}`);
+        assert.ok(gcbCodes.includes(gcb), `Unmodeled admitted Grapheme_Cluster_Break ${gcb} U+${cp.toString(16)}`);
+        assert.ok(incbCodes.includes(incb), `Unmodeled admitted InCB ${incb} U+${cp.toString(16)}`);
+        code = (gcbCodes.indexOf(gcb) << 2) | incbCodes.indexOf(incb);
+    }
+    if (code !== previousCode) {
+        grapheme.push(((cp << 5) | code) >>> 0);
+        previousCode = code;
+    }
+}
+assert.equal(grapheme[0], 0);
+const decodeGrapheme = (cp) => {
+    let code = 0;
+    for (const entry of grapheme) {
+        if (entry >>> 5 > cp) {
+            break;
+        }
+        code = entry & 31;
+    }
+    return code;
+};
+admitted.forEach((cp) =>
+    assert.equal(
+        decodeGrapheme(cp),
+        (gcbCodes.indexOf(lookupRange(gcbRanges, cp) ?? "Other") << 2) | incbCodes.indexOf(lookupRange(incbRanges, cp) ?? "None"),
+        `Grapheme repertoire U+${cp.toString(16)}`
+    )
+);
+assert.equal(decodeGrapheme(0x200d), (2 << 2) | 2);
+assert.equal(decodeGrapheme(0x200c) >> 2, 1);
+assert.equal(decodeGrapheme(0x20f0) >> 2, 1);
 const arrays = {
     INDIC_DENSE: dense,
     INDIC_SPARSE: sparse,
@@ -189,6 +238,7 @@ const arrays = {
     INDIC_COMPOSITIONS: compositions.flat(),
     INDIC_VOWEL_CONSTRAINTS: vowels,
     INDIC_SYLLABLE_MACHINE: machine,
+    INDIC_GRAPHEME: grapheme,
 };
 const sourceHeader = Object.entries(pins)
     .map(([name, sha]) => `${name}: ${sha}`)
@@ -201,6 +251,10 @@ const text =
  * Source identities:\n * ${sourceHeader}
  * Props: category8 | position8 | modifiedCCC8 | flags8 (mark, DI, ZWJ, ZWNJ, admissible, decomposition).
  * Vowel entries: first, second, third-or-zero, insertion index. No modified CCC override is needed for the admitted set.
+ * Grapheme: sorted entries start * 32 + GCB * 4 + InCB (start 21 bits, GCB 3 bits, InCB 2 bits); the last entry whose start is not above cp applies. GCB: ${gcbCodes.join(", ")}.
+ * InCB: ${incbCodes.join(", ")}. Only admitted scalars carry classes; every other scalar decodes Other/None.
+ * Generation asserts that no admitted scalar is Extended_Pictographic (pinned emoji-data.txt) or any other GCB value
+ * (Control, CR, LF, Regional_Indicator, L, V, T, LV, LVT).
  */\nexport const INDIC_TABLE_VERSION = "${version}";\nexport const INDIC_DENSE_BASE = 0x900;\n` +
     Object.entries(arrays)
         .map(([name, values]) => `export const ${name} = /* @__PURE__ */ new Uint32Array([${values.join(",")}]);`)
@@ -214,5 +268,5 @@ if (write) {
     assert.equal(readFileSync(destination, "utf8"), output, "Generated Indic Unicode data is stale");
 }
 process.stdout.write(
-    `Indic Unicode table ${write ? "written" : "verified"}: ${dense.length} dense, ${sparse.length / 2} sparse, ${decomposition.length / 3} decompositions, version ${version}\n`
+    `Indic Unicode table ${write ? "written" : "verified"}: ${dense.length} dense, ${sparse.length / 2} sparse, ${decomposition.length / 3} decompositions, ${grapheme.length} grapheme ranges, version ${version}\n`
 );
