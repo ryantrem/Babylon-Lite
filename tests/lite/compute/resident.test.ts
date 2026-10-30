@@ -333,10 +333,10 @@ describe("native M1–3 resident production shaping and packing", () => {
         await updateComputeTextData(data, texts);
         const dispatches = vi.spyOn(GPUComputePassEncoder.prototype, "dispatchWorkgroups");
         await updateComputeTextData(data, texts);
-        // The cross-object shape batch is recorded at flush, after the pack, but its command buffer submits first.
+        // Shape and pack batches both record at flush, in submission order.
         expect(dispatches.mock.calls).toEqual([
-            [1, 1, 1],
             [129, 1, 1],
+            [1, 1, 1],
         ]);
         dispatches.mockRestore();
         await verifyResident(data, font, texts);
@@ -360,11 +360,11 @@ describe("native M1–3 resident production shaping and packing", () => {
         await updateComputeTextData(data, texts);
         const dispatches = vi.spyOn(GPUComputePassEncoder.prototype, "dispatchWorkgroups");
         await updateComputeTextData(data, texts);
-        // Count, prefix and pack record first; the cross-object shape batch records at flush but submits before them.
+        // The shape batch records first at flush, then the shared pack pass's count, prefix and pack.
         expect(dispatches.mock.calls).toEqual([
             [512, 1, 1],
-            [1, 1, 1],
             [512, 1, 1],
+            [1, 1, 1],
             [512, 1, 1],
         ]);
         dispatches.mockRestore();

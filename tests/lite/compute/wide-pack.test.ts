@@ -227,17 +227,41 @@ describe("native wide resident pack exactness", () => {
         expect(small).toEqual(wide);
     });
 
-    it("selects small at capacity 32 and wide at the tuned threshold 33 with identical output", async () => {
+    it("selects small at capacity 32, fused up to four runs and wide above at the tuned threshold 33 with identical output", async () => {
         const dispatches = vi.spyOn(GPUComputePassEncoder.prototype, "dispatchWorkgroups");
+        const tasks = vi.spyOn(computeTasks, "createComputeTask");
         const small = await verify(records(32, [32, 1, 31]), 32, 3, 64);
         expect(dispatches.mock.calls.map(([x]) => x)).toEqual([1]);
         dispatches.mockClear();
-        const wide = await verify(records(33, [32, 1, 31]), 33, 3, 64);
-        expect(dispatches.mock.calls.map(([x]) => x)).toEqual([3, 1, 3]);
-        expect(small).toEqual(wide);
+        const fused = await verify(records(33, [32, 1, 31]), 33, 3, 64);
+        expect(dispatches.mock.calls.map(([x]) => x)).toEqual([1]);
+        expect(small).toEqual(fused);
+        const packShaders = tasks.mock.results.filter((result) => result.type === "return" && result.value.name === "compute-text-resident-pack");
+        expect(packShaders).toHaveLength(2);
+        dispatches.mockClear();
+        const smallFive = await verify(records(32, [32, 1, 31, 0, 7]), 32, 5, 71);
+        dispatches.mockClear();
+        const wide = await verify(records(33, [32, 1, 31, 0, 7]), 33, 5, 71);
+        expect(dispatches.mock.calls.map(([x]) => x)).toEqual([5, 1, 5]);
+        expect(smallFive).toEqual(wide);
     });
 
-    it("re-records small → wide → parallel → wide and updates both wide sizes on a stable token", async () => {
+    it("fused pack matches the reference across overflow and failure precedence", async () => {
+        const words = records(129, [129, 64, 2, 100]);
+        const total = reference(words, 129, 4, 400, new Uint8Array(4800)).indirect[1]!;
+        const firstTwo = reference(records(129, [129, 64]), 129, 2, 400, new Uint8Array(4800)).indirect[1]!;
+        await verify(words, 129, 4, total);
+        await verify(words, 129, 4, total - 1);
+        await verify(words, 129, 4, firstTwo);
+        words[129 * 6 + 4 + 4 + 10 * 6] = 2;
+        await verify(words, 129, 4, total);
+        await verify(words, 129, 4, firstTwo - 60);
+        await verify(words, 129, 4, firstTwo - 50);
+        words[0] = 7;
+        await verify(words, 129, 4, total);
+    });
+
+    it("re-records small → fused → parallel → wide and updates both wide sizes on a stable token", async () => {
         const token = {};
         const storage = buffers(700 * (4 + 129 * 6) * 4, 700 * 65);
         const tasks = vi.spyOn(computeTasks, "createComputeTask");
@@ -245,7 +269,7 @@ describe("native wide resident pack exactness", () => {
         try {
             for (const [capacity, runs, expected] of [
                 [2, 3, [1]],
-                [129, 3, [3, 1, 3]],
+                [129, 3, [1]],
                 [2, 700, [11, 1, 11]],
                 [129, 257, [257, 1, 257]],
                 [129, 255, [255, 1, 255]],
@@ -272,6 +296,45 @@ describe("native wide resident pack exactness", () => {
         } finally {
             releaseResidentComputeText(token);
             Object.values(storage).forEach(disposeStorageBuffer);
+        }
+    });
+
+    it("shares one pack pass across independent objects admitted together, each with its own exact output and status", async () => {
+        const cases = [
+            { words: records(129, [129, 64, 2]), capacity: 129, runs: 3, limit: 400 },
+            { words: records(32, [32, 1, 31]), capacity: 32, runs: 3, limit: 64 },
+            { words: records(65, [65, 3, 65, 1, 64]), capacity: 65, runs: 5, limit: 400 },
+            { words: records(129, [129, 129]), capacity: 129, runs: 2, limit: 10 },
+        ];
+        const storages = cases.map(({ words, limit }) => buffers(words.byteLength, limit));
+        const tokens = cases.map(() => ({}));
+        try {
+            const expected = cases.map(({ words, capacity, runs }, index) => {
+                const initial = new Uint8Array(storages[index]!.instances.byteLength).fill(0xa5);
+                updateStorageBuffer(native.engine, storages[index]!.shaped, words);
+                updateStorageBuffer(native.engine, storages[index]!.instances, initial);
+                return reference(words, capacity, runs, storages[index]!.instances.byteLength / 12, initial);
+            });
+            const run = () =>
+                Promise.all(
+                    cases.map(({ capacity, runs }, index) =>
+                        executeResidentComputeText(tokens[index]!, native.engine, [], storages[index]!, capacity, runs, 32, 2048, SLOTS.length, () => undefined)
+                    )
+                );
+            await Promise.all((await run()).map((result) => result.status));
+            const encoders = vi.spyOn(native.device, "createCommandEncoder");
+            const results = await run();
+            native.engine._flushPendingWork?.(native.engine);
+            expect(encoders.mock.calls.filter(([descriptor]) => descriptor?.label === "compute-text-resident-shared-pack")).toHaveLength(1);
+            expect(await Promise.all(results.map((result) => result.status))).toEqual(expected.map(({ status }) => status));
+            for (const [index, storage] of storages.entries()) {
+                expect([...new Uint32Array(await readStorageBuffer(storage.indirect))]).toEqual(expected[index]!.indirect);
+                const instances = new Uint8Array(await readStorageBuffer(storage.instances));
+                expect(Buffer.from(instances).equals(Buffer.from(expected[index]!.instances)), `object ${index} instance bytes`).toBe(true);
+            }
+        } finally {
+            tokens.forEach(releaseResidentComputeText);
+            storages.forEach((storage) => Object.values(storage).forEach(disposeStorageBuffer));
         }
     });
 

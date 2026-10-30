@@ -107,9 +107,9 @@ not import the deferred implementation.
 
 Repeated updates to one object before a frame flush their predecessor before
 uploading into that object's reused params/runs/paragraph buffers. Updates to
-different objects do not flush each other: their pack/status command buffers and
-one shape batch per plan and kernel all fuse with the next frame in a single
-queue submit. CPU paragraph input mutation is safe only after this barrier;
+different objects do not flush each other: one shape batch per plan and
+kernel, the shared pack pass, and paragraph pack/status command buffers all fuse
+with the next frame in a single queue submit. CPU paragraph input mutation is safe only after this barrier;
 asynchronous preparation cannot retain mutable GPU inputs across another
 owner's writes without preserving their submission order.
 
@@ -156,9 +156,10 @@ Admission and recording:
    later slices add their owner with `_addDeferredOwner`. A slice that would
    exceed the dispatch, binding or buffer limits flushes the queue first and
    opens a new batch.
-3. The object then defers its pack/status command buffer. No `await` may occur
-   between slice admission and this deferral, or the fallback timer could split
-   them into separate submits.
+3. The object then queues its pack into the shared pack pass (see below), or a
+   paragraph stage defers its own pack/status command buffer. No `await` may
+   occur between slice admission and this step, or the fallback timer could
+   split them into separate submits.
 4. At flush, the builder closes the batch, packs every slice's run words with
    rebased origins, uploads params and runs, and dispatches one workgroup per
    run into the arena at the largest slice capacity. It then copies each run's
@@ -173,10 +174,57 @@ reads. Status codes, record contents and overflow reporting are unchanged: a
 header count larger than the capacity is preserved, and the pack still reports
 it.
 
+## Shared pack pass
+
+After batching, each independent object still recorded its pack (stitch,
+count, prefix and place) in its own compute pass and command buffer. Dawn's
+Metal backend runs passes serially with a fixed cost of about 30 µs each, so 100
+Hindi blocks spent 4.0 ms of GPU time packing. Two changes remove most of it.
+
+`deferResidentPack` (in `compute-text-resident.ts`) coalesces packs:
+
+- Per-engine state, in a lazily created `WeakMap`, holds the device, one
+  recorded combined task (`compute-text-resident-shared-pack`), and the open
+  pack queue.
+- An object appends `{task, status, staging}` to the open queue only while the
+  queue's builder is the newest deferred command. Otherwise it defers a new
+  queue. Every command queued before the pack, including the object's shape
+  slices, therefore submits before it.
+- At flush, the builder moves every entry's dispatches into the combined task,
+  records one compute pass, then copies each object's status word to its own
+  staging buffer. After submit, each staging buffer maps and resolves its own
+  update. Abandonment rejects every entry.
+- Within the pass, WebGPU usage-scope ordering keeps each object's stitch, count
+  and place in order. Objects write disjoint buffers.
+- Recording is lazy, so the flush reads each object's dispatch sizes, params and
+  bind groups. `executeResidentComputeText` flushes the object's pending work
+  before rewriting any of them, and release flushes first.
+- A shape batch opened for a new kernel after the open queue closes that queue.
+  Passes per flush are therefore bounded by the number of distinct shaping
+  kernels, not objects.
+
+Paragraph stages (`updateComputeTextParagraphs`) keep their per-object
+`submitDeferredComputeTaskResult` submission.
+
+The fused pack mode (`packFused`) replaces the wide mode's three serial
+dispatches when capacity is at least 33 and the object has at most
+`FUSED_PACK_MAX_RUNS = 4` runs, which covers typical blocks. One 64-lane
+workgroup finds each run's first invalid glyph, counts visible glyphs before it,
+prefixes runs and places instances. Overflow (status 2) takes precedence over a
+later missing glyph (status 3), exactly as the serial reference does. More runs
+use the existing wide or parallel modes.
+
+Measured on Apple M2 Max / Chrome 156 (100 Hindi blocks, one changed word per
+block, medians of back-to-back A/B runs), before → after: pack 4.0 ms over 100
+passes → 1.9 ms in one pass; GPU 6.1–6.4 → 4.8–5.0 ms; completion 13.3–13.9 →
+12.4–12.6 ms. Without the fused mode the shared pass alone measures 3.1 ms of
+pack. Latin blocks are within run-to-run noise.
+
 ## Pipeline and shader configuration
 
-No shader, workgroup, binding layout, storage ABI, render bundle, or indirect
-buffer format changes. Shape batching reuses the existing shape kernel. Rows
+No workgroup, binding layout, storage ABI, render bundle, or indirect buffer
+format changes. The pack shader gains the `packFused` entry point; shape
+batching reuses the existing shape kernel. Rows
 past a run's record count in `shaped` were already unspecified, and the prefix
 copies keep them so. Each update retains its own unmapped status staging
 allocation until its map completes. A pending staging allocation must not map
@@ -198,6 +246,11 @@ before the command buffer that writes it has been submitted.
   in one task stay ordered, and that disposing an object with a pending slice is
   safe. Fused-submit, resident and paragraph tests assert the batched dispatch
   shape and command-buffer counts.
+- `text/_gpu/compute-text-resident.ts`: shared pack pass and fused pack mode.
+  `tests/lite/compute/wide-pack.test.ts` checks fused output and failure
+  precedence against the serial reference, mode selection, and that independent
+  small, fused, wide and overflowing objects admitted together share one pass
+  with exact per-object instances, indirect args and status.
 - Resident data/paragraph/execution lifecycle and compute/storage submit sites:
   ordering barriers.
 - Native GPU tests compare complete instance/indirect/status bytes against

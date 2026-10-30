@@ -7,12 +7,12 @@ import { createComputeDispatch, setComputeDispatchSize } from "../../compute/com
 import type { ComputeDispatch } from "../../compute/compute-dispatch.js";
 import { createComputeShader, disposeComputeShader, prepareComputeShader } from "../../compute/compute-shader.js";
 import type { ComputeShader } from "../../compute/compute-shader.js";
-import { addComputeDispatch, createComputeTask, prepareComputeTask } from "../../compute/compute-task.js";
+import { _recordComputeTasks, addComputeDispatch, createComputeTask, prepareComputeTask } from "../../compute/compute-task.js";
 import type { ComputeTask } from "../../compute/compute-task.js";
 import { submitDeferredComputeTaskResult } from "../../compute/compute-task-readback.js";
-import { _flushDeferredWorkFor } from "../../compute/deferred-submit.js";
+import { _addDeferredOwner, _deferCommandBuffer, _flushDeferredWorkFor, _isLastDeferred } from "../../compute/deferred-submit.js";
 import { computeStorageBufferBinding } from "../../compute/compute-storage-buffer-binding.js";
-import { createStorageBuffer, disposeStorageBuffer, updateStorageBuffer } from "../../resource/storage-buffer.js";
+import { _getStorageBufferHandle, createStorageBuffer, disposeStorageBuffer, updateStorageBuffer } from "../../resource/storage-buffer.js";
 import type { StorageBuffer } from "../../resource/storage-buffer.js";
 import type { ComputeTextPlan } from "../compute-text-plan.js";
 import type { ComputeTextSegments } from "../compute-text-segment.js";
@@ -23,6 +23,8 @@ const STATUS_MISSING = 3;
 const COUNT_LANES = 256;
 const WIDE_PACK_LANES = 64;
 const WIDE_PACK_MIN_CAPACITY = 33;
+/** Wide runs per object that one workgroup packs in a single dispatch, instead of count, prefix and place. */
+const FUSED_PACK_MAX_RUNS = 4;
 
 /** @internal Number of consecutive segments copied by each stitch row. */
 export const STITCH_TILE = 64;
@@ -474,6 +476,93 @@ fn placeWide(@builtin(workgroup_id) group:vec3u, @builtin(local_invocation_index
     workgroupBarrier();
   }
 }
+var<workgroup> fusedHead: vec2u;
+@compute @workgroup_size(${WIDE_PACK_LANES})
+fn packFused(@builtin(local_invocation_index) lane:u32) {
+  let limit = arrayLength(&instances);
+  var total = 0u;
+  var failure = 0u;
+  for (var run = 0u; run < params.runCount; run++) {
+    if (lane == 0u) {
+      atomicStore(&wideFail, MISSING);
+      atomicStore(&wideVisible, 0u);
+      let out = run * (HEADER + params.capacity * RECORD);
+      let header = u32(shaped[out]);
+      var count = 0u;
+      if (header == 0u) { count = u32(shaped[out + 1u]); }
+      fusedHead = vec2u(header, count);
+    }
+    let head = workgroupUniformLoad(&fusedHead);
+    let out = run * (HEADER + params.capacity * RECORD);
+    if (head.x != 0u) { failure = head.x; break; }
+    if (head.y > params.capacity) { failure = 2u; break; }
+    for (var i = lane; i < head.y; i += WIDE) {
+      let glyph = u32(shaped[out + HEADER + i * RECORD]);
+      if (glyph >= params.glyphCount || slots[glyph] == MISSING) { atomicMin(&wideFail, i); }
+    }
+    workgroupBarrier();
+    if (lane == 0u) { fusedHead.x = atomicLoad(&wideFail); }
+    let stop = workgroupUniformLoad(&fusedHead).x;
+    var visible = 0u;
+    for (var i = lane; i < min(head.y, stop); i += WIDE) {
+      if (slots[u32(shaped[out + HEADER + i * RECORD])] != EMPTY) { visible++; }
+    }
+    atomicAdd(&wideVisible, visible);
+    workgroupBarrier();
+    if (lane == 0u) { fusedHead.y = atomicLoad(&wideVisible); }
+    // Glyphs before a partial failure still count, so an overflow they cause takes precedence.
+    total += workgroupUniformLoad(&fusedHead).y;
+    if (total > limit) { failure = 2u; break; }
+    if (stop != MISSING) { failure = STATUS_MISSING; break; }
+  }
+  if (lane == 0u) {
+    status[0] = failure;
+    indirect[0] = 6u;
+    indirect[1] = select(0u, total, failure == 0u);
+    indirect[2] = 0u;
+    indirect[3] = 0u;
+  }
+  if (failure != 0u) { return; }
+  let scale = bitcast<f32>(params.scaleBits);
+  let lineAdvance = bitcast<f32>(params.lineAdvanceBits);
+  var base = 0u;
+  for (var run = 0u; run < params.runCount; run++) {
+    let out = run * (HEADER + params.capacity * RECORD);
+    let count = u32(shaped[out + 1u]);
+    var carry = vec3i(0);
+    for (var chunk = 0u; chunk < count; chunk += WIDE) {
+      let i = chunk + lane;
+      let isActive = i < count;
+      var own = vec3i(0);
+      var slot = EMPTY;
+      var offX = 0;
+      var offY = 0;
+      if (isActive) {
+        let at = out + HEADER + i * RECORD;
+        slot = slots[u32(shaped[at])];
+        own = vec3i(shaped[at + 2u], shaped[at + 3u], select(0, 1, slot != EMPTY));
+        offX = shaped[at + 4u];
+        offY = shaped[at + 5u];
+      }
+      wideScan[lane] = own;
+      workgroupBarrier();
+      for (var distance = 1u; distance < WIDE; distance *= 2u) {
+        var pending = wideScan[lane];
+        if (lane >= distance) { pending += wideScan[lane - distance]; }
+        workgroupBarrier();
+        wideScan[lane] = pending;
+        workgroupBarrier();
+      }
+      let excl = carry + wideScan[lane] - own;
+      if (isActive && slot != EMPTY) {
+        instances[base + u32(excl.z)] = Instance(f32(excl.x + offX) * scale, f32(excl.y + offY) * scale - f32(run) * lineAdvance, slot);
+      }
+      carry += wideScan[WIDE - 1u];
+      workgroupBarrier();
+    }
+    base += u32(carry.z);
+  }
+}
 `;
 
 export interface ResidentShapeGroup {
@@ -512,6 +601,7 @@ interface ResidentShaders {
     prefix: ComputeShader;
     countWide: ComputeShader;
     placeWide: ComputeShader;
+    fused: ComputeShader;
     packParams: StorageBuffer;
     packOffsets: StorageBuffer;
     stitch?: ComputeShader;
@@ -527,7 +617,7 @@ interface ResidentShaders {
     boundSegmentTable?: StorageBuffer;
     boundStitchParams?: StorageBuffer;
     packTask?: ComputeTask;
-    packMode?: "small" | "parallel" | "wide";
+    packMode?: "small" | "parallel" | "wide" | "fused";
     packCountDispatch?: ComputeDispatch;
     packDispatch?: ComputeDispatch;
     buffers?: ResidentTextBuffers;
@@ -597,7 +687,7 @@ export async function executeResidentComputeText(
         if (shaders.packCountDispatch) {
             setComputeDispatchSize(shaders.packCountDispatch, { x: packGroups });
         }
-        setComputeDispatchSize(shaders.packDispatch!, { x: shaders.packMode === "small" ? 1 : packGroups });
+        setComputeDispatchSize(shaders.packDispatch!, { x: shaders.packMode === "small" || shaders.packMode === "fused" ? 1 : packGroups });
     }
     const batches = await Promise.all(
         groups.map((group, index) => (group.runs.length ? prepareComputeTextShapeBatch(engine, group.plan, preparedGroups[index]!) : Promise.resolve(null)))
@@ -627,7 +717,10 @@ export async function executeResidentComputeText(
     const readback = staging;
     let status: Promise<number>;
     try {
-        status = submitDeferredComputeTaskResult([shaders.packTask!], buffers.status, 4, (bytes) => new DataView(bytes).getUint32(0, true), readback, token);
+        // Paragraph stages keep their own submission; independent objects share one pack pass.
+        status = stage
+            ? submitDeferredComputeTaskResult([shaders.packTask!], buffers.status, 4, (bytes) => new DataView(bytes).getUint32(0, true), readback, token)
+            : deferResidentPack(engine, token, shaders.packTask!, buffers.status, readback);
     } catch (error) {
         shaders.freeStatusBuffers.push(readback);
         throw error;
@@ -645,6 +738,108 @@ export async function executeResidentComputeText(
     });
     void status.catch(() => undefined);
     return { status };
+}
+
+interface PackEntry {
+    readonly task: ComputeTask;
+    readonly status: StorageBuffer;
+    readonly staging: GPUBuffer;
+    readonly resolve: (status: number) => void;
+    readonly reject: (error: Error) => void;
+}
+
+interface PackQueue {
+    readonly entries: PackEntry[];
+    readonly build: () => GPUCommandBuffer;
+}
+
+interface PackEngineState {
+    readonly device: GPUDevice;
+    readonly task: ComputeTask;
+    open: PackQueue | null;
+}
+
+let packStates: WeakMap<EngineContext, PackEngineState> | null = null;
+
+/** Queue `task`'s dispatches into one compute pass shared by every object admitted while it remains the
+ *  newest deferred command, then copy each object's status. Separate per-object passes serialize on the
+ *  GPU with a fixed cost each; within one pass each object costs only its dispatches. A shape batch
+ *  opened for a new kernel after the open pass closes it, so passes are bounded by distinct kernels. */
+function deferResidentPack(engine: EngineContext, owner: object, task: ComputeTask, status: StorageBuffer, staging: GPUBuffer): Promise<number> {
+    packStates ??= new WeakMap();
+    let state = packStates.get(engine);
+    if (!state || state.device !== engine._device) {
+        const combined = createComputeTask(engine, "compute-text-resident-shared-pack");
+        combined.record();
+        state = { device: engine._device, task: combined, open: null };
+        packStates.set(engine, state);
+    }
+    const owned = state;
+    return new Promise<number>((resolve, reject) => {
+        const entry: PackEntry = { task, status, staging, resolve, reject };
+        if (owned.open && _isLastDeferred(engine, owned.open.build)) {
+            owned.open.entries.push(entry);
+            _addDeferredOwner(engine, owner);
+            return;
+        }
+        const entries = [entry];
+        let encoder: GPUCommandEncoder | undefined;
+        const queue: PackQueue = {
+            entries,
+            build: () => {
+                if (owned.open === queue) {
+                    owned.open = null;
+                }
+                const dispatches = owned.task._dispatches;
+                for (const { task } of entries) {
+                    dispatches.push(...task._dispatches);
+                }
+                encoder = engine._device.createCommandEncoder({ label: "compute-text-resident-shared-pack" });
+                try {
+                    _recordComputeTasks([owned.task], encoder);
+                } finally {
+                    dispatches.length = 0;
+                }
+                for (const entry of entries) {
+                    encoder.copyBufferToBuffer(_getStorageBufferHandle(engine, entry.status), 0, entry.staging, 0, 4);
+                }
+                return encoder.finish();
+            },
+        };
+        _deferCommandBuffer(
+            engine,
+            queue.build,
+            () => {
+                for (const { staging, resolve, reject } of entries) {
+                    try {
+                        staging
+                            .mapAsync(GPUMapMode.READ, 0, 4)
+                            .then(() => {
+                                try {
+                                    return new DataView(staging.getMappedRange(0, 4)).getUint32(0, true);
+                                } finally {
+                                    staging.unmap();
+                                }
+                            })
+                            .then(resolve, reject);
+                    } catch (error) {
+                        reject(error instanceof Error ? error : new Error(String(error)));
+                    }
+                }
+                engine._gpuTaskTimerResolve?.(encoder!);
+            },
+            (error) => {
+                if (owned.open === queue) {
+                    owned.open = null;
+                }
+                for (const entry of entries) {
+                    entry.reject(error);
+                }
+            },
+            owner
+        );
+        owned.open = queue;
+    });
 }
 
 /** Drop shaders borrowed by a disposed or lost object. */
@@ -672,6 +867,7 @@ export function releaseResidentComputeText(token: object, keepPendingStatus = fa
     disposeComputeShader(shaders.prefix);
     disposeComputeShader(shaders.countWide);
     disposeComputeShader(shaders.placeWide);
+    disposeComputeShader(shaders.fused);
     if (shaders.stitch) {
         disposeComputeShader(shaders.stitch);
     }
@@ -718,6 +914,7 @@ function ensureShaders(token: object, engine: EngineContext): ResidentShaders {
     const prefix = createPackShader(engine, "prefixRuns");
     const countWide = createPackShader(engine, "countWide");
     const placeWide = createPackShader(engine, "placeWide");
+    const fused = createPackShader(engine, "packFused");
     const created: ResidentShaders = {
         device: engine._device,
         statusBuffers: [],
@@ -729,6 +926,7 @@ function ensureShaders(token: object, engine: EngineContext): ResidentShaders {
         prefix,
         countWide,
         placeWide,
+        fused,
         packParams: createStorageBuffer(engine, 20, { label: "compute-text-resident-pack-params" }),
         packOffsets: createStorageBuffer(engine, 8, { label: "compute-text-pack-offsets", writable: true }),
     };
@@ -799,11 +997,13 @@ function ensureSchedules(
     const previous = shaders.buffers;
     const mode = stage
         ? undefined
-        : capacity >= WIDE_PACK_MIN_CAPACITY && runCount > 0 && runCount <= engine._device.limits.maxComputeWorkgroupsPerDimension
-          ? "wide"
-          : runCount > COUNT_LANES
-            ? "parallel"
-            : "small";
+        : capacity >= WIDE_PACK_MIN_CAPACITY && runCount > 0 && runCount <= FUSED_PACK_MAX_RUNS
+          ? "fused"
+          : capacity >= WIDE_PACK_MIN_CAPACITY && runCount > 0 && runCount <= engine._device.limits.maxComputeWorkgroupsPerDimension
+            ? "wide"
+            : runCount > COUNT_LANES
+              ? "parallel"
+              : "small";
     if (
         !shaders.packTask ||
         shaders.packMode !== mode ||
@@ -841,9 +1041,9 @@ function ensureSchedules(
             }
         } else {
             const resources = { params: shaders.packParams, ...buffers, offsets: shaders.packOffsets };
-            const pack = mode === "wide" ? shaders.placeWide : mode === "parallel" ? shaders.pack : shaders.small;
+            const pack = mode === "fused" ? shaders.fused : mode === "wide" ? shaders.placeWide : mode === "parallel" ? shaders.pack : shaders.small;
             shaders.packDispatch = createComputeDispatch(pack, createComputeBindingSet(pack, resources), { size: { x: 1 } });
-            if (mode !== "small") {
+            if (mode === "wide" || mode === "parallel") {
                 const count = mode === "wide" ? shaders.countWide : shaders.countParallel;
                 shaders.packCountDispatch = createComputeDispatch(count, createComputeBindingSet(count, resources), { size: { x: 1 } });
                 addComputeDispatch(shaders.packTask, shaders.packCountDispatch);

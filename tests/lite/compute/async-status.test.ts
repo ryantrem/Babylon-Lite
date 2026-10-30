@@ -6,7 +6,6 @@ import { clearTextPipelineCache, getOrCreateTextPipeline } from "../../../packag
 import { createGlyphStorage, disposeGlyphStorage } from "../../../packages/babylon-lite/src/text/glyph-storage";
 import type { GlyphStorage } from "../../../packages/babylon-lite/src/text/glyph-storage";
 import { readStorageBuffer, updateStorageBuffer } from "../../../packages/babylon-lite/src/resource/storage-buffer";
-import * as readback from "../../../packages/babylon-lite/src/compute/compute-task-readback";
 import * as shapeBatch from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape-batch";
 import { fixture } from "./fixtures";
 import { assertNativeClean, nativeHarness } from "./native";
@@ -69,17 +68,13 @@ describe("independent asynchronous resident status", () => {
         };
     }
     function inject(data: ComputeTextData, kind: "overflow" | "unsupported" | "missing"): void {
-        const original = readback.submitDeferredComputeTaskResult;
-        // Shaping is batched across objects; skip it so the injected records reach the pack.
-        vi.spyOn(shapeBatch, "addComputeTextShapeSlice").mockImplementationOnce(() => undefined);
-        vi.spyOn(readback, "submitDeferredComputeTaskResult").mockImplementationOnce((tasks, buffer, bytes, consume, staging) => {
+        // Test-only admission bypass: skip the cross-object shape batch and run the real pack kernel against injected shaped records.
+        vi.spyOn(shapeBatch, "addComputeTextShapeSlice").mockImplementationOnce(() => {
             const words = new Int32Array(data._shaped.byteLength / 4);
             words[0] = kind === "unsupported" ? 1 : 0;
             words[1] = kind === "overflow" ? 0x7fffffff : kind === "missing" ? 1 : 0;
             words[4] = data._font.glyphCount;
             updateStorageBuffer(native.engine, data._shaped, words);
-            // Test-only admission bypass: run the real pack kernel against injected shaped records.
-            return original(tasks.slice(-1), buffer, bytes, consume, staging);
         });
     }
     async function drawBytes(data: ComputeTextData) {

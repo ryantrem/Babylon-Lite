@@ -115,6 +115,13 @@ export function _addDeferredOwner(engine: EngineContext, owner: object): void {
     engine._pendingWork?.owners.add(owner);
 }
 
+/** @internal Whether `command` is the most recently deferred command, so work it records lazily still
+ *  follows everything queued before it. */
+export function _isLastDeferred(engine: EngineContext, command: () => GPUCommandBuffer): boolean {
+    const pending = engine._pendingWork?.pending;
+    return !!pending && pending[pending.length - 1]?.command === command;
+}
+
 /** @internal Submit queued work only if some of it may use `owner`'s resources.
  *  Call before writing or replacing those resources; unrelated owners keep accumulating. */
 export function _flushDeferredWorkFor(engine: EngineContext, owner: object): void {
