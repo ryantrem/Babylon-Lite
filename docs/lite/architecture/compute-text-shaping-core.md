@@ -393,17 +393,28 @@ identity and structural executor eligibility are not speed measurements.
    This is one exactly 2,000-scalar Hindi run, padded only at a word boundary.
    It measures the honest whole-run limitation. It is not 100 small blocks or
    claimed Indic segmentation.
-4. Optional CTF-14/C9 cost:
+4. CTF-14/C9 cost:
    `node scripts/measure-compute-text-devanagari.mjs --script=arab`.
    Record absolute Arabic block results with the same bounded protocol.
    Arabic whole-run/RTL behavior is not an independent split proof.
+5. Latin control: rerun steps 2 and 3 with `--script=latn` (Roboto, 67 scalars per
+   block; the single workload uses the same 2,000-scalar padding rule). This gives
+   the same protocol, block shape and frame pacing, so complex-script costs can be
+   expressed relative to Latin on the same device and run session. Interleave the
+   scripts across repeats.
 
-The workload page/runner are new, approval-gated files; existing user profile pages,
-Pad1342, workbooks, Vite configuration and F1 scripts are unchanged. Existing opt-in
-GPU task timing snapshots are reported with support/status/frameIndex and actual
-task names; unsupported/pending/no shape/pack interval is unavailable, never zero.
+The workload page/runner are approval-gated files; existing user profile pages,
+Pad1342, workbooks, Vite configuration and F1 scripts are unchanged. Render-task GPU
+timing is **not** used: it times only frame-graph tasks, while compute text shaping
+and packing are submitted outside any task, so its snapshots stay `pending` and never
+contain a shape/pack interval. Instead the page wraps `queue.submit` during sampled
+frames and reports `submitToGpuDoneMs`, from the first submit after admission to
+`onSubmittedWorkDone` of the last submit before completion, plus `submitsPerFrame`.
+That endpoint is a wall-clock GPU-queue interval, not isolated shader time.
 Synchronous admission time excludes awaited continuations and is not called total
-async self CPU time.
+async self CPU time. If the runner starts its own Vite server, its readiness probe
+uses a bounded fetch timeout; an already running lab server can be passed with
+`--base`.
 
 **Never compute a Hindi B/A ratio against baseline rejection or incorrect shaping:**
 `27c6ecb3` has no Devanagari implementation. Use candidate absolute results until a

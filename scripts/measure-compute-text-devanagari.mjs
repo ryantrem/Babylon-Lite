@@ -4,18 +4,18 @@ import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 const args = process.argv.slice(2);
 for (const arg of args) {
-    if (!/^--script=(?:deva|arab)$|^--workload=(?:blocks|single)$|^--base=https?:\/\//.test(arg)) {
+    if (!/^--script=(?:deva|arab|latn)$|^--workload=(?:blocks|single)$|^--base=https?:\/\//.test(arg)) {
         throw new Error(`Unknown workload argument: ${arg}`);
     }
 }
-const script = args.includes("--script=arab") ? "arab" : "deva";
+const script = args.includes("--script=arab") ? "arab" : args.includes("--script=latn") ? "latn" : "deva";
 const workload = args.includes("--workload=single") ? "single" : "blocks";
 const base = new URL(args.find((arg) => arg.startsWith("--base="))?.slice(7) ?? "http://localhost:5187");
 let server;
 try {
     let ready = false;
     try {
-        ready = (await fetch(base)).ok;
+        ready = (await fetch(base, { signal: AbortSignal.timeout(2000) })).ok;
     } catch {
         /* Server absence is expected; errors after launch are explicit. */
     }
@@ -28,7 +28,7 @@ try {
         for (let i = 0; i < 30; i++) {
             await delay(1000);
             try {
-                ready = (await fetch(base)).ok;
+                ready = (await fetch(base, { signal: AbortSignal.timeout(2000) })).ok;
             } catch {
                 /* Bounded startup polling only. */
             }
