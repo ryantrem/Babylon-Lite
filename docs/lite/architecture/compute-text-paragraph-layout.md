@@ -22,6 +22,15 @@ and immediate successor, retaining true paragraph ends. Unsafe spans extend to a
 proven seam or the true end. A fitting indivisible span has dedicated storage;
 an over-budget span rejects before atlas installation with its exact resource bytes.
 
+Devanagari pages use the same planner. Chunk capacity, closure seeds and the batch
+workspace bound come from the profile (`capacity(scalars)`, `closureSeeds`, the
+kernel variant's per-record bytes), and the per-chunk run validation is the
+profile's `validateRun`. Proven seams are exactly the
+[indic paragraph space proof](#indic-paragraph-space-proof)'s safe spaces, and chunk
+flags come from the same producer as the monolithic path, so they are byte-identical.
+An indivisible span between proven spaces that exceeds the binding limit gives the
+existing binding-limit error.
+
 Persistent shaped records retain the existing header/six-i32 ABI with chunk-local
 clusters. Flags, compact instances, metadata/checkpoints and indirect records
 occupy independently sized windows in lazily allocated arenas (normal target
@@ -259,6 +268,17 @@ CSS-style line boxes).
   these reject synchronously. Hosts split documents into paragraphs.
 - Each paragraph must select an LTR script (existing selection rules). RTL
   paragraphs reject synchronously (bidi is step 7).
+- Latin, Common-only and Devanagari paragraphs are accepted, including Devanagari
+  and Latin/Common paragraphs in the same call. A Devanagari paragraph may contain
+  the Common scalars the indic plan admits (digits, punctuation, danda, NBSP).
+  Latin letters inside a Devanagari paragraph, or Devanagari mixed with another
+  complex script, still reject synchronously (`mixed scripts`). Other complex
+  scripts stay rejected.
+- The indic profile lazy-loads after synchronous validation, the same contract as
+  `updateComputeTextData`. In a first-load call, errors detected after the load
+  trigger (another paragraph's selection error, proof unavailable, limits)
+  surface as a rejected promise with the same wording and order; once the profile
+  is loaded they are synchronous.
 - Whitespace is preserved exactly: no trimming, collapsing or tab expansion.
   This deliberately differs from the CPU `layoutText` path.
 - Empty paragraphs produce one empty line.
@@ -288,6 +308,10 @@ scale the pack uses (`f32(units) * scale`).
    space that cannot be proven independent is not a break opportunity. If the
    analysis is unavailable for a paragraph's plan and the paragraph contains a
    candidate space, the update rejects synchronously; it never guesses.
+   Indic plans use the profile's
+   [paragraph space proof](#indic-paragraph-space-proof) instead of
+   `SegmentAnalysis.safeAfter`, with the same meaning and the same unavailable
+   error.
 3. **Greedy fit.** For each non-space record, if the line already holds at least
    one record and `(end of this record - line start) * scale > maxWidthPx`, the
    line breaks at the most recent break opportunity within the line.
@@ -295,13 +319,58 @@ scale the pack uses (`f32(units) * scale`).
    immediately before the overflowing record if that record begins a new
    cluster (its cluster differs from the previous record's) and its first scalar
    is not a combining mark (`\p{M}`) or U+200D. Otherwise the line keeps
-   overflowing until the next allowed position. Emergency breaks do **not**
+   overflowing until the next allowed position. For indic plans the test is
+   instead "the record's first scalar starts an extended grapheme cluster"
+   (Unicode 16 GCB/InCB rules, including GB9c conjuncts, over the admitted
+   repertoire), so an emergency break never splits a grapheme. Emergency breaks do **not**
    reshape; glyphs keep whole-paragraph context. A line always holds at least
    one record, so an unbreakable cluster wider than the box overflows.
 5. **Alignment.** Line width = end of the last non-space record minus line start
    (0 for empty or all-space lines). Offset is `0`, `(maxWidthPx - width) / 2`
    or `maxWidthPx - width`, clamped to `>= 0` (an overflowing line starts at the
    left edge, as in CSS).
+
+### Indic paragraph space proof
+
+`computeTextParagraphSpaceProof` (in `compute-text-segment.ts`) dispatches indic
+plans to the profile seam, which is implemented in the lazy
+`compute-text-indic-paragraph.ts` (`proveIndicParagraphSpaces`).
+
+**Claim.** For `T = L · U+0020 · R` with `R[0] ≠ U+0020`, a proven space satisfies
+`shape(T) = shape(L·␠) ++ rebase(shape(R))` on glyph id, cluster, advance and
+offset. A line ending at a proven space therefore reproduces whole-paragraph shaping
+exactly. The proof keeps the buffer as `A · σ' · B` after every pipeline step,
+where σ' is in the space glyph's closure B\*.
+
+Static obligations (all must hold, or the proof is `null`):
+
+- **O1** U+0020 is in no vowel-constraint pattern, so no dotted circle is inserted across it.
+- **O2** U+0020 has ccc 0, does not decompose and starts no composition pair.
+- **O3** U+0020 is indic category X and, in the syllable DFA, always forms its own one-scalar syllable.
+- **O4** Reordering, broken-cluster dotted circles, masks and cluster merges are per-syllable (structural, given O3).
+- **O5** No GSUB/GPOS lookup, root or nested, can match across σ': B\* is GDEF class 0, never skipped, and no crossing rule both reaches σ' and matches on both sides.
+- **O6** Attachment propagation and hidden-glyph rewriting stay on one side (follows from O5).
+- **O7** The plan's applied feature tags are a subset of the modeled set; an unmodeled stage makes the proof unavailable.
+
+Dynamic conditions per space (a space that fails one is simply not a break):
+
+- **D1** The scalar after the space starts an extended grapheme cluster.
+- **D2** The words on both sides have at most E = 64 scalars, or reach the true paragraph end.
+- **D3** No crossing rule has every left slot satisfiable by the left word's glyph
+  closure and every right slot by the right word's.
+
+D2 makes the existing windows exact: the decode window is 65 scalars on either
+side, so a word of at most 64 scalars is delimited inside it and a longer word
+reaches the slice edge and is unsafe exactly as on the full text. Incremental flag
+reuse keeps its ±66 radius and, for indic, extends forward to the end of the
+grapheme chain (`chainEnd`). Chunk contexts of 66 cover the space reach, and grapheme
+flags never need context across a seam, because every non-initial chunk starts
+after a proven space (D1).
+
+A `null` proof gives the existing unavailable error for paragraphs with break
+candidates. Run segmentation (`analyzeComputeTextSegmentation`) stays disabled for
+indic plans (CTF-16): the paragraph proof only selects line breaks; whole
+paragraphs are still shaped as one run.
 
 ## Internal Architecture
 
@@ -500,6 +569,9 @@ already extracted outlines remain safely in the append-only CPU catalog.
 | 0   | `SPACE`: scalar is U+0020 (hangs).                    |
 | 1   | `BREAK_AFTER`: rule 2 opportunity after this scalar.  |
 | 2   | `NO_BREAK_BEFORE`: combining mark or U+200D (rule 4). |
+
+For indic plans bit 1 is set only on proven spaces, and bit 2 marks scalars that
+do not start an extended grapheme cluster.
 
 ### Layout input buffer (`u32` words, read-only)
 
@@ -800,6 +872,21 @@ nearest Lite analogue but has different whitespace semantics.
   unsegmented updates, zero-run updates, and lowest-logical-failure selection
   with a permuted physical order.
 
+- **Devanagari (CTF-03).** Unit: `compute-text-indic-paragraph.test.ts` (O1–O7
+  and D1–D3 mutations, slice/full equivalence at word lengths 63–66),
+  `compute-text-paragraph-flags-indic.test.ts` (grapheme bits against
+  `Intl.Segmenter`), `compute-text-paragraphs-indic.test.ts` (lazy load, synchronous
+  mixed-script rejection, seam routing, chain extension),
+  `compute-text-paragraph-chunks-indic.test.ts` (paged capacity, seams, workspace
+  bound), `compute-text-paragraph-references.test.ts` and
+  `compute-text-indic-unicode.test.ts` (grapheme table). Native:
+  `devanagari-paragraphs.test.ts` compares every admitted row of
+  `deva-paragraph-harfbuzz-11.0.1.json` at 12 widths and three alignments with
+  HarfBuzz lines, checks GPU output bit-for-bit against the serial WGSL oracle on
+  reference records, and checks paged and incremental output against monolithic and
+  fresh layouts. Build: the Latin-only paragraph consumer fetches no indic module, and
+  `compute-text-indic-paragraph` is in the lazy indic chunk.
+
 ## File Manifest
 
 - `packages/babylon-lite/src/text/compute-text-paragraphs.ts` (dirty-range admission and flag preparation)
@@ -812,3 +899,7 @@ nearest Lite analogue but has different whitespace semantics.
 - `packages/babylon-lite/src/index.ts` (root re-exports)
 - `tests/lite/unit/compute-text-paragraphs.test.ts`, `tests/lite/compute/paragraph-layout.test.ts`
 - `tests/lite/unit/text-atlas-append.test.ts` (suffix upload ranges and fallback conditions)
+- `packages/babylon-lite/src/text/compute-text-paragraph-flags.ts` (shared monolithic/paged flag producer)
+- `packages/babylon-lite/src/text/compute-text-indic-paragraph.ts` (lazy indic proof, grapheme flags, crossings)
+- `tests/lite/compute/devanagari-paragraphs.test.ts`, `tests/lite/compute/devanagari-paragraph-references.ts`
+- `tests/lite/compute/references/deva-paragraph-harfbuzz-11.0.1.json`, `tests/lite/compute/references/devanagari-paragraph-corpus.mjs`, `scripts/generate-devanagari-paragraph-references.mjs`

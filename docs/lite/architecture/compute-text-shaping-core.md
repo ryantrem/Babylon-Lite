@@ -77,8 +77,8 @@ font calls can be independently concurrent; this is not automatic multi-font
 fallback. A run with mixed strong scripts is rejected. Common-only text keeps the
 existing DFLT contract. Inherited-only and joiner-only strings reject. ZWJ/ZWNJ
 are admitted for Devanagari only; Arabic joining controls remain unsupported.
-The paragraph API still rejects Devanagari explicitly:
-`updateComputeTextParagraphs: paragraph 0 Devanagari paragraph layout is unsupported`.
+The paragraph API accepts Devanagari paragraphs (CTF-03); see
+[paragraph layout](compute-text-paragraph-layout.md#indic-paragraph-space-proof).
 
 ## Internal architecture and CPU/GPU ownership
 
@@ -98,6 +98,15 @@ Arabic loads `compute-text-arabic.ts` / generated joining properties / WGSL frag
 Indic loads `compute-text-indic.ts`, `compute-text-indic-plan.ts`, generated Unicode
 data and its fragments. Importing unused text or rendering features does not
 register profiles or execute module-level cache allocations.
+
+Profile support may also install a `paragraph` seam (`ComputeTextParagraphProfile`
+in `compute-text-plan.ts`): `spaces` (the paragraph space proof), `flags` (paragraph
+flag bytes for a scalar range) and `chainEnd` (how far an edit's flag dependency
+extends forward). Only the indic profile installs it. Its implementation, including
+the shared `collectComputeTextCrossings` helper (B\*, closure and crossing rules
+without the generic span induction), lives in `compute-text-indic-paragraph.ts`,
+which is loaded only in the lazy indic chunk. The base paragraph code keeps only the
+dispatch (`computeTextParagraphSpaceProof`) and the shared flag producer.
 
 ### Program v3
 
@@ -364,7 +373,7 @@ retained with fixtures/generated data. References are evidence, not copied engin
   import boundaries and unchanged non-compute consumers.
 
 Core files: `compute-text-{selection,plan,program,shaper,data,closure,segment}.ts`,
-`compute-text-indic{,-plan,-unicode}.ts`, `compute-text-arabic{,-joining}.ts`,
+`compute-text-indic{,-plan,-unicode,-paragraph}.ts`, `compute-text-arabic{,-joining}.ts`,
 `_gpu/compute-text-{shape,predicates,indic-wgsl,arabic-wgsl,resident}.ts`.
 Reference generators/fixtures and compact test data are test-only. The ignored
 `scripts/shaping-references-ctypes.py` is a required future publication deliverable.
