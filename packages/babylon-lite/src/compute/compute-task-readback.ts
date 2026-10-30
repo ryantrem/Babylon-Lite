@@ -5,16 +5,19 @@ import { _recordComputeTasks } from "./compute-task.js";
 import type { ComputeTask } from "./compute-task.js";
 import { _deferCommandBuffer } from "./deferred-submit.js";
 
-/** @internal Resident status copy; mapping starts only after the queued command buffer submits. */
+/** @internal Resident status copy; mapping starts only after the queued command buffer submits.
+ *  Queue order already follows earlier deferred work, so recording does not flush it; callers flush
+ *  their own pending work before writing inputs. `owner` scopes later `_flushDeferredWorkFor` calls. */
 export function submitDeferredComputeTaskResult<T>(
     tasks: readonly ComputeTask[],
     buffer: StorageBuffer,
     byteLength: number,
     consume: (bytes: ArrayBuffer) => T,
-    staging: GPUBuffer
+    staging: GPUBuffer,
+    owner?: object
 ): Promise<T> {
     const engine = buffer._engine;
-    const encoder = recordResult(tasks, buffer, byteLength, staging);
+    const encoder = recordResult(tasks, buffer, byteLength, staging, false);
     return new Promise<T>((resolve, reject) => {
         _deferCommandBuffer(
             engine,
@@ -36,7 +39,8 @@ export function submitDeferredComputeTaskResult<T>(
                     reject(error instanceof Error ? error : new Error(String(error)));
                 }
             },
-            reject
+            reject,
+            owner
         );
     });
 }
@@ -62,7 +66,7 @@ export function submitComputeTaskResult<T>(
     });
 }
 
-function recordResult(tasks: readonly ComputeTask[], buffer: StorageBuffer, byteLength: number, staging: GPUBuffer): GPUCommandEncoder {
+function recordResult(tasks: readonly ComputeTask[], buffer: StorageBuffer, byteLength: number, staging: GPUBuffer, flushPending = true): GPUCommandEncoder {
     const engine = buffer._engine;
     const source = _getStorageBufferHandle(engine, buffer);
     if (!buffer._writable || engine._currentEncoder || staging.mapState !== "unmapped") {
@@ -74,7 +78,9 @@ function recordResult(tasks: readonly ComputeTask[], buffer: StorageBuffer, byte
     if (tasks.length === 0 || tasks.some((task) => task.engine !== engine)) {
         throw new Error("submitComputeTaskResult requires tasks from the output's engine.");
     }
-    engine._flushPendingWork?.(engine);
+    if (flushPending) {
+        engine._flushPendingWork?.(engine);
+    }
     const encoder = engine._device.createCommandEncoder({ label: "compute-result" });
     _recordComputeTasks(tasks, encoder);
     encoder.copyBufferToBuffer(source, 0, staging, 0, byteLength);

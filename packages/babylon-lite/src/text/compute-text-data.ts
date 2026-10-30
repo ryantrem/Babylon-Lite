@@ -1,5 +1,6 @@
 /** GPU-resident compute text. Shaping and placement stay on the device; JavaScript reads only a status word. */
 
+import { _flushDeferredWorkFor } from "../compute/deferred-submit.js";
 import type { EngineContext } from "../engine/engine.js";
 import { createStorageBuffer, disposeStorageBuffer, updateStorageBuffer } from "../resource/storage-buffer.js";
 import type { StorageBuffer } from "../resource/storage-buffer.js";
@@ -332,7 +333,7 @@ export function submitComputeTextPrepared(
     prepare: (assertLive: () => void) => () => Promise<{ readonly status: Promise<number> }>
 ): Promise<ComputeTextUpdate> {
     assertReady(data);
-    data._engine._flushPendingWork?.(data._engine);
+    _flushDeferredWorkFor(data._engine, data);
     data._revision++;
     const generation = data._generation;
     const device = data._device;

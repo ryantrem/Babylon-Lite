@@ -24,6 +24,7 @@ import { createComputeTextPlan } from "../../../packages/babylon-lite/src/text/c
 import { compileComputeTextProgram } from "../../../packages/babylon-lite/src/text/compute-text-program";
 import { analyzeComputeTextSegmentation } from "../../../packages/babylon-lite/src/text/compute-text-segment";
 import * as shapePreparation from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape";
+import * as shapeBatch from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape-batch";
 import * as residentExecution from "../../../packages/babylon-lite/src/text/_gpu/compute-text-resident";
 import * as dispatchSizing from "../../../packages/babylon-lite/src/compute/compute-dispatch";
 import * as submission from "../../../packages/babylon-lite/src/compute/compute-task-readback";
@@ -673,6 +674,7 @@ describe("native GPU paragraph wrapping and placement", () => {
         const writes = vi.spyOn(native.device.queue, "writeBuffer");
         const textures = vi.spyOn(native.device.queue, "writeTexture");
         const submit = vi.spyOn(submission, "submitDeferredComputeTaskResult");
+        const slices = vi.spyOn(shapeBatch, "addComputeTextShapeSlice");
         paragraphs[57] = paragraphs[57]! + "A"; // Existing closure glyph, nonzero physical runBase.
         await (
             await updateComputeTextParagraphs(data, paragraphs, layout)
@@ -689,7 +691,9 @@ describe("native GPU paragraph wrapping and placement", () => {
         expect(prepare).toHaveBeenCalledTimes(1);
         const tasks = submit.mock.calls.at(-1)![0];
         const dispatches = tasks.flatMap((task) => task.dispatches);
-        expect(dispatches.find((dispatch) => dispatch.shader.name === "compute-text-shape")?._x).toBe(wholeRun ? 1 : prepare.mock.calls[0]![1].length);
+        // Shaping joins a cross-object batch; its slice carries the dirty paragraph's run count.
+        expect(slices).toHaveBeenCalledOnce();
+        expect(slices.mock.calls[0]![2].params[0]).toBe(wholeRun ? 1 : prepare.mock.calls[0]![1].length);
         const stitch = dispatches.find((dispatch) => dispatch.shader.name === "compute-text-stitch" || dispatch.shader.name === "compute-text-stitch-baseline");
         expect(stitch?._x).toBe(wholeRun ? undefined : 1);
         expect(prepare.mock.calls[0]![2]).toBe(wholeRun ? 57 : 0);

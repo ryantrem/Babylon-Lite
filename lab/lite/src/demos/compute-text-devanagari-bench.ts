@@ -322,7 +322,8 @@ export async function runComputeTextWorkload() {
     const script = query.get("script") === "arab" ? "arab" : query.get("script") === "latn" ? "latn" : "deva";
     const arabic = script === "arab",
         latin = script === "latn",
-        single = query.get("workload") === "single";
+        single = query.get("workload") === "single",
+        batched = query.get("workload") === "batched";
     if (arabic && single) {
         throw new Error("The single-run qualification workload is Hindi; Arabic is the optional block mode.");
     }
@@ -362,7 +363,10 @@ export async function runComputeTextWorkload() {
         fontLoadMs = performance.now() - fontStarted;
     const engine = await createEngine(canvas),
         storage = createGlyphStorage();
-    const blocks = Array.from({ length: single ? 1 : 100 }, () => createComputeTextData(engine, font, storage, `bench-${fontFile}`, { fontSizePx: 32 }));
+    // `batched`: the same 100 texts as runs of one text object, shaped by one dispatch with one workgroup per run.
+    const runsPerBlock = batched ? 100 : 1;
+    const textsFor = (frame: number, block: number) => Array.from({ length: runsPerBlock }, (_, run) => variants[(frame + block + run) % 2]!);
+    const blocks = Array.from({ length: single || batched ? 1 : 100 }, () => createComputeTextData(engine, font, storage, `bench-${fontFile}`, { fontSizePx: 32 }));
     const layers = blocks.map((data, i) => createComputeTextLayer(data, { positionPx: { x: 20 + (i % 10) * 155, y: 60 + Math.floor(i / 10) * 70 } }));
     const renderer = createTextRenderer(engine.surfaces[0], { layers });
     registerTextRenderer(renderer);
@@ -386,7 +390,17 @@ export async function runComputeTextWorkload() {
             profiler?.onSubmit(list);
         };
         const firstStarted = performance.now();
-        await Promise.all(blocks.map(async (data) => (await updateComputeTextData(data, [variants[0]!])).completed));
+        await Promise.all(
+            blocks.map(
+                async (data) =>
+                    (
+                        await updateComputeTextData(
+                            data,
+                            Array.from({ length: runsPerBlock }, () => variants[0]!)
+                        )
+                    ).completed
+            )
+        );
         const firstUseMs = performance.now() - firstStarted;
         let resolution = Infinity,
             previous = performance.now();
@@ -414,7 +428,7 @@ export async function runComputeTextWorkload() {
             const began = performance.now();
             const admitted = blocks.map((data, i) => {
                 const start = performance.now();
-                const promise = updateComputeTextData(data, [variants[(frame + i) % 2]!]);
+                const promise = updateComputeTextData(data, textsFor(frame, i));
                 active += performance.now() - start;
                 return promise;
             });
@@ -446,7 +460,7 @@ export async function runComputeTextWorkload() {
         }
         const result = {
             script,
-            workload: single ? "single-2000-scalars" : "100-independent-blocks",
+            workload: single ? "single-2000-scalars" : batched ? "100-runs-one-object" : "100-independent-blocks",
             fontFile,
             fontIdentity,
             blocks: blocks.length,

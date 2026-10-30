@@ -12,6 +12,7 @@ import { clearTextPipelineCache, getTextPipelineCache } from "../../../packages/
 import { getComputeTextParagraphStage } from "../../../packages/babylon-lite/src/text/_gpu/compute-text-paragraph-layout";
 import { readStorageBuffer, updateStorageBuffer } from "../../../packages/babylon-lite/src/resource/storage-buffer";
 import * as readback from "../../../packages/babylon-lite/src/compute/compute-task-readback";
+import * as shapeBatch from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape-batch";
 import { assertNativeClean, nativeHarness } from "./native";
 import type { NativeHarness } from "./native";
 import { fixture } from "./fixtures";
@@ -97,9 +98,11 @@ describe("native resident deferred frame submission", () => {
         expect(maps).not.toHaveBeenCalled();
         renderFrame(native.engine, 0);
         expect(submits).toHaveBeenCalledOnce();
-        expect(submits.mock.calls[0]![0]).toHaveLength(2);
+        // Cross-object shape batch, the object's pack and status copy, then the frame.
+        expect(submits.mock.calls[0]![0]).toHaveLength(3);
         expect(maps.mock.calls.map((call) => call.slice(0, 3))).toEqual([[GPUMapMode.READ, 0, 4]]);
-        expect(timer).toHaveBeenCalledOnce();
+        // Task timers resolve per task encoder: the shape batch and the pack.
+        expect(timer).toHaveBeenCalledTimes(2);
         native.engine._gpuTaskTimerResolve = undefined;
         await update.completed;
         expect(await bytes(owned)).toEqual(expected);
@@ -283,6 +286,8 @@ describe("native resident deferred frame submission", () => {
             updateStorageBuffer(native.engine, owned._shaped, Int32Array.of(status === 1 ? 1 : 0, status === 2 ? 0x7fffffff : 0, 0, 0), stage._words[8]! * stride * 4);
             return original(tasks.slice(-1), buffer, length, consume, staging);
         });
+        // Shaping runs in a cross-object batch; skip it too so the injected header reaches the pack.
+        vi.spyOn(shapeBatch, "addComputeTextShapeSlice").mockImplementation(() => undefined);
         const update = await updateComputeTextParagraphs(owned, ["HH", initial[1]!], layout);
         renderFrame(native.engine, 0);
         await expect(update.completed).rejects.toThrow(status === 1 ? /unsupported lookup/ : /reserved capacity/);
@@ -363,7 +368,8 @@ describe("native resident deferred frame submission", () => {
         const update = await updateComputeTextData(owned, ["HH"]);
         renderFrame(native.engine, 0);
         expect(submits).toHaveBeenCalledOnce();
-        expect(submits.mock.calls[0]![0]).toHaveLength(1);
+        // Cross-object shape batch, then the object's pack and status copy.
+        expect(submits.mock.calls[0]![0]).toHaveLength(2);
         await update.completed;
     });
 

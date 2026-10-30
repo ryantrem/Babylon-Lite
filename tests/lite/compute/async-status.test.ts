@@ -7,6 +7,7 @@ import { createGlyphStorage, disposeGlyphStorage } from "../../../packages/babyl
 import type { GlyphStorage } from "../../../packages/babylon-lite/src/text/glyph-storage";
 import { readStorageBuffer, updateStorageBuffer } from "../../../packages/babylon-lite/src/resource/storage-buffer";
 import * as readback from "../../../packages/babylon-lite/src/compute/compute-task-readback";
+import * as shapeBatch from "../../../packages/babylon-lite/src/text/_gpu/compute-text-shape-batch";
 import { fixture } from "./fixtures";
 import { assertNativeClean, nativeHarness } from "./native";
 import type { NativeHarness } from "./native";
@@ -69,6 +70,8 @@ describe("independent asynchronous resident status", () => {
     }
     function inject(data: ComputeTextData, kind: "overflow" | "unsupported" | "missing"): void {
         const original = readback.submitDeferredComputeTaskResult;
+        // Shaping is batched across objects; skip it so the injected records reach the pack.
+        vi.spyOn(shapeBatch, "addComputeTextShapeSlice").mockImplementationOnce(() => undefined);
         vi.spyOn(readback, "submitDeferredComputeTaskResult").mockImplementationOnce((tasks, buffer, bytes, consume, staging) => {
             const words = new Int32Array(data._shaped.byteLength / 4);
             words[0] = kind === "unsupported" ? 1 : 0;

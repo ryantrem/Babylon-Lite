@@ -6,12 +6,12 @@ import { writeFileSync } from "node:fs";
 import { basename } from "node:path";
 const args = process.argv.slice(2);
 for (const arg of args) {
-    if (!/^--script=(?:deva|arab|latn)$|^--workload=(?:blocks|single|paragraph)$|^--base=https?:\/\/|^--profile=passes$|^--cpu-profile=\/.+\.cpuprofile$/.test(arg)) {
+    if (!/^--script=(?:deva|arab|latn)$|^--workload=(?:blocks|single|paragraph|batched)$|^--base=https?:\/\/|^--profile=passes$|^--cpu-profile=\/.+\.cpuprofile$/.test(arg)) {
         throw new Error(`Unknown workload argument: ${arg}`);
     }
 }
 const script = args.includes("--script=arab") ? "arab" : args.includes("--script=latn") ? "latn" : "deva";
-const workload = args.includes("--workload=single") ? "single" : args.includes("--workload=paragraph") ? "paragraph" : "blocks";
+const workload = args.includes("--workload=single") ? "single" : args.includes("--workload=paragraph") ? "paragraph" : args.includes("--workload=batched") ? "batched" : "blocks";
 const profilePasses = args.includes("--profile=passes");
 const cpuProfilePath = args.find((arg) => arg.startsWith("--cpu-profile="))?.slice(14);
 const base = new URL(args.find((arg) => arg.startsWith("--base="))?.slice(7) ?? "http://localhost:5187");

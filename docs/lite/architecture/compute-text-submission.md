@@ -26,24 +26,35 @@ paragraph resources allocated before executor preparation. See
 
 ## Internal architecture
 
-`compute/deferred-submit.ts` exports the internal function:
+`compute/deferred-submit.ts` exports these internal functions:
 
 ```ts
 _deferCommandBuffer(
     engine: EngineContext,
-    commandBuffer: GPUCommandBuffer,
+    commandBuffer: GPUCommandBuffer | (() => GPUCommandBuffer),
     afterSubmit?: () => void,
-    onAbandon?: (error: Error) => void
+    onAbandon?: (error: Error) => void,
+    owner?: object
 ): void;
+_addDeferredOwner(engine: EngineContext, owner: object): void;
+_flushDeferredWorkFor(engine: EngineContext, owner: object): void;
 ```
 
 State is stored on `EngineContext._pendingWork`: the owning device, ordered
-command-buffer/callback entries, and an optional fallback timer. There are no
+command-buffer/callback entries, the set of owners whose resources pending
+commands use, an `unowned` flag, and an optional fallback timer. There are no
 module-level allocations. A single device-loss listener is installed per state,
 not per edit. The optional `_flushPendingWork(engine, frameCbs?)` hook exists
 only while work is pending. A command-buffer array means fuse with that frame;
 omitting it means submit pending work alone; `null` means abandon without
 submitting.
+
+An entry is either a finished command buffer or a lazy builder. Builders run in
+queue order at flush time, so a command can absorb work admitted after it was
+queued (see [cross-object shape batching](#cross-object-shape-batching)). A
+frame flush runs after the frame encoder is finished, so `flush` parks
+`engine._currentEncoder` while builders run and restores it afterwards; builders
+may then record compute tasks directly.
 
 Before submission, flushing detaches the entries, removes the hook and cancels
 the timer. Submission precedes every callback. Callbacks run in insertion order;
@@ -76,9 +87,15 @@ cannot cancel a replacement device's work.
 
 ## Ordering barriers
 
-Flush pending work before a resident factory/update writes or reallocates GPU
+Flush pending work before a resident update writes or reallocates its GPU
 resources, before direct resident execution prepares/uploads stage resources,
-and before normal text disposal destroys borrowed buffers. A lost text object
+and before normal text disposal destroys borrowed buffers. Resident updates and
+direct execution flush only through `_flushDeferredWorkFor(engine, owner)`: it
+submits the queue when some pending command names that owner, or when any
+pending command is unowned; otherwise other objects' work keeps accumulating.
+Factories, paragraph updates (`updateComputeTextParagraphs`) and paging, disposal
+and other generic sites still flush everything, so only ordinary updates batch
+across objects. A lost text object
 instead abandons pending work. Resident shader release also flushes before
 destroying resources when called independently.
 
@@ -88,17 +105,80 @@ clear/range-update/frame-readback operations flush before fencing, submitting or
 recording dependent operations. They use only the optional engine seam; they do
 not import the deferred implementation.
 
-For N updates before one frame, each subsequent update flushes its predecessor
-before uploading into reused params/runs/paragraph buffers. Only the last update
-fuses with rendering: N queue submits, instead of N compute submits plus a frame
-submit. Updates are never coalesced. CPU paragraph input mutation is safe only
-after this barrier; asynchronous preparation cannot retain mutable GPU inputs
-across another owner's writes without preserving their submission order.
+Repeated updates to one object before a frame flush their predecessor before
+uploading into that object's reused params/runs/paragraph buffers. Updates to
+different objects do not flush each other: their pack/status command buffers and
+one shape batch per plan and kernel all fuse with the next frame in a single
+queue submit. CPU paragraph input mutation is safe only after this barrier;
+asynchronous preparation cannot retain mutable GPU inputs across another
+owner's writes without preserving their submission order.
+
+## Cross-object shape batching
+
+`text/_gpu/compute-text-shape-batch.ts` shapes the runs of many independent text
+objects in one dispatch. Before it, each object recorded its own shape task: one
+dispatch of one workgroup per run, serialized per object. One hundred Hindi
+blocks took 104 submits per frame and left most of the GPU idle.
+
+```ts
+prepareComputeTextShapeBatch(engine, plan, prepared): Promise<ComputeTextShapeBatch>;
+addComputeTextShapeSlice(batch, owner, prepared, shaped: StorageBuffer): void;
+```
+
+Both functions are `@internal`. Resident execution (`executeResidentComputeText`)
+is the only caller and has no other shaping path.
+
+Ownership and caching:
+
+- Per-engine state lives in a lazily created `WeakMap<EngineContext, …>` and
+  holds the device, the shape kernels, and a `WeakMap` from plan to batches.
+- A kernel is keyed by the variant family (`computeTextVariantKey` without the
+  tier) and its workgroup-scratch tier. As before, a retained larger tier serves
+  smaller capacities. Kernel source depends only on the variant and tier; the
+  record stride comes from `params.capacity` at runtime. Kernels are therefore
+  shared across plans and objects.
+- Each plan holds one batch per kernel. The batch owns its params, program,
+  tables, runs, scratch and arena buffers, plus the shape task bound to them.
+  Program and tables are uploaded once at creation. Batch buffers keep their
+  high-water size until the plan, and so its font, is garbage-collected.
+- A device change disposes the old kernels and starts new state.
+
+Admission and recording:
+
+1. `prepareComputeTextShapeBatch` finds or creates the kernel and batch, awaits
+   the kernel pipeline, and reserves buffers for the open slices plus this one.
+   Reservation at admission, with power-of-two growth, keeps steady-state flushes
+   from reallocating. Any storage-buffer create or dispose bumps the engine
+   resource epoch and invalidates every cached bind group.
+2. After the object's pack task is prepared, `addComputeTextShapeSlice` appends
+   its slice (packed runs, output run, capacity, target `shaped` buffer). The
+   first slice of an open batch queues a lazy builder, owned by that object;
+   later slices add their owner with `_addDeferredOwner`. A slice that would
+   exceed the dispatch, binding or buffer limits flushes the queue first and
+   opens a new batch.
+3. The object then defers its pack/status command buffer. No `await` may occur
+   between slice admission and this deferral, or the fallback timer could split
+   them into separate submits.
+4. At flush, the builder closes the batch, packs every slice's run words with
+   rebased origins, uploads params and runs, and dispatches one workgroup per
+   run into the arena at the largest slice capacity. It then copies each run's
+   row prefix to its target at that object's exact stride: one copy per slice
+   when strides match, otherwise one per run. Targets destroyed since admission
+   are skipped.
+
+The builder was queued before every participant's pack buffer, so the batch
+submits before all its readers in the same `queue.submit`. Segmented updates
+target the object's segment output, which the stitch pass in the pack task then
+reads. Status codes, record contents and overflow reporting are unchanged: a
+header count larger than the capacity is preserved, and the pack still reports
+it.
 
 ## Pipeline and shader configuration
 
 No shader, workgroup, binding layout, storage ABI, render bundle, or indirect
-buffer format changes. Each update retains its own unmapped status staging
+buffer format changes. Shape batching reuses the existing shape kernel. Rows
+past a run's record count in `shaped` were already unspecified, and the prefix
+copies keep them so. Each update retains its own unmapped status staging
 allocation until its map completes. A pending staging allocation must not map
 before the command buffer that writes it has been submitted.
 
@@ -109,7 +189,15 @@ before the command buffer that writes it has been submitted.
 - `engine/engine.ts`: internal state types; final frame submit, empty frame and
   stop/idle-wait seams only. No runtime import of the deferred module.
 - `compute/compute-task-readback.ts`: opt-in deferred status helper alongside
-  unchanged immediate submission semantics.
+  unchanged immediate submission semantics. The deferred path does not flush
+  earlier work (queue order already follows it) and passes its owner through.
+- `text/_gpu/compute-text-shape-batch.ts`: cross-object shape batches and shared
+  shape kernels. `tests/lite/compute/shape-batch.test.ts` checks that concurrent
+  mixed-script, mixed-capacity objects produce the same shaped records,
+  instances and indirect bytes as serial updates, that two updates to one object
+  in one task stay ordered, and that disposing an object with a pending slice is
+  safe. Fused-submit, resident and paragraph tests assert the batched dispatch
+  shape and command-buffer counts.
 - Resident data/paragraph/execution lifecycle and compute/storage submit sites:
   ordering barriers.
 - Native GPU tests compare complete instance/indirect/status bytes against
