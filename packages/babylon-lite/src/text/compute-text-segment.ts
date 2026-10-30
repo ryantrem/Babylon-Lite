@@ -18,7 +18,7 @@
 import { ensureComputeFontLayout, mapComputeFontScalars } from "./compute-font.js";
 import type { ComputeTextPlan } from "./compute-text-plan.js";
 import { profileSupport } from "./compute-text-plan.js";
-import type { ComputeGlyphPredicate, ComputeProgramRule, ComputeTextProgram } from "./compute-text-program.js";
+import type { ComputeGlyphPredicate, ComputeProgramLookup, ComputeProgramRule, ComputeTextProgram } from "./compute-text-program.js";
 import {
     compileComputeTextProgram,
     COMPUTE_RULE_MODE_ADJUST,
@@ -44,14 +44,19 @@ export const SAFE_SPACE_FLAG = 3;
 /** @internal Per-group, per-logical-run paragraph flags, indexed like the `groups` passed to `segmentComputeTextRuns`. */
 export type SegmentSafeSpaces = readonly (readonly (Uint8Array | undefined)[] | undefined)[];
 
+/** @internal Paragraph break proof: whether shaping is independent across the U+0020 at `spaceIndex`.
+ * `scalars` are the source scalars aligned with `glyphIds`; profile proofs require them, the generic analysis ignores them. */
+export interface ComputeTextSpaceProof {
+    readonly safeAfter: (glyphIds: Uint32Array, spaceIndex: number, scalars?: Uint32Array) => boolean;
+}
+
 /** @internal */
-export interface SegmentAnalysis {
+export interface SegmentAnalysis extends ComputeTextSpaceProof {
     readonly space: number;
     readonly span: number;
     readonly maxD: number;
     readonly crossings: number;
     readonly markBaseHit: boolean;
-    readonly safeAfter: (glyphIds: Uint32Array, spaceIndex: number) => boolean;
 }
 
 /** @internal */
@@ -127,18 +132,56 @@ export function analyzeComputeTextSegmentation(program: ComputeTextProgram): Seg
     return result;
 }
 
-function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
-    const font = program.plan.font;
-    // Indic normalization expands/contracts nominal slots before the lookup
-    // proof's producer-span induction begins. Space locality alone cannot
-    // certify that induction: retain exact whole-run execution until those
-    // producers are represented. No limit or existing-script proof is relaxed.
-    if (program.plan._profile === "indic") {
-        return null;
-    }
-    if (program.plan.direction !== "ltr") {
-        return null;
-    }
+interface SpaceContext {
+    readonly space: number;
+    readonly cls: (g: number) => number;
+    readonly closure: (g: number, any?: boolean) => Uint32Array;
+    readonly bStar: Uint32Array;
+    readonly skipped: (g: number) => boolean;
+}
+
+interface CrossingSet {
+    readonly crossings: Crossing[];
+    readonly allSlots: Slot[];
+    readonly maxD: number;
+    readonly inB: Uint8Array;
+}
+
+/** @internal One B*-crossing rule window: backtrack (reversed) · input · lookahead. */
+export interface ComputeTextCrossingRule {
+    readonly lookup: ComputeProgramLookup;
+    readonly rule: ComputeProgramRule;
+    readonly window: readonly ComputeGlyphPredicate[];
+    /** Non-final window slot whose predicate meets B*. */
+    readonly slot: number;
+    /** Window slots, including the final one, whose predicates meet B*. */
+    readonly spaceSlots: number;
+}
+
+/** @internal Shared space-crossing facts for profile-specific paragraph proofs. */
+export interface ComputeTextCrossings {
+    readonly space: number;
+    /** Closure of the space glyph under GSUB single/multiple substitutions (ligature-tail free, GDEF class 0). */
+    readonly bStar: Uint32Array;
+    /** Every glyph reachable from `glyph` through any GSUB substitution, multiple or ligature output. */
+    readonly closure: (glyph: number) => Uint32Array;
+    readonly glyphClass: (glyph: number) => number;
+    /** True when a lookup flag of the program can skip `glyph`. */
+    readonly skipped: (glyph: number) => boolean;
+    readonly matches: (predicate: ComputeGlyphPredicate, glyph: number) => boolean;
+    /** True when a B* glyph is covered as a mark, base or ligature by any mark-attachment rule. */
+    readonly attached: boolean;
+    readonly crossings: readonly ComputeTextCrossingRule[];
+}
+
+function outputs(r: ComputeProgramRule): readonly number[] {
+    const action = r.action;
+    return action.kind === "ligature" ? [action.glyph] : action.kind === "multiple" || action.kind === "substitute" ? action.glyphs : [];
+}
+
+/** Rule-mode admission, the GSUB producer index, the space glyph, GDEF classes, memoized `any`-closures and B*.
+ * Null for an unsupported rule mode, a B* that is not class 0 or is a ligature tail, or (`limitExpanding`) a second expanding GSUB lookup. */
+function spaceContext(program: ComputeTextProgram, limitExpanding: boolean): SpaceContext | null {
     const modes = [
         COMPUTE_RULE_MODE_SUBSTITUTE,
         COMPUTE_RULE_MODE_MULTIPLE,
@@ -157,7 +200,7 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     const classProducers: ComputeProgramRule[] = [];
     let expanding = 0;
     for (const lookup of program.lookups) {
-        if (lookup.table === "GSUB" && lookup.rules.some((r) => r.action.kind === "multiple" && r.action.glyphs.length > 1) && ++expanding > 1) {
+        if (limitExpanding && lookup.table === "GSUB" && lookup.rules.some((r) => r.action.kind === "multiple" && r.action.glyphs.length > 1) && ++expanding > 1) {
             return null;
         }
         for (const rule of lookup.rules) {
@@ -202,6 +245,7 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
             }
         }
     }
+    const font = program.plan.font;
     let space: number;
     try {
         space = mapComputeFontScalars(font, Uint32Array.of(0x20), (_i, error) => {
@@ -217,10 +261,6 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     const cls = (g: number) => (gdef ? glyphClass(gdef.glyphClassDef, g) : 0);
     const accepts = (r: ComputeProgramRule, g: number, any: boolean) =>
         r.action.kind === "ligature" ? any && r.input.some((p) => matches(p, g)) : !!r.input[0] && matches(r.input[0], g);
-    const outputs = (r: ComputeProgramRule): readonly number[] => {
-        const action = r.action;
-        return action.kind === "ligature" ? [action.glyph] : action.kind === "multiple" || action.kind === "substitute" ? action.glyphs : [];
-    };
     const closureMemo = new Map<number, Uint32Array>();
     const closure = (g: number, any = true): Uint32Array => {
         const cached = any ? closureMemo.get(g) : undefined;
@@ -258,6 +298,141 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     if ((gdef && bStar.some((g) => cls(g) !== 0)) || ligatures.some((r) => r.input.slice(1).some((p) => bStar.some((g) => matches(p, g))))) {
         return null;
     }
+    const skipped = (g: number) => {
+        if (!gdef) {
+            return false;
+        }
+        const c = cls(g);
+        return program.lookups.some(
+            (l) =>
+                l.lookupFlag !== 0 &&
+                ((l.ignoreBase && c === 1) ||
+                    (l.ignoreLigatures && c === 2) ||
+                    (l.ignoreMarks && c === 3) ||
+                    (l.markAttachmentClass !== 0 && c === 3 && glyphClass(gdef.markAttachClassDef, g) !== l.markAttachmentClass))
+        );
+    };
+    return { space, cls, closure, bStar, skipped };
+}
+
+/** Every non-mark-attachment rule window with a non-final slot that can see B*; null above 4096 crossings.
+ * `rules`, when given, also receives each window's identity and B*-slot count (profile proofs only). */
+function enumerateCrossings(program: ComputeTextProgram, bStar: Uint32Array, rules?: ComputeTextCrossingRule[]): CrossingSet | null {
+    const crossings: Crossing[] = [];
+    const allSlots: Slot[] = [];
+    let maxD = 1;
+    const inB = new Uint8Array(0x10000);
+    for (const g of bStar) {
+        inB[g] = 1;
+    }
+    const seesB = (p: ComputeGlyphPredicate) => {
+        if (p.kind === "glyphs") {
+            const ids = p.ids;
+            if (ids.length === 1) {
+                return inB[ids[0]!] === 1;
+            }
+            for (const g of bStar) {
+                if (ids.includes(g)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return bStar.some((g) => matches(p, g));
+    };
+    for (const lookup of program.lookups) {
+        for (const r of lookup.rules) {
+            if (r.mode === COMPUTE_RULE_MODE_MARK_BASE || r.mode === COMPUTE_RULE_MODE_MARK_MARK || r.mode === COMPUTE_RULE_MODE_MARK_LIGATURE) {
+                continue;
+            }
+            const nb = r.backtrack.length;
+            const ni = r.input.length;
+            const length = nb + ni + r.lookahead.length;
+            let window: ComputeGlyphPredicate[] | null = null;
+            for (let k = 0; k + 1 < length; k++) {
+                // Most predicates cannot see B*: test them before building the reversed window.
+                if (!seesB(k < nb ? r.backtrack[nb - 1 - k]! : k < nb + ni ? r.input[k - nb]! : r.lookahead[k - nb - ni]!)) {
+                    continue;
+                }
+                window ??= [...r.backtrack].reverse().concat(r.input, r.lookahead);
+                const slots: Slot[] = [];
+                for (let j = 0; j < window.length; j++) {
+                    if (j !== k) {
+                        const slot = { side: j < k ? -1 : 1, d: Math.abs(j - k), p: window[j]!, bit: allSlots.length };
+                        slots.push(slot);
+                        allSlots.push(slot);
+                        maxD = Math.max(maxD, slot.d);
+                    }
+                }
+                crossings.push({ slots, anchor: slots[0]! });
+                rules?.push({ lookup, rule: r, window, slot: k, spaceSlots: window.filter(seesB).length });
+                if (crossings.length > 4096) {
+                    return null;
+                }
+            }
+        }
+    }
+    return { crossings, allSlots, maxD, inB };
+}
+
+/** @internal Shared B*, closure and crossing facts without the generic span induction or expanding-lookup bound.
+ * Uncached and profile-agnostic: callers (the lazy Indic paragraph proof) cache per program. */
+export function collectComputeTextCrossings(program: ComputeTextProgram): ComputeTextCrossings | null {
+    const context = spaceContext(program, false);
+    if (!context) {
+        return null;
+    }
+    const rules: ComputeTextCrossingRule[] = [];
+    const set = enumerateCrossings(program, context.bStar, rules);
+    if (!set) {
+        return null;
+    }
+    const { closure, bStar } = context;
+    const inB = set.inB;
+    const attached = program.lookups.some((l) =>
+        l.rules.some(
+            (r) =>
+                (r.mode === COMPUTE_RULE_MODE_MARK_BASE || r.mode === COMPUTE_RULE_MODE_MARK_MARK || r.mode === COMPUTE_RULE_MODE_MARK_LIGATURE) &&
+                ((!!r.input[0] && bStar.some((g) => matches(r.input[0]!, g))) ||
+                    (r.action.kind === "mark-ligature"
+                        ? r.action.ligatures.some((b) => inB[b.glyphId] === 1)
+                        : (r.action.kind === "mark-base" || r.action.kind === "mark-mark") && r.action.bases.some((b) => inB[b.glyphId] === 1)))
+        )
+    );
+    return {
+        space: context.space,
+        bStar,
+        closure: (glyph) => closure(glyph),
+        glyphClass: context.cls,
+        skipped: context.skipped,
+        matches,
+        attached,
+        crossings: rules,
+    };
+}
+
+/** @internal Paragraph space proof: the profile's lazy proof for Indic plans, otherwise the generic analysis. */
+export function computeTextParagraphSpaceProof(program: ComputeTextProgram): ComputeTextSpaceProof | null {
+    return program.plan._profile === "indic" ? (profileSupport("indic")?.paragraph?.spaces(program) ?? null) : analyzeComputeTextSegmentation(program);
+}
+
+function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
+    const font = program.plan.font;
+    // Indic normalization expands/contracts nominal slots before the lookup
+    // proof's producer-span induction begins. Space locality alone cannot
+    // certify that induction: retain exact whole-run execution until those
+    // producers are represented. No limit or existing-script proof is relaxed.
+    if (program.plan._profile === "indic") {
+        return null;
+    }
+    if (program.plan.direction !== "ltr") {
+        return null;
+    }
+    const context = spaceContext(program, true);
+    if (!context) {
+        return null;
+    }
+    const { space, cls, closure, bStar, skipped } = context;
     let spans = new Map<number, number>();
     const sourceSpan = (p: ComputeGlyphPredicate, before: ReadonlyMap<number, number>) => {
         let value = 1;
@@ -366,60 +541,12 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
     if (span > 8) {
         return null;
     }
-    const crossings: Crossing[] = [];
-    const allSlots: Slot[] = [];
-    let maxD = 1;
+    const set = enumerateCrossings(program, bStar);
+    if (!set) {
+        return null;
+    }
+    const { crossings, allSlots, maxD, inB } = set;
     let markBaseHit: boolean | undefined;
-    const inB = new Uint8Array(0x10000);
-    for (const g of bStar) {
-        inB[g] = 1;
-    }
-    const seesB = (p: ComputeGlyphPredicate) => {
-        if (p.kind === "glyphs") {
-            const ids = p.ids;
-            if (ids.length === 1) {
-                return inB[ids[0]!] === 1;
-            }
-            for (const g of bStar) {
-                if (ids.includes(g)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        return bStar.some((g) => matches(p, g));
-    };
-    for (const lookup of program.lookups) {
-        for (const r of lookup.rules) {
-            if (r.mode === COMPUTE_RULE_MODE_MARK_BASE || r.mode === COMPUTE_RULE_MODE_MARK_MARK || r.mode === COMPUTE_RULE_MODE_MARK_LIGATURE) {
-                continue;
-            }
-            const nb = r.backtrack.length;
-            const ni = r.input.length;
-            const length = nb + ni + r.lookahead.length;
-            let window: ComputeGlyphPredicate[] | null = null;
-            for (let k = 0; k + 1 < length; k++) {
-                // Most predicates cannot see B*: test them before building the reversed window.
-                if (!seesB(k < nb ? r.backtrack[nb - 1 - k]! : k < nb + ni ? r.input[k - nb]! : r.lookahead[k - nb - ni]!)) {
-                    continue;
-                }
-                window ??= [...r.backtrack].reverse().concat(r.input, r.lookahead);
-                const slots: Slot[] = [];
-                for (let j = 0; j < window.length; j++) {
-                    if (j !== k) {
-                        const slot = { side: j < k ? -1 : 1, d: Math.abs(j - k), p: window[j]!, bit: allSlots.length };
-                        slots.push(slot);
-                        allSlots.push(slot);
-                        maxD = Math.max(maxD, slot.d);
-                    }
-                }
-                crossings.push({ slots, anchor: slots[0]! });
-                if (crossings.length > 4096) {
-                    return null;
-                }
-            }
-        }
-    }
     // Only boundaries whose first right glyph can become a mark need the mark-base scan.
     const hitsMarkBase = () =>
         (markBaseHit ??= program.lookups.some((l) =>
@@ -534,20 +661,6 @@ function analyze(program: ComputeTextProgram): SegmentAnalysis | null {
             }
         }
     }
-    const skipped = (g: number) => {
-        if (!gdef) {
-            return false;
-        }
-        const c = cls(g);
-        return program.lookups.some(
-            (l) =>
-                l.lookupFlag !== 0 &&
-                ((l.ignoreBase && c === 1) ||
-                    (l.ignoreLigatures && c === 2) ||
-                    (l.ignoreMarks && c === 3) ||
-                    (l.markAttachmentClass !== 0 && c === 3 && glyphClass(gdef.markAttachClassDef, g) !== l.markAttachmentClass))
-        );
-    };
     const info = new Map<number, GlyphInfo>();
     const get = (g: number): GlyphInfo => {
         let value = info.get(g);

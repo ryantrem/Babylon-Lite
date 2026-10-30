@@ -1,8 +1,8 @@
 import type { ComputeTextData, ComputeTextUpdate } from "./compute-text-data.js";
 import { computeTextDrawBufferSizes, submitComputeTextData } from "./compute-text-data.js";
 import { getComputeFontLineMetrics } from "./compute-font.js";
-import { SAFE_SPACE_FLAG, analyzeComputeTextSegmentation } from "./compute-text-segment.js";
-import type { SegmentAnalysis } from "./compute-text-segment.js";
+import { SAFE_SPACE_FLAG, computeTextParagraphSpaceProof } from "./compute-text-segment.js";
+import type { ComputeTextSpaceProof } from "./compute-text-segment.js";
 import { compileComputeTextProgram } from "./compute-text-program.js";
 import {
     checkComputeTextParagraphBufferSize,
@@ -198,12 +198,12 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                     for (let g = 0; g < groups.length; g++) {
                         const group = groups[g]!;
                         const groupFlags: Uint8Array[] = (safeSpaces[g] = []);
-                        let analysis: SegmentAnalysis | null | undefined;
-                        const readAnalysis = () => {
-                            if (analysis === undefined) {
-                                analysis = analyzeComputeTextSegmentation(compileComputeTextProgram(group.plan));
+                        let proof: ComputeTextSpaceProof | null | undefined;
+                        const readProof = () => {
+                            if (proof === undefined) {
+                                proof = computeTextParagraphSpaceProof(compileComputeTextProgram(group.plan));
                             }
-                            return analysis;
+                            return proof;
                         };
                         for (let runIndex = 0; runIndex < group.runs.length; runIndex++) {
                             const run = group.runs[runIndex]!;
@@ -213,7 +213,7 @@ export function updateComputeTextParagraphs(data: ComputeTextData, paragraphs: r
                             const prior = old?.plan === group.plan ? old : undefined;
                             // The selection's unchanged span is proven against the record it reused; it applies only when that record is this entry's.
                             const known = prior?.reuse && prior.reuse === previousRuns?.[group.outputRun + runIndex] ? selection._unchanged : undefined;
-                            const flags = computeTextParagraphFlagsIncremental(prior, run.scalars, run.glyphIds, readAnalysis, undefined, known);
+                            const flags = computeTextParagraphFlagsIncremental(prior, run.scalars, run.glyphIds, readProof, undefined, known);
                             groupFlags[runIndex] = flags;
                             // Runs view a per-submit slab nothing writes after selection; retain it unless it is much larger than this run.
                             const runBytes = run.scalars.byteLength + run.glyphIds.byteLength;
@@ -439,26 +439,26 @@ function invalidateParagraphs(data: ComputeTextData): void {
 }
 
 /** @internal Scalar-indexed bytes, matching shape clusters and paragraph-level stitched clusters. */
-export function computeTextParagraphFlags(scalars: Uint32Array, glyphIds: Uint32Array, analysis: SegmentAnalysis | null): Uint8Array {
+export function computeTextParagraphFlags(scalars: Uint32Array, glyphIds: Uint32Array, proof: ComputeTextSpaceProof | null): Uint8Array {
     const flags = new Uint8Array(scalars.length);
-    const readAnalysis = () => analysis;
+    const readProof = () => proof;
     for (let i = 0; i < scalars.length; i++) {
-        flags[i] = paragraphFlag(scalars, glyphIds, i, readAnalysis);
+        flags[i] = paragraphFlag(scalars, glyphIds, i, readProof);
     }
     return flags;
 }
 
-function paragraphFlag(scalars: Uint32Array, glyphIds: Uint32Array, i: number, readAnalysis: () => SegmentAnalysis | null): number {
+function paragraphFlag(scalars: Uint32Array, glyphIds: Uint32Array, i: number, readProof: () => ComputeTextSpaceProof | null): number {
     const cp = scalars[i]!;
     if (cp !== 0x20) {
         return computeTextNoBreakBefore(cp);
     }
     if (i + 1 < scalars.length && scalars[i + 1] !== 0x20) {
-        const analysis = readAnalysis();
-        if (!analysis) {
+        const proof = readProof();
+        if (!proof) {
             throw new Error("updateComputeTextParagraphs: shaping-safe space analysis is unavailable for a paragraph with break candidates");
         }
-        if (analysis.safeAfter(glyphIds, i)) {
+        if (proof.safeAfter(glyphIds, i, scalars)) {
             return SAFE_SPACE_FLAG;
         }
     }
@@ -467,12 +467,12 @@ function paragraphFlag(scalars: Uint32Array, glyphIds: Uint32Array, i: number, r
 
 /** @internal Reuse only proven unchanged scalar/glyph neighborhoods; callback injection is for exact untimed tests.
  *  `known` lower-bounds the unchanged prefix and suffix lengths, skipping their comparison. */
-export function computeTextParagraphFlagsIncremental(
+export function computeTextParagraphFlagsIncremental<P extends ComputeTextSpaceProof>(
     previous: Pick<ComputeTextParagraphFlagEntry, "scalars" | "glyphIds" | "flags"> | undefined,
     scalars: Uint32Array,
     glyphIds: Uint32Array,
-    readAnalysis: () => SegmentAnalysis | null,
-    evaluate = paragraphFlag,
+    readProof: () => P | null,
+    evaluate: (scalars: Uint32Array, glyphIds: Uint32Array, i: number, readProof: () => P | null) => number = paragraphFlag,
     known?: readonly [prefix: number, suffix: number]
 ): Uint8Array {
     const flags = new Uint8Array(scalars.length);
@@ -513,7 +513,7 @@ export function computeTextParagraphFlagsIncremental(
         flags.set(previous.flags.subarray(hi - scalars.length + oldN), hi);
     }
     for (let i = lo; i < hi; i++) {
-        flags[i] = evaluate(scalars, glyphIds, i, readAnalysis);
+        flags[i] = evaluate(scalars, glyphIds, i, readProof);
     }
     return flags;
 }

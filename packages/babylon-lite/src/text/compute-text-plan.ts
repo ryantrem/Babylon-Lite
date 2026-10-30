@@ -10,6 +10,8 @@
 import type { ComputeFont } from "./compute-font.js";
 import { ensureComputeFontLayout } from "./compute-font.js";
 import type { ComputeTextDirection, ComputeTextRunSelection, ComputeTextScript } from "./compute-text-selection.js";
+import type { ComputeTextProgram } from "./compute-text-program.js";
+import type { ComputeTextSpaceProof } from "./compute-text-segment.js";
 import { directionForComputeTextScript } from "./compute-text-selection.js";
 import type { LayoutTable } from "./font-parser/opentype-layout.js";
 import { findLayoutScript } from "./font-parser/opentype-layout.js";
@@ -56,6 +58,17 @@ export interface ComputeTextProfileSupport {
     readonly buildPlan?: (font: ComputeFont) => ComputeTextPlan;
     readonly validateRun?: (selection: ComputeTextRunSelection) => void;
     readonly available?: boolean;
+    /** Paragraph wrapping support, installed only by profiles that prove their own break spaces. */
+    readonly paragraph?: ComputeTextParagraphProfile;
+}
+
+/** @internal Profile paragraph seam: space proof, paragraph flag bytes and grapheme-chain extent. */
+export interface ComputeTextParagraphProfile {
+    readonly spaces: (program: ComputeTextProgram) => ComputeTextSpaceProof | null;
+    /** Writes paragraph flag bytes for scalars `[lo, hi)` to `out[outOffset + i - lo]`, reading context from the full arrays. */
+    readonly flags: (scalars: Uint32Array, glyphIds: Uint32Array, proof: ComputeTextSpaceProof | null, lo: number, hi: number, out: Uint8Array, outOffset: number) => void;
+    /** Smallest `h >= hi` from which flags no longer depend on scalars before `h - 1`. */
+    readonly chainEnd: (scalars: Uint32Array, hi: number) => number;
 }
 
 /** CPU lookup plan for one font, script, and direction. No GPU resources. */

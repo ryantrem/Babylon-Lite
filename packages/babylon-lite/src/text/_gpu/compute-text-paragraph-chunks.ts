@@ -2,7 +2,8 @@ import type { ComputeTextData, ComputeTextDrawRange } from "../compute-text-data
 import type { ComputeTextChunkPlan, ComputeTextSourceChunk } from "../compute-text-paragraph-chunks.js";
 import { computeTextNoBreakBefore, decodeComputeTextChunk } from "../compute-text-selection.js";
 import { mapComputeFontScalars } from "../compute-font.js";
-import { analyzeComputeTextSegmentation } from "../compute-text-segment.js";
+import { computeTextParagraphSpaceProof } from "../compute-text-segment.js";
+import type { ComputeTextSpaceProof } from "../compute-text-segment.js";
 import { compileComputeTextProgram } from "../compute-text-program.js";
 import type { ComputeTextParagraphLayout } from "../compute-text-paragraphs.js";
 import type { ComputeTextPlan } from "../compute-text-plan.js";
@@ -438,7 +439,7 @@ async function shapeChunks(data: ComputeTextData, state: ComputeTextChunkState, 
     const engine = data._engine;
     let selectedPlan: ComputeTextPlan | undefined;
     let expansion = 1;
-    let analysis: ReturnType<typeof analyzeComputeTextSegmentation> = null;
+    let proof: ComputeTextSpaceProof | null = null;
     for (const paragraph of state.chunks) {
         for (const chunk of paragraph) {
             if (!chunk.dirty) {
@@ -449,7 +450,7 @@ async function shapeChunks(data: ComputeTextData, state: ComputeTextChunkState, 
                 selectedPlan = source.plan;
                 const program = compileComputeTextProgram(selectedPlan);
                 expansion = Math.max(1, program.maxExpansion);
-                analysis = analyzeComputeTextSegmentation(program);
+                proof = computeTextParagraphSpaceProof(program);
             }
             const full = source.before + source.text + source.after;
             const context = decodeComputeTextChunk(full);
@@ -522,17 +523,17 @@ async function shapeChunks(data: ComputeTextData, state: ComputeTextChunkState, 
                 let f = classify(cp);
                 const at = context.offsets[prefixScalars + i]!;
                 if (cp === 32 && at + 1 < full.length && full.charCodeAt(at + 1) !== 32) {
-                    if (!analysis) {
+                    if (!proof) {
                         throw new Error("updateComputeTextParagraphs: independent space analysis is unavailable");
                     }
-                    if (analysis.safeAfter(contextGlyphs, prefixScalars + i)) {
+                    if (proof.safeAfter(contextGlyphs, prefixScalars + i, context.scalars)) {
                         f |= 2;
                     }
                 }
                 flagBytes[i + 1] = f;
             }
             // The successor metadata may request the scalar preceding its first output cluster.
-            if (before === 32 && source.text.length && source.text.charCodeAt(0) !== 32 && analysis?.safeAfter(contextGlyphs, prefixScalars - 1)) {
+            if (before === 32 && source.text.length && source.text.charCodeAt(0) !== 32 && proof?.safeAfter(contextGlyphs, prefixScalars - 1, context.scalars)) {
                 flagBytes[0] |= 2;
             }
             updateStorageBuffer(engine, chunk.flags.buffer, flagBytes, chunk.flags.offset);

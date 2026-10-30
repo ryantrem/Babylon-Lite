@@ -3,6 +3,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
 import { spawnSync } from "node:child_process";
+import { gzipSync } from "node:zlib";
+import { transform } from "esbuild";
 
 import { cleanupTempDirs, ensureLibBuilt, LIB_ENTRY, runRollup as runRollupOutput, runVite as runViteOutput } from "./bundler-harness";
 
@@ -190,6 +192,33 @@ describe("compute text shaper tree shaking", () => {
             expect(result.code).toContain("fma(");
             expect(ids.filter((id) => cpuOnly.test(id))).toEqual([]);
         }
+    });
+
+    it("keeps Indic paragraph code out of a Latin-only paragraph consumer's fetched bytes", async () => {
+        const entrySource =
+            `import { updateComputeTextParagraphs, getComputeFontLineMetrics } from ${JSON.stringify(LIB_ENTRY)};\n` +
+            "console.log(updateComputeTextParagraphs, getComputeFontLineMetrics);\n";
+        const result = await runVite(entrySource);
+        expect(result.errors).toEqual([]);
+        // Fetched bytes: entry chunks plus their static import closure. Chunks reachable only via import() are lazy.
+        const byName = new Map(result.chunks!.map((chunk) => [chunk.fileName!, chunk]));
+        const fetched = new Set<string>();
+        const queue = result.chunks!.filter((chunk) => chunk.isEntry).map((chunk) => chunk.fileName!);
+        while (queue.length) {
+            const name = queue.pop()!;
+            if (!fetched.has(name) && byName.has(name)) {
+                fetched.add(name);
+                queue.push(...byName.get(name)!.imports!);
+            }
+        }
+        const chunks = [...fetched].sort().map((name) => byName.get(name)!);
+        const code = chunks.map((chunk) => chunk.code).join("\n");
+        expect(chunks.flatMap((chunk) => chunk.moduleIds!).filter((id) => /compute-text-indic(-paragraph|-plan|-unicode)?\.js$/.test(id))).toEqual([]);
+        for (const marker of ["fn indicProps(", "proveIndicParagraphSpaces", "INDIC_GRAPHEME"]) {
+            expect(code).not.toContain(marker);
+        }
+        const minified = (await Promise.all(chunks.map(async (chunk) => (await transform(chunk.code, { minify: true, format: "esm", loader: "js" })).code))).join("\n");
+        console.info(`latin-paragraph-consumer bytes raw=${Buffer.byteLength(code)} min=${Buffer.byteLength(minified)} gzip=${gzipSync(minified).length} chunks=${chunks.length}`);
     });
 
     it("does not pull CPU palette synchronization into the resident factories", async () => {

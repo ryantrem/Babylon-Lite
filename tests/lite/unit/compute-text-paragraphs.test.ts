@@ -403,14 +403,14 @@ describe("paragraph scalar flags", () => {
         expect(computeTextParagraphFlags(new Uint32Array(0), new Uint32Array(0), null)).toHaveLength(0);
     });
 
-    it("uses nominal glyph ids and the space index, never the next scalar or shaped glyph", () => {
+    it("passes nominal glyph ids, the space index and the aligned scalars, never shaped glyphs", () => {
         const input = scalars("A  B C");
         const glyphs = Uint32Array.of(10, 99, 99, 11, 99, 12);
         const safe = vi.fn((ids: Uint32Array, i: number) => ids[i] === 99 && i === 2);
         expect([...computeTextParagraphFlags(input, glyphs, analysis(safe))]).toEqual([0, 1, 3, 0, 1, 0]);
         expect(safe.mock.calls).toEqual([
-            [glyphs, 2],
-            [glyphs, 4],
+            [glyphs, 2, input],
+            [glyphs, 4, input],
         ]);
         expect(() => computeTextParagraphFlags(input, glyphs, null)).toThrow(/updateComputeTextParagraphs:.*analysis is unavailable/);
     });
@@ -632,7 +632,7 @@ describe("paragraph synchronous admission", () => {
 
     it("rejects unavailable safety synchronously, but leaves a ready block and its atlas unchanged", () => {
         const test = block();
-        vi.spyOn(segmentation, "analyzeComputeTextSegmentation").mockReturnValue(null);
+        vi.spyOn(segmentation, "computeTextParagraphSpaceProof").mockReturnValue(null);
         try {
             expect(() => updateComputeTextParagraphs(test.data, ["A A"], { maxWidthPx: 100 })).toThrow(/updateComputeTextParagraphs:.*analysis is unavailable/);
             expect(test.storage._curveSets.size).toBe(0);

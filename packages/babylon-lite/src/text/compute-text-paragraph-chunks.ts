@@ -4,8 +4,8 @@ import { decodeComputeTextChunk, prepareComputeTextChunk, scanComputeTextRun } f
 import { createComputeTextPlanForSelection } from "./compute-text-plan.js";
 import type { ComputeTextPlan } from "./compute-text-plan.js";
 import { compileComputeTextProgram } from "./compute-text-program.js";
-import { analyzeComputeTextSegmentation } from "./compute-text-segment.js";
-import type { SegmentAnalysis } from "./compute-text-segment.js";
+import { computeTextParagraphSpaceProof } from "./compute-text-segment.js";
+import type { ComputeTextSpaceProof } from "./compute-text-segment.js";
 import { checkComputeTextShapeBounds, prepareComputeTextShapeWords } from "./_gpu/compute-text-shape.js";
 import { installComputeTextClosure, resetComputeTextDrawBuffers, submitComputeTextPrepared } from "./compute-text-data.js";
 import type { ComputeTextData, ComputeTextUpdate } from "./compute-text-data.js";
@@ -65,8 +65,8 @@ function move(text: string, at: number, distance: number): number {
 }
 
 /** @internal The unchanged proof sees its full 65-neighbor exhaustion window and true ends. */
-export function safeComputeTextSourceBoundary(font: ComputeFont, analysis: SegmentAnalysis | null, text: string, space: number): boolean {
-    if (!analysis || text.charCodeAt(space) !== 32 || space + 1 >= text.length) {
+export function safeComputeTextSourceBoundary(font: ComputeFont, proof: ComputeTextSpaceProof | null, text: string, space: number): boolean {
+    if (!proof || text.charCodeAt(space) !== 32 || space + 1 >= text.length) {
         return false;
     }
     const first = move(text, space, -65);
@@ -75,7 +75,7 @@ export function safeComputeTextSourceBoundary(font: ComputeFont, analysis: Segme
     const glyphs = mapComputeFontScalars(font, decoded.scalars, (_i, error) => {
         throw error;
     });
-    return analysis.safeAfter(glyphs, decoded.offsets.indexOf(space - first));
+    return proof.safeAfter(glyphs, decoded.offsets.indexOf(space - first), decoded.scalars);
 }
 
 /** @internal Source planning and every required resource bound precede closure/atlas installation. */
@@ -138,8 +138,8 @@ export function planComputeTextParagraphChunks(
         if (!Number.isSafeInteger(totalRecords) || totalRecords + paragraphs.length > 0xfffffffe) {
             throw new Error(`updateComputeTextParagraphs: paragraph ${p} conservative record/line counters exceed the chunk addressing ABI`);
         }
-        const analysis = analyzeComputeTextSegmentation(program);
-        if (!analysis && / [^ ]/u.test(text)) {
+        const proof = computeTextParagraphSpaceProof(program);
+        if (!proof && / [^ ]/u.test(text)) {
             throw new Error(`updateComputeTextParagraphs: paragraph ${p} independent space analysis is unavailable`);
         }
         const oldIndex = p < paragraphPrefix ? p : p >= paragraphs.length - paragraphSuffix ? (previous?.paragraphs.length ?? 0) - (paragraphs.length - p) : p;
@@ -210,13 +210,13 @@ export function planComputeTextParagraphChunks(
             }
             if (end < text.length) {
                 let seam = end;
-                while (seam > cursor && !safeComputeTextSourceBoundary(font, analysis, text, seam - 1)) {
+                while (seam > cursor && !safeComputeTextSourceBoundary(font, proof, text, seam - 1)) {
                     seam = move(text, seam, -1);
                 }
                 if (seam === cursor) {
                     seam = end;
                     let spanScalars = decodeComputeTextChunk(text.slice(cursor, end)).scalars.length;
-                    while (seam < text.length && !safeComputeTextSourceBoundary(font, analysis, text, seam - 1)) {
+                    while (seam < text.length && !safeComputeTextSourceBoundary(font, proof, text, seam - 1)) {
                         seam = move(text, seam, 1);
                         spanScalars++;
                         const bytes = spanScalars * expansion * 48 + 144;

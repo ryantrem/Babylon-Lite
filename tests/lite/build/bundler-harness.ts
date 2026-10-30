@@ -175,8 +175,9 @@ export interface BundleResult {
     significantWarnings: string[];
     /** Emitted bundle code (concatenated across chunks), for tree-shaking content assertions. */
     code: string;
-    /** Rollup/Vite chunks, when the selected harness exposes them. */
-    chunks?: { code: string; isEntry: boolean }[];
+    /** Rollup/Vite chunks, when the selected harness exposes them. Vite chunks also carry their
+     *  file name, static/dynamic chunk edges and rendered module ids (fetched-bytes accounting). */
+    chunks?: { code: string; isEntry: boolean; fileName?: string; imports?: string[]; dynamicImports?: string[]; moduleIds?: string[] }[];
     /** Modules with emitted runtime code, not merely parsed inputs. */
     modules?: { id: string; renderedLength: number; renderedExports: string[] }[];
     /** External imports that actually survive emission. */
@@ -373,7 +374,16 @@ export async function runVite(entrySource: string, reachableOnly = false): Promi
                     continue;
                 }
                 result.code += chunk.code + "\n";
-                result.chunks!.push({ code: chunk.code, isEntry: chunk.isEntry });
+                result.chunks!.push({
+                    code: chunk.code,
+                    isEntry: chunk.isEntry,
+                    fileName: chunk.fileName,
+                    imports: [...chunk.imports],
+                    dynamicImports: [...chunk.dynamicImports],
+                    moduleIds: Object.entries(chunk.modules)
+                        .filter(([, module]) => module.renderedLength > 0)
+                        .map(([id]) => id),
+                });
                 result.imports!.push(...chunk.imports);
                 result.modules!.push(
                     ...Object.entries(chunk.modules)
