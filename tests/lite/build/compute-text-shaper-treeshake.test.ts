@@ -104,6 +104,8 @@ describe("compute text shaper tree shaking", () => {
         expect(result.code).toContain("fn indicProps(");
         expect(result.modules!.some((module) => /compute-text-indic\.js$/.test(module.id))).toBe(true);
         expect(result.modules!.some((module) => /compute-text-arabic\.js$/.test(module.id))).toBe(true);
+        const lazy = result.chunks!.filter((chunk) => !chunk.isEntry && chunk.moduleIds!.some((id) => /compute-text-indic\.js$/.test(id)));
+        expect(lazy.flatMap((chunk) => chunk.moduleIds!).some((id) => /compute-text-indic-paragraph\.js$/.test(id))).toBe(true);
     });
     it("production/lab modules never import test references and consumers use only identity-bound compact data", () => {
         const directories = ["packages/babylon-lite/src", "lab/lite/src"];

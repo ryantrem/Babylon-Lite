@@ -43,6 +43,8 @@ export interface ComputeTextProfileData {
     readonly capacity?: (scalars: Uint32Array) => number;
     readonly spaceLocal?: boolean;
     readonly normalizationClosure?: readonly (readonly [number, number])[];
+    /** Applied feature tags, for profile proofs that only model known stage semantics. */
+    readonly features?: readonly string[];
 }
 export interface ComputeTextProfileSupport {
     readonly glyphWords: 8 | 16;

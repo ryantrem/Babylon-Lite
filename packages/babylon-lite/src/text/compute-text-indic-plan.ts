@@ -238,6 +238,7 @@ export function buildIndicPlan(font: ComputeFont): ComputeTextPlan {
         tables: () => packed,
         closureSeeds,
         normalizationClosure,
+        features: [...subFeatures.filter((f) => GSUB.includes(f.tag)), ...posFeatures.filter((f) => GPOS.includes(f.tag))].map((f) => f.tag),
         spaceLocal: (indicProperties(0x20) & 255) === 0 && ((indicProperties(0x20) >>> 16) & 255) === 0 && !INDIC_VOWEL_CONSTRAINTS.includes(0x20),
         capacity: (scalars) => {
             let extra = 0;

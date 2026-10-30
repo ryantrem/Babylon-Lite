@@ -3,6 +3,7 @@
  */
 import { installComputeTextProfile } from "./compute-text-plan.js";
 import { buildIndicPlan, validateIndicRun } from "./compute-text-indic-plan.js";
+import { indicGraphemeChainEnd, indicParagraphFlags, proveIndicParagraphSpaces } from "./compute-text-indic-paragraph.js";
 import { INDIC_KERNEL_FRAGMENTS } from "./_gpu/compute-text-indic-wgsl.js";
 
 export function installComputeTextIndicProfile(): void {
@@ -15,5 +16,6 @@ export function installComputeTextIndicProfile(): void {
         buildPlan: buildIndicPlan,
         validateRun: validateIndicRun,
         available: true,
+        paragraph: { spaces: proveIndicParagraphSpaces, flags: indicParagraphFlags, chainEnd: indicGraphemeChainEnd },
     });
 }

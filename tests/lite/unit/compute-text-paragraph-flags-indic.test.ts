@@ -249,7 +249,10 @@ describe("indic paragraph grapheme flags", () => {
 
     it("has no import side effects", () => {
         const source = readFileSync("packages/babylon-lite/src/text/compute-text-indic-paragraph.ts", "utf8");
-        expect(source).not.toMatch(/new (?:Map|Set|WeakMap)|register\w*\(|Intl\./);
-        expect(source).not.toMatch(/^(?:let|var) /m);
+        expect(source).not.toMatch(/register\w*\(|Intl\./);
+        // Module scope allocates nothing: the only mutable binding is the proof cache, created on first use.
+        expect(source).not.toMatch(/^(?:const|let|var) [^\n]*= new /m);
+        expect(source.match(/^(?:let|var) [^\n]*/gm)).toEqual([expect.stringMatching(/^let proofs: WeakMap<[^=]*;$/)]);
+        expect(source).toContain("(proofs ??= new WeakMap())");
     });
 });
