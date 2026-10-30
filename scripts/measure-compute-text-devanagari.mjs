@@ -1,4 +1,4 @@
-/** USER/CI ONLY. Bounded workload runner. Prints JSON; writes no repository files. */
+/** Timed workload runner; run only with approval. Bounded; Prints JSON; writes no repository files. */
 import { chromium } from "@playwright/test";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";

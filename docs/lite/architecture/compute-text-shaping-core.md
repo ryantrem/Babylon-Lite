@@ -369,10 +369,10 @@ Core files: `compute-text-{selection,plan,program,shaper,data,closure,segment}.t
 Reference generators/fixtures and compact test data are test-only. The ignored
 `scripts/shaping-references-ctypes.py` is a required future publication deliverable.
 
-## Performance validation recipe — user/CI only
+## Performance validation recipe
 
-**No timing/profiling was executed by the implementation agent.** Correctness,
-source identity and structural executor eligibility are not speed measurements.
+Timed runs need explicit approval because they are long. Correctness, source
+identity and structural executor eligibility are not speed measurements.
 
 1. Rerun the existing **unchanged** F1 P20k1p/X50k1p/G1/G2 normal protocol:
    6 ABBA quartets × 4 cohorts = 96 runs, same device/clock/viewport/fonts/endpoints,
@@ -398,7 +398,7 @@ source identity and structural executor eligibility are not speed measurements.
    Record absolute Arabic block results with the same bounded protocol.
    Arabic whole-run/RTL behavior is not an independent split proof.
 
-The workload page/runner are new, user/CI-only files; existing user profile pages,
+The workload page/runner are new, approval-gated files; existing user profile pages,
 Pad1342, workbooks, Vite configuration and F1 scripts are unchanged. Existing opt-in
 GPU task timing snapshots are reported with support/status/frameIndex and actual
 task names; unsupported/pending/no shape/pack interval is unavailable, never zero.

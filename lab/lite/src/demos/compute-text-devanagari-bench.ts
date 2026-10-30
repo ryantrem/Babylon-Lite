@@ -1,4 +1,4 @@
-/** USER/CI ONLY. Agents typecheck this module but do not load/run its workload. */
+/** Timed workload page; run only with approval (see compute-text-shaping-core.md). */
 import {
     createEngine,
     disposeEngine,
