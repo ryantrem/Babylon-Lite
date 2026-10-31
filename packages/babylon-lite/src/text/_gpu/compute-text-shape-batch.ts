@@ -2,7 +2,8 @@
  *  their runs into one open batch, shaped by a single dispatch at deferred-flush time. Each workgroup
  *  shapes one run; serial per-object dispatches would otherwise leave the GPU idle. The kernel reads
  *  its record stride from params, so one batch shapes at its largest slice capacity and copies every
- *  run's row prefix into its object's exact stride. */
+ *  run's row prefix into its object's exact stride. A batch holding one slice shapes directly into
+ *  that object's buffer: the copy adds GPU latency that dominates small single-object updates. */
 
 import type { EngineContext } from "../../engine/engine.js";
 import { createComputeBindingSet } from "../../compute/compute-bindings.js";
@@ -52,6 +53,8 @@ export interface ComputeTextShapeBatch {
     arena: StorageBuffer;
     task: ComputeTask | null;
     dispatch: ComputeDispatch | null;
+    /** Single-slice dispatch bound to that slice's `shaped` buffer; rebuilt when the target changes. */
+    direct: { readonly output: StorageBuffer; readonly task: ComputeTask; readonly dispatch: ComputeDispatch } | null;
     open: ShapeSlice[] | null;
 }
 
@@ -107,6 +110,7 @@ export async function prepareComputeTextShapeBatch(engine: EngineContext, plan: 
             arena: createStorageBuffer(engine, 256, { label: "compute-text-batch-arena", writable: true }),
             task: null,
             dispatch: null,
+            direct: null,
             open: null,
         };
         batches.push(batch);
@@ -196,6 +200,10 @@ function rowBytes(capacity: number): number {
 
 function recordBatch(batch: ComputeTextShapeBatch, slices: readonly ShapeSlice[], encoder: GPUCommandEncoder): void {
     const engine = batch.engine;
+    if (slices.length === 1) {
+        recordDirect(batch, slices[0]!, encoder);
+        return;
+    }
     const { runs: total, capacity } = extent(slices);
     let payload = 0;
     for (const slice of slices) {
@@ -215,11 +223,7 @@ function recordBatch(batch: ComputeTextShapeBatch, slices: readonly ShapeSlice[]
     }
     const sourceRow = rowBytes(capacity);
     reserve(batch, slices, words.byteLength);
-    const params = batch.params.slice();
-    params[0] = total;
-    params[1] = capacity;
-    params[6] = 0;
-    updateStorageBuffer(engine, batch.paramsBuffer, params);
+    writeParams(batch, total, capacity, 0);
     updateStorageBuffer(engine, batch.runs, words);
     setComputeDispatchSize(batch.dispatch!, { x: total });
     _recordComputeTasks([batch.task!], encoder);
@@ -242,7 +246,51 @@ function recordBatch(batch: ComputeTextShapeBatch, slices: readonly ShapeSlice[]
     }
 }
 
-/** Grow buffers for `slices` and rebind on growth. `runBytes` defaults to the slices' packed words. */
+/** Shape one slice at its own stride and output run, without the arena. Its packed run origins are
+ *  already relative to its own payload, so the slice's words upload unchanged. */
+function recordDirect(batch: ComputeTextShapeBatch, slice: ShapeSlice, encoder: GPUCommandEncoder): void {
+    // An owner that released its buffers without flushing has no reader left.
+    if (slice.shaped._destroyed) {
+        return;
+    }
+    const engine = batch.engine;
+    reserve(batch, [slice], slice.runs.byteLength);
+    writeParams(batch, slice.runCount, slice.capacity, slice.outputRun);
+    updateStorageBuffer(engine, batch.runs, slice.runs);
+    let direct = batch.direct;
+    if (direct?.output !== slice.shaped) {
+        direct?.task.dispose();
+        const shader = batch.kernel.shader;
+        const dispatch = createComputeDispatch(
+            shader,
+            createComputeBindingSet(shader, {
+                params: batch.paramsBuffer,
+                program: batch.program,
+                tables: batch.tables,
+                runs: batch.runs,
+                scratch: batch.scratch,
+                output: slice.shaped,
+            }),
+            { size: { x: 1 } }
+        );
+        const task = createComputeTask(engine, "compute-text-shape-batch-direct");
+        addComputeDispatch(task, dispatch);
+        task.record();
+        direct = batch.direct = { output: slice.shaped, task, dispatch };
+    }
+    setComputeDispatchSize(direct.dispatch, { x: slice.runCount });
+    _recordComputeTasks([direct.task], encoder);
+}
+
+function writeParams(batch: ComputeTextShapeBatch, runs: number, capacity: number, outputRun: number): void {
+    const params = batch.params.slice();
+    params[0] = runs;
+    params[1] = capacity;
+    params[6] = outputRun;
+    updateStorageBuffer(batch.engine, batch.paramsBuffer, params);
+}
+
+/** Grow buffers for `slices` and rebind on growth. Only multi-slice batches shape into the arena. `runBytes` defaults to the slices' packed words. */
 function reserve(batch: ComputeTextShapeBatch, slices: readonly ShapeSlice[], runBytes?: number): void {
     const engine = batch.engine;
     const { runs: total, capacity, scratchPerRun } = extent(slices);
@@ -254,7 +302,7 @@ function reserve(batch: ComputeTextShapeBatch, slices: readonly ShapeSlice[], ru
     }
     const runs = grow(engine, batch.runs, runBytes, { label: "compute-text-batch-runs" });
     const scratch = grow(engine, batch.scratch, total * scratchPerRun, { label: "compute-text-batch-scratch", writable: true });
-    const arena = grow(engine, batch.arena, total * rowBytes(capacity), { label: "compute-text-batch-arena", writable: true });
+    const arena = slices.length > 1 ? grow(engine, batch.arena, total * rowBytes(capacity), { label: "compute-text-batch-arena", writable: true }) : batch.arena;
     if (batch.task && runs === batch.runs && scratch === batch.scratch && arena === batch.arena) {
         return;
     }
@@ -262,6 +310,8 @@ function reserve(batch: ComputeTextShapeBatch, slices: readonly ShapeSlice[], ru
     batch.scratch = scratch;
     batch.arena = arena;
     batch.task?.dispose();
+    batch.direct?.task.dispose();
+    batch.direct = null;
     const shader = batch.kernel.shader;
     batch.dispatch = createComputeDispatch(
         shader,

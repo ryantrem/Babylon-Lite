@@ -124,6 +124,27 @@ describe("native cross-object shape batching", () => {
         expect(await snapshot(data, 1)).toEqual(expected);
     });
 
+    it("shapes lone slices directly into each object's buffer as the batched arena path does, across objects and growth", async () => {
+        const steps: [number, string][] = [
+            [0, "Hi"],
+            [1, "office"],
+            [0, "H".repeat(60)],
+            [1, "To A\u0326 ".repeat(12)],
+            [0, "warm"],
+        ];
+        // Concurrent updates share one batch, so the controls shape through the arena and its copies.
+        const controls = steps.map(() => block("Roboto-Regular.ttf"));
+        await Promise.all((await Promise.all(controls.map((data, i) => updateComputeTextData(data, [steps[i]![1]])))).map((update) => update.completed));
+        const expected = await Promise.all(controls.map(async (data) => (await snapshot(data, 1)).shaped));
+        // Reused objects keep larger buffers, so only the single shaped row is comparable.
+        const objects = [block("Roboto-Regular.ttf"), block("Roboto-Regular.ttf")];
+        for (let i = 0; i < steps.length; i++) {
+            const [index, text] = steps[i]!;
+            await settle(objects[index]!, [text]);
+            expect((await snapshot(objects[index]!, 1)).shaped).toEqual(expected[i]);
+        }
+    });
+
     it("completes the other participants when one object is disposed with a pending slice", async () => {
         const control = block("Roboto-Regular.ttf");
         await settle(control, ["office affinity"]);

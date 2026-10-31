@@ -139,6 +139,8 @@ Ownership and caching:
   shared across plans and objects.
 - Each plan holds one batch per kernel. The batch owns its params, program,
   tables, runs, scratch and arena buffers, plus the shape task bound to them.
+  It also caches a single-slice task bound to the last lone slice's target, and
+  rebuilds it when the target or the batch buffers change.
   Program and tables are uploaded once at creation. Batch buffers keep their
   high-water size until the plan, and so its font, is garbage-collected.
 - A device change disposes the old kernels and starts new state.
@@ -148,7 +150,8 @@ Admission and recording:
 1. `prepareComputeTextShapeBatch` finds or creates the kernel and batch, awaits
    the kernel pipeline, and reserves buffers for the open slices plus this one.
    Reservation at admission, with power-of-two growth, keeps steady-state flushes
-   from reallocating. Any storage-buffer create or dispose bumps the engine
+   from reallocating. The arena grows only once a batch holds two slices, so a
+   lone large document doesn't double its shaped memory. Any storage-buffer create or dispose bumps the engine
    resource epoch and invalidates every cached bind group.
 2. After the object's pack task is prepared, `addComputeTextShapeSlice` appends
    its slice (packed runs, output run, capacity, target `shaped` buffer). The
@@ -166,6 +169,10 @@ Admission and recording:
    row prefix to its target at that object's exact stride: one copy per slice
    when strides match, otherwise one per run. Targets destroyed since admission
    are skipped.
+5. A batch holding one slice skips the arena: it dispatches straight into the
+   target at the slice's own capacity and output run, with the slice's run words
+   unchanged. Small single-object edits are GPU-latency-bound, and the copy
+   between the shape and pack passes cost about 25 µs per edit.
 
 The builder was queued before every participant's pack buffer, so the batch
 submits before all its readers in the same `queue.submit`. Segmented updates
@@ -173,6 +180,19 @@ target the object's segment output, which the stitch pass in the pack task then
 reads. Status codes, record contents and overflow reporting are unchanged: a
 header count larger than the capacity is preserved, and the pack still reports
 it.
+
+Single-slice measurements (Apple M2 Max, Chrome, LLX Pad `runPadPipelineCapacity`
+throughput, edits/s, before batching → arena with copy → direct): 8 words
+7,263 → 6,150 → 7,260; 64 words 6,667 → 6,080 → 6,481; 256 words in 4
+paragraphs 5,786 → 5,531 → 5,756; 1,000 words in 8 paragraphs 4,569 → 4,650 →
+4,555; 4,000 words in 1 paragraph 1,630 → 1,828 → 1,629; 4,000 words in 32
+paragraphs about 3,380 → 4,280 → 3,550. The direct path matches pre-batching at
+every size. The arena's large-document gain wasn't batching work: on Metal, any
+blit after the shape pass, even an unrelated 16-byte copy, reproduces both the
+small-document loss and the GPU-saturated gain. With pass timestamps enabled,
+both variants show the same GPU timeline, so the cause is likely Metal
+scheduling between command buffers. See CTF-18 in the
+[follow-ups](compute-text-follow-ups.md).
 
 ## Shared pack pass
 
