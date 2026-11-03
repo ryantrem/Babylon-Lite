@@ -1,4 +1,5 @@
 import type { EngineContext } from "./engine.js";
+import { stopEngine } from "./engine.js";
 import type { DeviceLostRecoveryHandle } from "./device-lost-recovery-types.js";
 import type { Texture2D } from "../texture/texture-2d.js";
 
@@ -26,7 +27,7 @@ export interface DeviceLostRecoveryRegistration {
 export interface DeviceLostRecoveryState {
     /** @internal */
     _forceNextLoss: boolean;
-    /** @internal */
+    /** @internal Required-feature fallback for legacy engines without a DeviceContext. */
     _requiredFeatures: GPUFeatureName[];
     /** @internal */
     _armedDevice: GPUDevice | null;
@@ -62,6 +63,8 @@ export interface DeviceLostRecoveryState {
      *  is dropped by waiting: the run re-arms once it resolves, and `GPUDevice.lost` is a promise,
      *  so a device lost during the window resolves for that later subscriber too. */
     _recovering?: boolean;
+    /** @internal Allows a shared recovery waiting for the first frame to finish after disposal. */
+    _onDisposed?: () => void;
 }
 
 function getState(engine: EngineContext): DeviceLostRecoveryState {
@@ -82,13 +85,22 @@ function getState(engine: EngineContext): DeviceLostRecoveryState {
 export function _enableDeviceLostRecovery(engine: EngineContext, registration: DeviceLostRecoveryRegistration): DeviceLostRecoveryHandle {
     const state = getState(engine);
     const registrations = state._registrations;
-    if (registrations.length === 0) {
+    if (registrations.length === 0 && !engine.device) {
         state._requiredFeatures = Array.from(engine._device.features) as GPUFeatureName[];
     }
     if (!registrations.some((current) => current._kind === registration._kind)) {
         registration._enable?.(engine);
     }
     registrations.push(registration);
+    engine._armDeviceRecovery ??= () => arm(engine, state);
+    engine._disposeDeviceRecovery ??= () => {
+        state._onDisposed?.();
+        const kinds = new Map(state._registrations.splice(0).map((current) => [current._kind, current]));
+        state._armedDevice = null;
+        for (const current of kinds.values()) {
+            current._disable?.(engine);
+        }
+    };
     arm(engine, state);
 
     let disabled = false;
@@ -99,9 +111,10 @@ export function _enableDeviceLostRecovery(engine: EngineContext, registration: D
             }
             disabled = true;
             const index = registrations.indexOf(registration);
-            if (index >= 0) {
-                registrations.splice(index, 1);
+            if (index < 0) {
+                return;
             }
+            registrations.splice(index, 1);
             if (!registrations.some((current) => current._kind === registration._kind)) {
                 registration._disable?.(engine);
             }
@@ -117,15 +130,32 @@ export function markNextDeviceLossForRecovery(engine: EngineContext): boolean {
 
 function arm(engine: EngineContext, state: DeviceLostRecoveryState): void {
     const device = engine._device;
-    if (state._armedDevice === device || state._recovering) {
+    if (engine._disposed || engine._deviceUnavailable || state._armedDevice === device || state._recovering) {
         return;
     }
     state._armedDevice = device;
+    listenForDeviceLoss(device, new WeakRef(engine));
+}
+
+function listenForDeviceLoss(device: GPUDevice, engineRef: WeakRef<EngineContext>): void {
     void device.lost.then((info) => {
-        if (state._registrations.length === 0 || state._armedDevice !== device) {
+        const engine = engineRef.deref();
+        const state = engine?._deviceLostRecovery;
+        if (!engine || !state) {
+            return;
+        }
+        if (engine._disposed || state._registrations.length === 0 || state._armedDevice !== device) {
             return;
         }
         if (info.reason === "destroyed" && !state._forceNextLoss) {
+            return;
+        }
+        if (engine.device) {
+            void import("./device-lost-device-recovery.js")
+                .then(({ recoverDeviceContext }) => recoverDeviceContext(engine.device, device, info, engine))
+                .catch((error: unknown) => {
+                    stopFailedRecovery(engine, state, error);
+                });
             return;
         }
         state._forceNextLoss = false;
@@ -159,4 +189,15 @@ function arm(engine: EngineContext, state: DeviceLostRecoveryState): void {
                 }
             );
     });
+}
+
+function stopFailedRecovery(engine: EngineContext, state: DeviceLostRecoveryState, error: unknown): void {
+    stopEngine(engine);
+    engine._deviceUnavailable = true;
+    if (!state._registrations.some((registration) => registration._onRecoveryFailed)) {
+        console.error("Device-lost recovery failed.", error);
+    }
+    for (const registration of state._registrations) {
+        registration._onRecoveryFailed?.(error);
+    }
 }

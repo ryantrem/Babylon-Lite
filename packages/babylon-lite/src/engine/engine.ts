@@ -13,6 +13,10 @@ import type { DeviceLostRecoveryState } from "./device-lost-recovery.js";
 import type { EngineGpuEvents } from "./engine-gpu-events.js";
 import type { SceneContext } from "../scene/scene-core.js";
 import type { Renderable } from "../render/renderable.js";
+import { _acquireDevice, _getAdapterOptions } from "./device.js";
+import type { DeviceContext } from "./device.js";
+
+export { _getAdapterOptions, _getSupportedDeviceFeatures, _installAdapterOptions } from "./device.js";
 
 // Module-scoped visibility epoch. setSubtreeVisible (scene/visibility.ts,
 // loaded only by KHR_node_visibility / KHR_animation_pointer features) bumps
@@ -34,14 +38,17 @@ export type RenderCanvas = HTMLCanvasElement | OffscreenCanvas;
 /**
  * Handle to the WebGPU engine — pure state, no attached methods.
  *
- * The engine owns the `GPUDevice` and all device-scoped GPU resources (textures, buffers,
- * pipelines, bind groups). It also **is itself a {@link SurfaceContext}** bound to the
+ * The engine uses a {@link DeviceContext} and owns its rendering resources. Explicitly
+ * created devices can be shared by independent engines. It also **is itself a {@link SurfaceContext}** bound to the
  * canvas passed into `createEngine` — the primary surface. Additional canvases can be
  * attached via `createSurface(engine, canvas, ...)`; GPU resources are shared across all
  * surfaces because they're device-scoped, while each surface owns its own swapchain
  * context.
  */
 export interface EngineContext extends SurfaceContext {
+    /** Device used by this engine. Only contexts from `createDevice` may be passed to other
+     *  engines; a device acquired by `createEngine` is private to, and destroyed with, this engine. */
+    readonly device: DeviceContext;
     /** Rendering surfaces attached to this engine, in registration order. Index 0 is
      *  the engine itself (the primary surface) — the tuple type guarantees at least
      *  one entry so `engine.surfaces[0]` is always defined. Use
@@ -113,7 +120,15 @@ export interface EngineContext extends SurfaceContext {
     /** @internal */
     _device: GPUDevice;
     /** @internal Original creation options retained for optional subsystems such as recovery. */
-    _options?: EngineOptions;
+    _options?: EngineOptions | EngineDeviceOptions;
+    /** @internal */
+    _disposed?: boolean;
+    /** @internal Optional recovery re-arming seam. */
+    _armDeviceRecovery?: () => void;
+    /** @internal Cleanup installed only by opt-in device recovery. */
+    _disposeDeviceRecovery?: () => void;
+    /** @internal A shared device was lost and this engine has not successfully recovered. */
+    _deviceUnavailable?: boolean;
     /** @internal Live high-level storage allocations owned by this engine. */
     _storageBuffers?: Set<StorageBuffer>;
     /** @internal Installed lazily by the storage-buffer module. */
@@ -139,6 +154,8 @@ export interface EngineContext extends SurfaceContext {
     _gpuEvents?: EngineGpuEvents;
     /** @internal Seam device-lost recovery calls after replacing `_device`, so listeners follow the new device. */
     _attachGpuEvents?: (engine: EngineContext) => void;
+    /** @internal Cleanup installed only by GPU event subscriptions. */
+    _disposeGpuEvents?: () => void;
     /** @internal */
     _dlr?: DeviceLostRecoveryCapture;
     /** @internal Installed only by recovery opt-in; keeps already-captured dynamic sources current across disable/re-enable. */
@@ -334,6 +351,8 @@ export interface RenderTargetSize {
  * the engine options as a single union: `createEngine(canvas, opts: EngineOptions & SurfaceOptions)`.
  */
 export interface EngineOptions extends SurfaceOptions {
+    /** Use {@link EngineDeviceOptions} when supplying a previously created device. */
+    device?: never;
     /**
      * Extra WebGPU device limits to request when calling `adapter.requestDevice()`.
      * Use to raise per-device caps such as `maxColorAttachmentBytesPerSample` (default 32),
@@ -358,49 +377,15 @@ export interface EngineOptions extends SurfaceOptions {
     useFloatingOrigin?: boolean;
 }
 
-/** Extra `requestAdapter` options contributor, installed only by the WebXR helper
- *  `enableXrCompatibleAdapter()`. Lets an XR app request an `xrCompatible` GPU adapter without
- *  every non-XR engine paying for the option: non-XR bundles never call the setter, the bundler
- *  proves this is always null, and the `_adapterOptionsHook ? … : {}` spread below folds to `{}`,
- *  so `createEngine`'s adapter request stays byte-identical. */
-type DeviceFeaturesResolver = (adapter: GPUAdapter, options?: EngineOptions) => GPUFeatureName[];
-type EngineCreationHook = (() => GPURequestAdapterOptions) & { deviceFeatures?: DeviceFeaturesResolver };
-let _adapterOptionsHook: EngineCreationHook | null = null;
-/** @internal Install extra `requestAdapter` options (called by `enableXrCompatibleAdapter`). */
-export function _installAdapterOptions(hook: () => GPURequestAdapterOptions): void {
-    const deviceFeatures = _adapterOptionsHook?.deviceFeatures;
-    _adapterOptionsHook = hook;
-    _adapterOptionsHook.deviceFeatures = deviceFeatures;
-}
-/** @internal Resolve the extra adapter options (empty when no hook is installed). Used by
- *  device-lost recovery so a recovered adapter keeps any XR-compatibility that was requested. */
-export function _getAdapterOptions(): GPURequestAdapterOptions {
-    return _adapterOptionsHook ? _adapterOptionsHook() : {};
+/** Engine/surface settings for a caller-owned device; acquisition settings belong to createDevice. */
+export interface EngineDeviceOptions extends Omit<EngineOptions, "requiredLimits" | "device"> {
+    device: DeviceContext;
+    requiredLimits?: never;
+    requiredFeatures?: never;
 }
 
-const OPTIONAL_DEVICE_FEATURES = [
-    "float32-filterable",
-    "texture-compression-astc",
-    "texture-compression-bc",
-    "texture-compression-etc2",
-    "texture-compression-unaligned" as GPUFeatureName,
-    "timestamp-query",
-    "primitive-index",
-] as const satisfies readonly GPUFeatureName[];
-
-/** @internal Select every optional feature supported by the adapter. The returned list is
- *  passed unchanged to `requestDevice` and later captured by device-lost recovery. */
-export function _getSupportedDeviceFeatures(adapter: GPUAdapter): GPUFeatureName[] {
-    return OPTIONAL_DEVICE_FEATURES.filter((feature) => adapter.features.has(feature));
-}
-
-/** @internal Install explicit `requestDevice` feature selection. */
-export function _installDeviceFeaturesResolver(resolve: DeviceFeaturesResolver): void {
-    const hook: EngineCreationHook = _adapterOptionsHook ?? (() => ({}));
-    hook.deviceFeatures = resolve;
-    _adapterOptionsHook = hook;
-}
-
+/** Create an engine using a caller-owned device, which may be shared by multiple engines. */
+export function createEngine(canvas: RenderCanvas, options: EngineDeviceOptions): Promise<EngineContext>;
 /** Create the Babylon Lite engine bound to `canvas`. Acquires the GPU adapter + device,
  *  configures the canvas's WebGPU context, and returns an `EngineContext` that *is also*
  *  the primary `SurfaceContext` — i.e. the returned engine is itself the surface for the
@@ -410,19 +395,8 @@ export function _installDeviceFeaturesResolver(resolve: DeviceFeaturesResolver):
  *
  *  Accepts either a DOM canvas (main thread) or an `OffscreenCanvas` (e.g. transferred
  *  to a Web Worker) — see {@link RenderCanvas}. */
-export async function createEngine(canvas: RenderCanvas, options?: EngineOptions): Promise<EngineContext> {
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance", ...(_adapterOptionsHook ? _adapterOptionsHook() : {}) });
-    if (!adapter) {
-        throw new Error("WebGPU adapter not available");
-    }
-    // Optional features are requested opportunistically so their public enable functions can activate
-    // later without recreating the device. Unsupported adapters keep the corresponding feature inactive.
-    const features = _adapterOptionsHook?.deviceFeatures?.(adapter, options) ?? _getSupportedDeviceFeatures(adapter);
-    const device = await adapter.requestDevice({ requiredFeatures: features, requiredLimits: options?.requiredLimits });
-
-    // eslint-disable-next-line no-console
-    console.log(`${_ENGINE_TAG} - WebGPU engine`);
-
+export function createEngine(canvas: RenderCanvas, options?: EngineOptions): Promise<EngineContext>;
+export async function createEngine(canvas: RenderCanvas, options?: EngineOptions | EngineDeviceOptions): Promise<EngineContext> {
     const useHpm = !!options?.useHighPrecisionMatrix;
     const useFO = !!options?.useFloatingOrigin;
     if (useFO && !useHpm) {
@@ -466,6 +440,8 @@ export async function createEngine(canvas: RenderCanvas, options?: EngineOptions
         _applyLightFoOffset = applyLightFoOffset;
     }
 
+    const deviceContext = options?.device ?? (await _acquireDevice({ powerPreference: "high-performance", ..._getAdapterOptions() }, options?.requiredLimits));
+    const device = deviceContext._device;
     // The engine extends `SurfaceContext`, so we need to assemble both the engine-only
     // fields AND the per-canvas surface fields onto a single object. `_buildSurface`
     // reads `engine._device` at call time, so we seed the object with `_device` up front;
@@ -481,6 +457,7 @@ export async function createEngine(canvas: RenderCanvas, options?: EngineOptions
             surfaces, // public readonly view of `_surfaces` (same underlying array)
             _surfaces: surfaces,
             _device: device,
+            device: deviceContext,
             _options: options,
             drawCallCount: 0,
             gpuFrameTimeMs: 0,
@@ -504,6 +481,10 @@ export async function createEngine(canvas: RenderCanvas, options?: EngineOptions
     // `_colorView`/`_width`/`_height` are non-null before the frame graph builds.
     resizeSurface(engine);
     _refreshScRT(engine);
+    // Shared-device validation and registration are installed only by public createDevice.
+    deviceContext._attach?.(engine);
+    // eslint-disable-next-line no-console
+    console.log(`${_ENGINE_TAG} - WebGPU engine`);
 
     return engine;
 }

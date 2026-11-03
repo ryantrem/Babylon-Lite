@@ -55,6 +55,13 @@ function eventsFor(engine: EngineContext): EngineGpuEvents {
         };
         // Device-lost recovery calls this after installing the replacement device.
         engine._attachGpuEvents = attach;
+        const subscriptions = events;
+        engine._disposeGpuEvents = () => {
+            subscriptions._device?.removeEventListener("uncapturederror", subscriptions._onError);
+            subscriptions._device = null;
+            subscriptions._errors.clear();
+            subscriptions._lost.clear();
+        };
     }
     attach(engine);
     return events;

@@ -1,5 +1,6 @@
 import type { EngineContext } from "./engine.js";
-import { _getAdapterOptions, resizeEngine, startEngine, stopEngine } from "./engine.js";
+import { resizeEngine, startEngine, stopEngine } from "./engine.js";
+import { _getAdapterOptions } from "./device.js";
 import { disposeGpuResourceRetirements } from "./gpu-resource-retirement.js";
 import { TU } from "./gpu-flags.js";
 import { _refreshScRT } from "./surface.js";
@@ -25,7 +26,14 @@ function loadCpuStorageRecovery(): Promise<typeof CpuStorageRecovery> {
  * and `material/standard/std-mirrored-support.ts`. It stays out of `index.ts`, so it is not public API.
  * @internal
  */
-export async function runDeviceLostRecovery(engine: EngineContext, state: DeviceLostRecoveryState, registrations: readonly DeviceLostRecoveryRegistration[]): Promise<void> {
+export async function runDeviceLostRecovery(
+    engine: EngineContext,
+    state: DeviceLostRecoveryState,
+    registrations: readonly DeviceLostRecoveryRegistration[],
+    replacementDevice?: GPUDevice,
+    restart = true,
+    deferTextureOwnership?: (settle: () => void) => void
+): Promise<void> {
     const handlers = new Map<string, DeviceLostRecoveryRegistration>();
     for (const registration of registrations) {
         handlers.set(registration._kind, registration);
@@ -45,23 +53,11 @@ export async function runDeviceLostRecovery(engine: EngineContext, state: Device
     // order 0) would otherwise rebuild textures before a later one (scenes, order 100) drained.
     disposeGpuResourceRetirements(engine);
 
-    // Reapply any installed adapter options (e.g. `xrCompatible` from `enableXrCompatibleAdapter`)
-    // so a recovered adapter keeps the XR-compatibility the original engine was created with.
-    const adapter = await runRecoveryStep("requesting a replacement adapter", () => navigator.gpu.requestAdapter({ powerPreference: "high-performance", ..._getAdapterOptions() }));
-    if (!adapter) {
-        throw new Error("WebGPU adapter not available during device recovery");
-    }
-    const missingFeatures = state._requiredFeatures.filter((feature) => !adapter.features.has(feature));
-    if (missingFeatures.length) {
-        throw new Error(`WebGPU device recovery missing required features: ${missingFeatures.join(", ")}`);
-    }
     const storageRecovery = engine._storageBuffers?.size ? await loadCpuStorageRecovery() : undefined;
-    engine._device = await runRecoveryStep("requesting a replacement device", () =>
-        adapter.requestDevice({
-            requiredFeatures: state._requiredFeatures,
-            requiredLimits: { ...engine._options?.requiredLimits, ...storageRecovery?.getCpuStorageRecoveryLimits(engine) },
-        })
-    );
+    engine._device = replacementDevice ?? (await requestRecoveryDevice([engine], state._requiredFeatures));
+    if (engine._disposed) {
+        return;
+    }
     engine._attachGpuEvents?.(engine);
     await runRecoveryStep("rebuilding engine storage buffers", async () => {
         const recovery = storageRecovery ?? (engine._storageBuffers?.size ? await loadCpuStorageRecovery() : undefined);
@@ -87,6 +83,9 @@ export async function runDeviceLostRecovery(engine: EngineContext, state: Device
     const orderedHandlers = Array.from(handlers.values()).sort((a, b) => (a._recoverOrder ?? 0) - (b._recoverOrder ?? 0));
     try {
         for (const handler of orderedHandlers) {
+            if (engine._disposed) {
+                return;
+            }
             await runRecoveryStep(`running "${handler._kind}" recovery`, () => handler._recover(engine));
         }
     } finally {
@@ -97,12 +96,49 @@ export async function runDeviceLostRecovery(engine: EngineContext, state: Device
         // every rebuilt wrapper and the pixels its source kept, and a later recovery on this engine
         // would drain it onto a different device's textures. A throw is not necessarily total
         // either — the new device is live and whichever handlers did run own real references.
-        settleTextureOwnership?.();
+        if (settleTextureOwnership) {
+            if (deferTextureOwnership) {
+                deferTextureOwnership(settleTextureOwnership);
+            } else {
+                settleTextureOwnership();
+            }
+        }
     }
 
-    if (wasRunning) {
+    if (restart && wasRunning && !engine._disposed) {
         await runRecoveryStep("restarting rendering", () => startEngine(engine));
     }
+}
+
+/** @internal Acquire one replacement with enough limits for every recovering engine. */
+export async function requestRecoveryDevice(engines: readonly EngineContext[], fallbackRequiredFeatures?: GPUFeatureName[]): Promise<GPUDevice> {
+    const deviceContext = engines[0]!.device;
+    const requiredFeatures = deviceContext ? (Array.from(deviceContext._device.features) as GPUFeatureName[]) : (fallbackRequiredFeatures ?? []);
+    const adapter = await runRecoveryStep("requesting a replacement adapter", () =>
+        navigator.gpu.requestAdapter(deviceContext?._adapterOptions ?? { powerPreference: "high-performance", ..._getAdapterOptions() })
+    );
+    if (!adapter) {
+        throw new Error("WebGPU adapter not available during device recovery");
+    }
+    const missingFeatures = requiredFeatures.filter((feature) => !adapter.features.has(feature));
+    if (missingFeatures.length) {
+        throw new Error(`WebGPU device recovery missing required features: ${missingFeatures.join(", ")}`);
+    }
+    const requiredLimits: Record<string, GPUSize64 | undefined> = { ...deviceContext?._requiredLimits };
+    for (const engine of engines) {
+        const storageRecovery = engine._storageBuffers?.size ? await loadCpuStorageRecovery() : undefined;
+        const limits = {
+            ...(!deviceContext ? engine._options?.requiredLimits : undefined),
+            ...storageRecovery?.getCpuStorageRecoveryLimits(engine),
+        };
+        for (const [name, value] of Object.entries(limits)) {
+            if (value !== undefined) {
+                const current = requiredLimits[name];
+                requiredLimits[name] = current === undefined ? value : name.startsWith("min") ? Math.min(current, value) : Math.max(current, value);
+            }
+        }
+    }
+    return runRecoveryStep("requesting a replacement device", () => adapter.requestDevice({ requiredFeatures, requiredLimits }));
 }
 
 /**
@@ -179,7 +215,7 @@ async function rebuildRecoverableTextures(engine: EngineContext, state: DeviceLo
  * engine is already stopped, nothing has been rebuilt yet, and the app learns through
  * `onRecoveryFailed` that it has to tear this engine down rather than keep drawing with it.
  */
-function assertEveryActiveContextKindIsRecoverable(engine: EngineContext, handlers: ReadonlyMap<string, DeviceLostRecoveryRegistration>): void {
+export function assertEveryActiveContextKindIsRecoverable(engine: EngineContext, handlers: ReadonlyMap<string, DeviceLostRecoveryRegistration>): void {
     const unrecoverable = new Set<string>();
     for (const surface of engine.surfaces) {
         for (const context of surface._renderingContexts) {

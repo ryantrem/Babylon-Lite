@@ -1,10 +1,15 @@
 import { stopEngine, type EngineContext } from "./engine.js";
 import { disposeGpuResourceRetirements } from "./gpu-resource-retirement.js";
 
-/** Release all engine-owned GPU resources (device + every attached surface's swapchain
- *  context). Rendering contexts own their own GPU resources (frame graphs, render
- *  targets) and dispose them separately. */
+/** Release engine-owned resources and detach from its device. Explicitly created devices
+ *  remain alive; private convenience devices are destroyed after their last engine.
+ *  Rendering contexts own their frame graphs/targets and must be disposed separately. */
 export function disposeEngine(engine: EngineContext): void {
+    if (engine._disposed) {
+        return;
+    }
+    engine._disposed = true;
+    engine._disposeDeviceRecovery?.();
     // Claim retirement batches before stopEngine fences them: the device is destroyed below.
     disposeGpuResourceRetirements(engine);
     stopEngine(engine);
@@ -19,6 +24,11 @@ export function disposeEngine(engine: EngineContext): void {
         engine._disposeManagedResources?.();
         engine._disposeStorageBuffers?.();
     } finally {
-        engine._device.destroy();
+        const detach = engine.device?._detach;
+        if (detach) {
+            detach(engine);
+        } else {
+            engine._device.destroy();
+        }
     }
 }

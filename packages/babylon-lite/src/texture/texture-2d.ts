@@ -173,18 +173,21 @@ export interface Texture2DOptions {
     premultiplyAlpha?: boolean;
 }
 
-// Per-device URL cache: same (url + options) → shared Texture2D promise.
-// WeakMap ensures the cache is GC'd when the device is collected.
-let _tex2dCache: WeakMap<GPUDevice, Map<string, Promise<Texture2D>>> | null = null;
+// Mutable wrappers and recovery sources belong to one engine, even when devices are shared.
+// Entries are dropped when recovery replaces the engine's device.
+interface Texture2DCache {
+    _device: GPUDevice;
+    _entries: Map<string, Promise<Texture2D>>;
+}
+let _tex2dCache: WeakMap<EngineContext, Texture2DCache> | null = null;
 
-/** Clear the texture cache for a device, releasing cache-held refs. */
+/** Clear this engine's texture cache. */
 export function clearTexture2DCache(engine: EngineContext): void {
-    const device = engine._device;
-    _tex2dCache?.delete(device);
+    _tex2dCache?.delete(engine);
 }
 
 /** Load an image from `url` into a GPU `Texture2D`, generating mipmaps by default.
- *  Results are cached per device by URL + options, so repeated calls with the
+ *  Results are cached per engine and device by URL + options, so repeated calls with the
  *  same arguments share one texture promise.
  *  @param engine - Engine context.
  *  @param url - Image URL to fetch and decode.
@@ -195,11 +198,12 @@ export function loadTexture2D(engine: EngineContext, url: string, opts: Texture2
     if (!_tex2dCache) {
         _tex2dCache = new WeakMap();
     }
-    let dc = _tex2dCache.get(device);
-    if (!dc) {
-        dc = new Map();
-        _tex2dCache.set(device, dc);
+    let cache = _tex2dCache.get(engine);
+    if (cache?._device !== device) {
+        cache = { _device: device, _entries: new Map() };
+        _tex2dCache.set(engine, cache);
     }
+    const dc = cache._entries;
 
     const key = `${url}\0${opts.mipMaps ?? true}\0${opts.addressModeU ?? "repeat"}\0${opts.addressModeV ?? "repeat"}\0${opts.minFilter ?? "linear"}\0${opts.magFilter ?? "linear"}\0${opts.invertY ?? true}\0${opts.srgb ?? false}\0${opts.premultiplyAlpha ?? false}`;
     const hit = dc.get(key);

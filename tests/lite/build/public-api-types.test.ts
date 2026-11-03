@@ -35,6 +35,61 @@ beforeAll(() => {
 }, 300_000);
 
 describe("build/index.d.ts", () => {
+    it("exposes device preparation and typed engine ownership without native handles", () => {
+        const probePath = resolve(BUILD_DIR, "device-context.probe.ts");
+        try {
+            writeFileSync(
+                probePath,
+                `import {
+    createDevice, disposeDevice, createEngine, createEngineWithFeatures,
+    type DeviceContext, type DeviceOptions, type EngineContext, type EngineDeviceOptions,
+} from "./index.js";
+declare const canvas: HTMLCanvasElement;
+declare const device: DeviceContext;
+declare const engine: EngineContext;
+declare const nativeDevice: { readonly features: DeviceContext["features"]; readonly limits: DeviceContext["limits"] };
+const options: DeviceOptions = { powerPreference: "low-power", requiredFeatures: ["shader-f16"], requiredLimits: { maxBufferSize: 4096 } };
+const prepared: Promise<DeviceContext> = createDevice(options);
+const attached: Promise<EngineContext> = createEngine(canvas, { device, msaaSamples: 1 });
+const engineOptions: EngineDeviceOptions = { device, useHighPrecisionMatrix: true };
+createEngine(canvas, engineOptions);
+createEngine(canvas);
+createEngine(canvas, { requiredLimits: { maxBufferSize: 4096 } });
+createEngineWithFeatures(canvas, { requiredFeatures: ["shader-f16"] });
+const sameDevice: DeviceContext = engine.device;
+const supported: boolean = device.features.has("shader-f16");
+const maxSize: number = device.limits.maxBufferSize;
+disposeDevice(device);
+// @ts-expect-error Native handles remain internal.
+device._device;
+// @ts-expect-error Engine attachment registry remains internal.
+device._engines;
+// @ts-expect-error Device identity is readonly.
+engine.device = device;
+// @ts-expect-error Device capabilities are readonly.
+device.features = device.features;
+// @ts-expect-error Configure limits before device creation, not when attaching an engine.
+createEngine(canvas, { device, requiredLimits: { maxBufferSize: 4096 } });
+// @ts-expect-error Configure features before device creation.
+createEngine(canvas, { device, requiredFeatures: ["shader-f16"] });
+// @ts-expect-error Legacy explicit-feature factory creates its own device.
+createEngineWithFeatures(canvas, { device, requiredFeatures: ["shader-f16"] });
+// @ts-expect-error Native handles and structural lookalikes are not Lite device contexts.
+createEngine(canvas, { device: nativeDevice });
+void [prepared, attached, sameDevice, supported, maxSize];
+`
+            );
+            const result = spawnSync(
+                NODE,
+                [TSC_JS, "--ignoreConfig", "--noEmit", "--strict", "--target", "es2022", "--module", "esnext", "--moduleResolution", "bundler", "--skipLibCheck", probePath],
+                { cwd: BUILD_DIR, encoding: "utf-8" }
+            );
+            expect(result.status, `${result.stdout ?? ""}${result.stderr ?? ""}`).toBe(0);
+        } finally {
+            rmSync(probePath, { force: true });
+        }
+    });
+
     it("exposes physics discovery and allocation-free inspection without internal state", () => {
         const probePath = resolve(BUILD_DIR, "p10a-physics.probe.ts");
         try {
